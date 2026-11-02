@@ -24,6 +24,31 @@ All notable changes to the Anipull Android app are tracked here.
   Wordmark ("Ani" white + "pull" pink) unchanged. Themed-icon
   phone check still pending.
 
+### 1.9-dev4 (versionCode 14) — test build, not a release
+
+- Welcome scaled up to fill the solid bottom area (JS's dev3
+  screenshot, red circle): Welcome 24sp, logo 60dp / wordmark
+  46sp, tagline 26sp, button 60dp, wider gaps — the block now
+  spans the highlighted area instead of sitting small in it.
+  Notification page scaled to match (bell card 100dp, title
+  34sp, body 20sp, buttons 60dp).
+- Dock rebuilt 1:1 from NuvioMobile's actual FloatingNavigationBar
+  (adaptive, glow off), read in full this time — not just the
+  labelVisibility fragment. The dev3 staging bug was the label:
+  it was dropped below fraction 0.02, so mid-morph the column
+  height jumped a full label height (snap, then rest of morph).
+  Now, like Nuvio's NavItemLabel, label height / spacer / alpha
+  all scale with the fraction, dropped only at exactly 0.
+  Pill width now comes from Nuvio's padding formula (58dp
+  collapsed → 28dp expanded) and height 48dp + 16dp*fraction,
+  one continuous tween — no separate width/height stages.
+  Selected highlight is now ONE travelling pill (spring X,
+  jelly-style settle) instead of an instant per-item background
+  swap, and the morph state is global: tapping a tab while mini
+  keeps it mini on the new tab, with the pill sliding there.
+  Scroll state is Nuvio's single-accumulator connection, 60px
+  threshold, direction-change reset.
+
 ### 1.9-dev3 (versionCode 13) — test build, not a release
 
 - Dock jerk fix (JS feedback on dev2): dev2 computed scroll as
