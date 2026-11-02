@@ -17,6 +17,8 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -430,6 +432,31 @@ fun SkeletonRow() {
 }
 
 @Composable
+fun SearchSkeletonGrid() {
+    // 1.9-dev4.7: search results are a 2-column grid, so the search
+    // skeleton must be 2 per row too — the old SkeletonRow (3 across)
+    // made the real results jump sideways when they landed.
+    // Card height matches PosterCard: width * 3 / 2, plus title lines.
+    androidx.compose.foundation.layout.BoxWithConstraints {
+        val cardW = (maxWidth - 12.dp) / 2
+        val cardH = cardW * 3 / 2
+        Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            repeat(3) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    repeat(2) {
+                        Column {
+                            Box(Modifier.width(cardW).height(cardH).clip(RoundedCornerShape(16.dp)).background(Card))
+                            Spacer(Modifier.height(8.dp))
+                            Box(Modifier.width(cardW * 0.8f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -567,6 +594,7 @@ fun HeaderSection(
     isSearching: Boolean,
     onPillPositioned: (androidx.compose.ui.layout.LayoutCoordinates) -> Unit = {},
     particlesOn: Boolean = true,
+    onCloseSearch: () -> Unit = {},
 ) {
     // No "Trail mode" text anywhere: the trail is an easter egg now.
     // Hold anywhere in the header, drag, lift to fade — nothing announces it.
@@ -729,6 +757,31 @@ fun HeaderSection(
             }
         }
         Column {
+            // 1.9-dev4.7 search animation, Nuvio-style: ONE animation,
+            // not stages. The whole hero block (logo, DOWNLOAD-ONLY
+            // pill, Find it / Keep it offline, subheading) lives in a
+            // single AnimatedVisibility with fade + expand/shrink, so
+            // it collapses smoothly and the search pill rises to the
+            // top in the same 320ms FastOutSlowIn motion — no staged
+            // snap like the old dock bug. When it is collapsed, a
+            // 28dp tappable strip sits above the pill: tap it and the
+            // search UI closes, same as the device back button.
+            if (isSearching) {
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(28.dp)
+                        .clickable {
+                            onCloseSearch()
+                            keyboard?.hide()
+                            focusManager.clearFocus()
+                        }
+                )
+            }
+            AnimatedVisibility(
+                visible = !isSearching,
+                enter = fadeIn(tween(320, easing = FastOutSlowInEasing)) + expandVertically(tween(320, easing = FastOutSlowInEasing)),
+                exit = fadeOut(tween(320, easing = FastOutSlowInEasing)) + shrinkVertically(tween(320, easing = FastOutSlowInEasing)),
+            ) {
+            Column {
             // 1.9-dev4.5: header lives here, at the very top of the
             // hero, so the gap JS circled (36dp list spacing + the
             // old 10dp + 24dp hero top spacers = ~70dp of dead space
@@ -779,6 +832,8 @@ fun HeaderSection(
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(Modifier.height(22.dp))
+            }
+            }
             // Search pill, website size: 48dp tall, full width (no trail
             // button beside it any more). BasicTextField, not Material
             // TextField, so the pill is not inflated to 56dp+ by the
@@ -882,8 +937,8 @@ fun HeaderSection(
             }
             AnimatedVisibility(
                 visible = !isSearching,
-                enter = fadeIn(),
-                exit = fadeOut() + slideOutVertically { -it / 2 },
+                enter = fadeIn(tween(320, easing = FastOutSlowInEasing)) + expandVertically(tween(320, easing = FastOutSlowInEasing)),
+                exit = fadeOut(tween(320, easing = FastOutSlowInEasing)) + shrinkVertically(tween(320, easing = FastOutSlowInEasing)),
             ) {
                 Column {
                     Spacer(Modifier.height(13.dp))
@@ -954,6 +1009,7 @@ fun AnipullAppInner() {
     val dockFractionState = remember { mutableStateOf(1f) }
     var dockAccumulatedDelta by remember { mutableStateOf(0f) }
     var isSearchFocused by remember { mutableStateOf(false) }
+    var lastLiveQuery by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val appFocusManager = LocalFocusManager.current
@@ -966,14 +1022,27 @@ fun AnipullAppInner() {
         Toast.makeText(context, "Not wired yet — downloads come after the AniLab stage", Toast.LENGTH_SHORT).show()
     }
 
-    // System back: sheet first, then notifications, then detail -> home,
-    // never straight out of the app from a detail page.
-    BackHandler(enabled = screen != null || sheetFor != null || showSettings || showDownloads || showLibrary) {
+    // System back: sheet first, then settings/downloads/library,
+    // then DETAIL -> home, then SEARCH -> home (1.9-dev4.7: search
+    // is a mode, not an exit — but detail outranks it, or back from
+    // a detail opened via search would clear the invisible search
+    // instead of leaving the detail). Never straight out of the app.
+    fun closeSearch() {
+        query = ""
+        liveResults = null
+        searching = false
+        isChipQuery = false
+        homeKeyboard?.hide()
+        appFocusManager.clearFocus()
+        scope.launch { listState.scrollToItem(0) }
+    }
+    BackHandler(enabled = screen != null || sheetFor != null || showSettings || showDownloads || showLibrary || isSearchFocused || query.isNotBlank()) {
         if (sheetFor != null) sheetFor = null
         else if (showSettings) showSettings = false
         else if (showDownloads) showDownloads = false
         else if (showLibrary) showLibrary = false
-        else screen = null
+        else if (screen != null) screen = null
+        else if (isSearchFocused || query.isNotBlank()) closeSearch()
     }
 
     // 1.9-dev4 dock scroll, copied from Nuvio's
@@ -1033,19 +1102,22 @@ fun AnipullAppInner() {
     // the fetch actually fails and there is no cache — never as a
     // loading placeholder. 1.9-dev2: keyed on fetchAttempt so the
     // Retry button on a failed load actually re-runs this.
-    // 1.9-dev4.6 loading rule: the loading screen ends when the
-    // fetch finishes AND at least 1500ms have passed since launch,
-    // so the animation (name at 450ms, logo rise 800ms) always
-    // plays out fully instead of flashing by on a fast network.
-    // A separate 5s timeout below ends it for cached users if the
-    // network is slow — a cached home must never be trapped behind
-    // a loading screen by a hanging fetch.
-    LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(5000)
-        if (loadHomeCache(context) != null) showLoading = false
+    // 1.9-dev4.7 loading rule (JS, 2026-11-03): HARD 1.5s cap.
+    // The old dev4.6 rule was max(fetch time, 1500ms) — a slow
+    // AniLab fetch (51 calls, slowest section wins) stretched it to
+    // 4.5-5s. Now the loading screen ends at 1500ms NO MATTER WHAT,
+    // and the fetch keeps running in the background: cached rows show
+    // instantly, unloaded rows show skeletons, fresh sections swap in
+    // progressively as they land. First launch with no cache shows
+    // skeletons, never demo titles. The timer only starts once
+    // onboarding is done, so first-boot users still see the full
+    // animation instead of it being eaten by onboarding time.
+    LaunchedEffect(onboardingDone) {
+        if (!onboardingDone) return@LaunchedEffect
+        kotlinx.coroutines.delay(1500)
+        showLoading = false
     }
     LaunchedEffect(fetchAttempt) {
-        val fetchStart = System.currentTimeMillis()
         homeFailed = false
         val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched")
         val cached = loadHomeCache(context)
@@ -1055,24 +1127,25 @@ fun AnipullAppInner() {
             liveSections = localSections.sortedBy { wanted.indexOf(it.name) }
             featured = localFeatured
         }
-        fetchHomeProgressive(
-            onSection = { _, sec ->
-                val existing = localSections.indexOfFirst { it.name == sec.name }
-                if (existing >= 0) localSections[existing] = sec else localSections += sec
-                liveSections = localSections.sortedBy { wanted.indexOf(it.name) }
-            },
-            onFeatured = { localFeatured = it; featured = it },
-        )
-        val ordered = localSections.sortedBy { wanted.indexOf(it.name) }
-        if (ordered.isEmpty() && localFeatured == null) {
-            homeFailed = true
-        } else {
-            saveHomeCache(context, HomeData(ordered, localFeatured))
+        // Child of this effect (not scope.launch): it keeps running
+        // after this block returns, but a Retry cancels the old fetch
+        // instead of letting two fetches race on liveSections.
+        launch {
+            fetchHomeProgressive(
+                onSection = { _, sec ->
+                    val existing = localSections.indexOfFirst { it.name == sec.name }
+                    if (existing >= 0) localSections[existing] = sec else localSections += sec
+                    liveSections = localSections.sortedBy { wanted.indexOf(it.name) }
+                },
+                onFeatured = { localFeatured = it; featured = it },
+            )
+            val ordered = localSections.sortedBy { wanted.indexOf(it.name) }
+            if (ordered.isEmpty() && localFeatured == null) {
+                homeFailed = true
+            } else {
+                saveHomeCache(context, HomeData(ordered, localFeatured))
+            }
         }
-        // Minimum display time: full animation, never a flash.
-        val elapsed = System.currentTimeMillis() - fetchStart
-        if (elapsed < 1500) kotlinx.coroutines.delay(1500 - elapsed)
-        showLoading = false
     }
 
     fun submitSearch(q: String) {
@@ -1107,18 +1180,22 @@ fun AnipullAppInner() {
         }
     }
 
-    // Live search as you type, debounced 600ms: AniLab itself DOES have
-    // Kimi ni Todoke, Neon Genesis, Blue Spring Ride and Cyberpunk
-    // (verified live 2026-11-02) — the app just never asked it until the
-    // Search button was pressed. Now typing asks AniLab automatically.
+    // Live search as you type — rate-limited, not per keystroke:
+    // 500ms debounce (LaunchedEffect restarts + cancels the in-flight
+    // wait on every keystroke, so a fast typer fires ONE call, not
+    // one per letter), distinct-query guard (same query never
+    // re-fires), and the network call itself is cancelled when the
+    // query changes again. No searching=true on keystroke any more:
+    // that flashed the skeleton on every letter. The skeleton only
+    // shows when there are no results yet at all.
     LaunchedEffect(query, isChipQuery) {
         if (query.isBlank() || isChipQuery) return@LaunchedEffect
-        kotlinx.coroutines.delay(600)
-        // Query may have changed during the delay; LaunchedEffect restarts
-        // on query change, so this only runs for the latest query.
+        if (query == lastLiveQuery) return@LaunchedEffect
+        kotlinx.coroutines.delay(500)
         searching = true
         liveSearchDone = false
         val results = searchAniLab(query)
+        lastLiveQuery = query
         liveResults = if (results.isNotEmpty()) results else null
         liveSearchDone = true
         searching = false
@@ -1202,7 +1279,7 @@ fun AnipullAppInner() {
             item {
                 HeaderSection(
                     query = query,
-                    onQueryChange = { query = it; isChipQuery = false; if (it.isBlank()) { liveResults = null; searching = false } else { searching = true } },
+                    onQueryChange = { query = it; isChipQuery = false; if (it.isBlank()) { liveResults = null; searching = false } },
                     onSearchSubmit = { submitSearch(query) },
                     onChip = { chip ->
                         query = chip
@@ -1216,6 +1293,7 @@ fun AnipullAppInner() {
                     onFocusChange = { isSearchFocused = it },
                     isSearching = isSearchFocused || query.isNotBlank(),
                     onPillPositioned = { pillCoords = it },
+                    onCloseSearch = { closeSearch() },
                     particlesOn = LocalContext.current.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("particles", true),
                 )
             }
@@ -1237,8 +1315,8 @@ fun AnipullAppInner() {
                     }
                     if (results.isEmpty() && !searching) {
                         Text("Nothing found — try another title.", color = Muted, fontSize = 13.sp)
-                    } else if (searching) {
-                        SkeletonRow()
+                    } else if (searching && results.isEmpty()) {
+                        SearchSkeletonGrid()
                     } else {
                         // HTML results grid: two columns on a phone.
                         // Cards fill the full content width — the old fixed
@@ -1260,7 +1338,35 @@ fun AnipullAppInner() {
                     }
                 }
             } else if (isSearchFocused) {
-                item { Text("Type to search AniLab…", color = Faint, fontSize = 13.sp) }
+                // 1.9-dev4.7: focused with an empty query is not an
+                // empty screen any more — show cached posters below
+                // the pill instantly (they are already on the phone
+                // from the home cache + poster disk cache, so this
+                // costs zero network and zero wait). No footer here.
+                item {
+                    val cachedTitles = (liveSections?.flatMap { it.titles } ?: emptyList()).distinctBy { it.id }
+                    if (cachedTitles.isEmpty()) {
+                        Text("Type to search AniLab…", color = Faint, fontSize = 13.sp)
+                        Spacer(Modifier.height(14.dp))
+                        SearchSkeletonGrid()
+                    } else {
+                        Text("From your catalog", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(10.dp))
+                        androidx.compose.foundation.layout.BoxWithConstraints {
+                            val cardW = (maxWidth - 12.dp) / 2
+                            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                                cachedTitles.take(12).chunked(2).forEach { pair ->
+                                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        pair.forEach { t ->
+                                            PosterCard(t, onClick = { screen = t }, notWired = notWired, cardWidth = cardW)
+                                        }
+                                        if (pair.size == 1) Spacer(Modifier.width(cardW))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
@@ -1321,7 +1427,12 @@ fun AnipullAppInner() {
                     item { PosterRow(section.name, emptyList(), section.titles, { screen = it }, notWired, null) }
                 }
             }
-            item {
+            // 1.9-dev4.7: footer (the Anipull about section) is
+            // HOME ONLY. It used to sit at the end of every list, so
+            // it stayed visible when the search box was tapped
+            // (short focused list) and while results were fetching
+            // (short skeleton list) — both screenshots JS circled.
+            if (!isSearchFocused && query.isBlank() && !searching) item {
                 Column {
                     LogoRow()
                     Spacer(Modifier.height(8.dp))
