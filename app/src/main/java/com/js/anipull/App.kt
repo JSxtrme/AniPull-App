@@ -940,7 +940,12 @@ fun AnipullAppInner() {
                 .getBoolean("done", false)
         )
     }
-    var showLoading by remember { mutableStateOf(loadHomeCache(context) == null) }
+    // 1.9-dev4.6: loading screen EVERY launch, JS's call — it looks
+    // nice, so it should not be skipped just because a cache exists.
+    // Previously this was true only when there was no cache, so on
+    // every relaunch the cached home appeared instantly and the
+    // animation never showed.
+    var showLoading by remember { mutableStateOf(true) }
     var fetchAttempt by remember { mutableStateOf(0) }
     // 1.9-dev4 dock state, Nuvio's NuvioNavBarScrollState verbatim in
     // spirit: a continuous labelVisibility fraction, 1f = expanded
@@ -1022,15 +1027,25 @@ fun AnipullAppInner() {
         else -> Tab.Home
     }
 
-    // Dynamic home, instant second time: (1) cached live home renders
-    // immediately if there is one, (2) a progressive refresh updates each
-    // row the moment it lands, (3) demo titles appear ONLY if the fetch
-    // actually fails and there is no cache — never as a loading placeholder.
-    // 1.9-dev2: keyed on fetchAttempt so the Retry button on a failed
-    // load actually re-runs this. Loading screen (if shown) ends here,
-    // whether the fetch succeeded or failed — a failed load shows
-    // skeletons + retry, never demo titles.
+    // Dynamic home: (1) cached live home is loaded into the rows
+    // immediately if there is one, (2) a progressive refresh updates
+    // each row the moment it lands, (3) demo titles appear ONLY if
+    // the fetch actually fails and there is no cache — never as a
+    // loading placeholder. 1.9-dev2: keyed on fetchAttempt so the
+    // Retry button on a failed load actually re-runs this.
+    // 1.9-dev4.6 loading rule: the loading screen ends when the
+    // fetch finishes AND at least 1500ms have passed since launch,
+    // so the animation (name at 450ms, logo rise 800ms) always
+    // plays out fully instead of flashing by on a fast network.
+    // A separate 5s timeout below ends it for cached users if the
+    // network is slow — a cached home must never be trapped behind
+    // a loading screen by a hanging fetch.
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(5000)
+        if (loadHomeCache(context) != null) showLoading = false
+    }
     LaunchedEffect(fetchAttempt) {
+        val fetchStart = System.currentTimeMillis()
         homeFailed = false
         val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched")
         val cached = loadHomeCache(context)
@@ -1054,6 +1069,9 @@ fun AnipullAppInner() {
         } else {
             saveHomeCache(context, HomeData(ordered, localFeatured))
         }
+        // Minimum display time: full animation, never a flash.
+        val elapsed = System.currentTimeMillis() - fetchStart
+        if (elapsed < 1500) kotlinx.coroutines.delay(1500 - elapsed)
         showLoading = false
     }
 
@@ -2122,7 +2140,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(24.dp))
             Text("ABOUT", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
             Spacer(Modifier.height(8.dp))
-            Text("Anipull 1.9-dev4.5 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Anipull 1.9-dev4.6 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
             // Extra bottom space so the floating dock never covers this.
             Spacer(Modifier.height(100.dp))
         }
