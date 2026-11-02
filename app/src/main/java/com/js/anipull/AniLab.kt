@@ -191,6 +191,26 @@ fun loadHomeCache(context: Context): HomeData? {
     } catch (_: Exception) { null }
 }
 
+// --- Library (Saved): favourites for later downloading, stored separately
+// from the home cache, so "Clear home cache" in Settings never wipes
+// them. Same JSON shape as the home cache, one array in its own prefs file.
+fun loadLibraryTitles(context: Context): List<ApiTitle> {
+    return try {
+        val text = context.getSharedPreferences("anipull_library", Context.MODE_PRIVATE)
+            .getString("saved_json", null) ?: return emptyList()
+        val arr = JSONArray(text)
+        (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.toApiTitle() }
+    } catch (_: Exception) { emptyList() }
+}
+fun saveLibraryTitles(context: Context, titles: List<ApiTitle>) {
+    try {
+        val arr = JSONArray()
+        titles.forEach { arr.put(it.toJson()) }
+        context.getSharedPreferences("anipull_library", Context.MODE_PRIVATE)
+            .edit().putString("saved_json", arr.toString()).apply()
+    } catch (_: Exception) { }
+}
+
 suspend fun fetchHome(): HomeData? {
     val sections = mutableListOf<HomeSection>()
     var featured: ApiTitle? = null

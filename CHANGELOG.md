@@ -7,8 +7,11 @@ All notable changes to the Anipull Android app are tracked here.
 - `main` is always the last stable release (currently 1.8).
 - Work for the next release accumulates on `dev/1.9` in small commits.
   Nothing on this branch is published as a Release.
-- Test builds from this branch are labelled 1.9-dev (versionCode 11)
-  so they install cleanly over 1.8 for testing.
+- Test builds from this branch are labelled 1.9-dev / 1.9-dev2
+  (versionCode 11 / 12). They are debug-signed, and the debug key
+  has changed between builds before — if a dev build shows a
+  package conflict, a full uninstall before installing is the fix,
+  and a stable release keystore is needed before 1.9 ships.
 - When 1.9 is ready: merge `dev/1.9` into `main`, set the version to
   clean 1.9, tag it, publish the Release, and move the notes below
   from Unreleased into a 1.9 section.
@@ -20,6 +23,38 @@ All notable changes to the Anipull Android app are tracked here.
   Pink sparkle inside a broken orbit ring, dot on the ring.
   Wordmark ("Ani" white + "pull" pink) unchanged. Themed-icon
   phone check still pending.
+
+### 1.9-dev2 (versionCode 12) — test build, not a release
+
+- Morphing floating dock (Nuvio-style, very smooth spring):
+  Home, Library, Downloads, Settings. Expanded = icon + label,
+  scrolling down shrinks it to icons-only, scrolling up expands
+  it again. Header is now logo-only; Downloads/Settings buttons
+  moved to the dock.
+- Library tab (decided): Saved section (bookmark a title from
+  its detail page, saved titles survive "Clear home cache") and
+  Downloaded section (honest empty state — downloads become real
+  in 2.0, with a per-title downloaded-episode count then).
+- Onboarding, first boot only: Welcome screen (My Hero Academia
+  wallpaper, "Welcome to" + logo + name, one "Start" button with a
+  real arrow vector) slides left into a notification-grant screen
+  (Attack on Titan portrait wallpaper, real bell vector, Allow /
+  Skip). Catalogs load in the background while onboarding runs.
+  Allow fires the system POST_NOTIFICATIONS dialog; Skip and a
+  denied dialog both go straight to Home. Outfit font throughout.
+- Loading screen: calm pink/black/white gradient, Orbit logo
+  rises, "AniPull" name appears, small loading bar, then Home.
+  Shown when there is no cached live home; if AniLab still has
+  not loaded, Home shows skeletons + Retry — never demo titles.
+  Demo titles are no longer used as a search/chip fallback either.
+- Hero stat: "6000+ / Anime Titles" (AniLab IDs verified to
+  1000006620, higher IDs 404 — see the AniLab count note).
+- Quick chips: Movies, Series, OVA, Specials (1080p ready
+  dropped). Chips now filter live titles by type.
+- Metadata unchanged in this build: AniLab is still primary.
+  The AniList-primary proposal is NOT included — it was a
+  recommendation, not an approved switch, and is still awaiting
+  JS's decision.
 
 ## 1.8 — 2026-11-02
 
