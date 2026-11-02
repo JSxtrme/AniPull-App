@@ -5,6 +5,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -65,6 +66,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
@@ -72,6 +74,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
@@ -105,6 +108,15 @@ private val OutfitFont = FontFamily(
     Font(R.font.outfit_regular, FontWeight.Normal),
     Font(R.font.outfit_bold, FontWeight.Bold),
     Font(R.font.outfit_extrabold, FontWeight.ExtraBold),
+)
+
+// Onboarding only (JS, 2026-11-03): SF Pro Display Semibold, supplied
+// by JS as sf_pro_display_semibold.otf. The rest of the app stays on
+// Outfit. Note: this OTF uses CFF outlines — if it ever fails to
+// render on a phone, Compose falls back to the system font, and the
+// fix then is a TrueType conversion, not a different design.
+private val SFProDisplaySemibold = FontFamily(
+    Font(R.font.sf_pro_display_semibold, FontWeight.SemiBold),
 )
 
 val Bg = Color(0xFF07070C)
@@ -917,9 +929,11 @@ fun AnipullAppInner() {
     }
     var showLoading by remember { mutableStateOf(loadHomeCache(context) == null) }
     var fetchAttempt by remember { mutableStateOf(0) }
-    var dockShrunk by remember { mutableStateOf(false) }
-    var lastScrollIndex by remember { mutableStateOf(0) }
-    var lastScrollOffset by remember { mutableStateOf(0) }
+    // 1.9-dev3 dock state, Nuvio-style: a continuous fraction, not a
+    // boolean. 1f = expanded (labels visible), 0f = collapsed.
+    val dockFractionState = remember { mutableStateOf(1f) }
+    var dockDownAccum by remember { mutableStateOf(0f) }
+    var dockUpAccum by remember { mutableStateOf(0f) }
     var isSearchFocused by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -943,17 +957,38 @@ fun AnipullAppInner() {
         else screen = null
     }
 
-    // Nuvio dock morph, Home only: scrolling down shrinks the dock,
-    // scrolling up expands it again. Other tabs keep it expanded.
-    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
-        val idx = listState.firstVisibleItemIndex
-        val off = listState.firstVisibleItemScrollOffset
-        val total = idx * 1000 + off
-        val lastTotal = lastScrollIndex * 1000 + lastScrollOffset
-        if (total > lastTotal && total > 200) dockShrunk = true
-        else if (total < lastTotal) dockShrunk = false
-        lastScrollIndex = idx
-        lastScrollOffset = off
+    // 1.9-dev3 dock scroll, replacing the dev2 bug: dev2 computed a
+    // fake "total scroll" as index * 1000 + offset, but the header
+    // item alone is taller than 1000px, so when the first visible
+    // item changed, that total DROPPED even while scrolling down —
+    // and the dock expanded for a frame, then shrank again: the jerk
+    // JS reported ("tries to get bigger but I'm scrolling down").
+    // This version uses real nested-scroll pixel deltas instead, so
+    // list recompositions (posters loading, sections landing) can
+    // never fake a direction change, and a 90px hysteresis means a
+    // tiny finger jitter or a single reversed frame can never flip
+    // the dock — like Nuvio's accumulatedDelta approach.
+    val dockScrollConnection = remember {
+        object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
+            override fun onPreScroll(
+                available: androidx.compose.ui.geometry.Offset,
+                source: androidx.compose.ui.input.nestedscroll.NestedScrollSource,
+            ): androidx.compose.ui.geometry.Offset {
+                val dy = available.y
+                if (dy < 0f) {
+                    // Dragging up = scrolling content down.
+                    dockDownAccum += -dy
+                    dockUpAccum = 0f
+                    if (dockDownAccum > 90f) dockFractionState.value = 0f
+                } else if (dy > 0f) {
+                    // Dragging down = scrolling content up.
+                    dockUpAccum += dy
+                    dockDownAccum = 0f
+                    if (dockUpAccum > 90f) dockFractionState.value = 1f
+                }
+                return androidx.compose.ui.geometry.Offset.Zero
+            }
+        }
     }
 
     fun toggleSave(title: ApiTitle) {
@@ -1117,6 +1152,7 @@ fun AnipullAppInner() {
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp)
+                .nestedScroll(dockScrollConnection)
                 .onGloballyPositioned { lazyColumnCoords = it }
                 .pointerInput(pillCoords, isSearchFocused, lazyColumnCoords) {
                     detectTapGestures(onTap = { offset ->
@@ -1284,7 +1320,12 @@ fun AnipullAppInner() {
             modifier = Modifier.align(Alignment.BottomCenter)
                 .navigationBarsPadding().padding(bottom = 12.dp, start = 8.dp, end = 8.dp),
         ) {
-            FloatingDock(current = currentTab, shrunk = dockShrunk && currentTab == Tab.Home, onTab = { goTab(it) })
+            // Home follows the scroll fraction; other tabs stay expanded.
+            FloatingDock(
+                current = currentTab,
+                fraction = if (currentTab == Tab.Home) dockFractionState.value else 1f,
+                onTab = { goTab(it) },
+            )
         }
     }
     }
@@ -1299,21 +1340,24 @@ fun AnipullAppInner() {
 enum class Tab { Home, Library, Downloads, Settings }
 
 @Composable
-fun FloatingDock(current: Tab, shrunk: Boolean, onTab: (Tab) -> Unit) {
-    // Nuvio-style morph: expanded = icon + label, large pill; scrolling
-    // down shrinks it, very smoothly, to a smaller icons-only pill;
-    // scrolling up expands it again. Spring, not a jump, so the morph
-    // reads as one pill changing shape, not two pills swapping.
-    val widthFrac by animateFloatAsState(
-        targetValue = if (shrunk) 0.62f else 0.92f,
-        animationSpec = spring(dampingRatio = 0.85f, stiffness = 180f),
-        label = "dockWidth",
+fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit) {
+    // Nuvio-style morph, after checking NuvioMobile's code
+    // (FloatingNavigationBar / NuvioNavBarScrollState): a CONTINUOUS
+    // labelVisibility fraction (1f = labels fully visible, 0f =
+    // icons only), animated with a tween, not a boolean that flips.
+    // The dev2 bug was exactly the opposite: a boolean + instant
+    // label show/hide + a spring, so the dock popped bigger for a
+    // frame whenever the scroll signal hiccuped, even while scrolling
+    // down. Here width, height AND label alpha all follow the same
+    // tweened fraction, so labels fade out as the pill shrinks and
+    // fade back in as it grows — never a pop.
+    val labelFraction by animateFloatAsState(
+        targetValue = fraction.coerceIn(0f, 1f),
+        animationSpec = tween(350, easing = FastOutSlowInEasing),
+        label = "dockFraction",
     )
-    val heightDp by animateDpAsState(
-        targetValue = if (shrunk) 52.dp else 64.dp,
-        animationSpec = spring(dampingRatio = 0.85f, stiffness = 180f),
-        label = "dockHeight",
-    )
+    val widthFrac = 0.62f + 0.30f * labelFraction
+    val heightDp = 52.dp + (12.dp * labelFraction)
     androidx.compose.foundation.layout.BoxWithConstraints(
         modifier = Modifier.fillMaxWidth(),
         contentAlignment = Alignment.Center,
@@ -1359,13 +1403,16 @@ fun FloatingDock(current: Tab, shrunk: Boolean, onTab: (Tab) -> Unit) {
                                     if (selected) Color.White else Muted
                                 ),
                             )
-                            if (!shrunk) {
+                            // Always drawn, alpha follows the fraction:
+                            // labels fade, they never pop in or out.
+                            if (labelFraction > 0.02f) {
                                 Spacer(Modifier.height(2.dp))
                                 Text(
                                     label,
                                     color = if (selected) Color.White else Muted,
                                     fontSize = 11.sp,
                                     fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                    modifier = Modifier.alpha(labelFraction),
                                 )
                             }
                         }
@@ -1556,9 +1603,9 @@ fun LoadingScreen() {
 fun OnboardingScreen(onFinish: () -> Unit) {
     // First boot only. Welcome -> notification grant, sliding like
     // attached pages: welcome out left, notification in from the right.
-    // Real Outfit font (via the app theme), a real arrow vector drawable
-    // on Start, and a real bell vector drawable — never a text arrow or
-    // an emoji, per JS's explicit 1.9-dev2 rule.
+    // SF Pro Display Semibold here only (JS-supplied font), a real
+    // arrow vector drawable on Start, and a real bell vector drawable
+    // — never a text arrow or an emoji, per JS's explicit rule.
     var page by remember { mutableStateOf(0) }
     val context = LocalContext.current
     val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
@@ -1572,6 +1619,12 @@ fun OnboardingScreen(onFinish: () -> Unit) {
         else permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
     }
     Box(modifier = Modifier.fillMaxSize().background(Bg)) {
+        // Onboarding uses SF Pro Display Semibold for every text on
+        // these two screens only — the provider below overrides the
+        // app-wide Outfit style for this subtree alone.
+        androidx.compose.runtime.CompositionLocalProvider(
+            androidx.compose.material3.LocalTextStyle provides androidx.compose.ui.text.TextStyle(fontFamily = SFProDisplaySemibold)
+        ) {
         AnimatedContent(
             targetState = page,
             transitionSpec = {
@@ -1590,14 +1643,20 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                         modifier = Modifier.fillMaxSize(),
                         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                     )
+                    // 1.9-dev3 fade, Anime+ style: art is full at the
+                    // top, then fades out early and is SOLID #07070C
+                    // from 62% down — the whole text + button block
+                    // sits on solid black with room to breathe, never
+                    // on top of busy art (the dev2 readability bug).
                     Box(
                         Modifier.matchParentSize().background(
                             Brush.verticalGradient(
-                                colors = listOf(
-                                    Color(0xFF07070C).copy(alpha = 0.45f),
-                                    Color.Transparent,
-                                    Color(0xFF07070C).copy(alpha = 0.55f),
-                                    Color(0xFF07070C),
+                                colorStops = arrayOf(
+                                    0.0f to Color(0xFF07070C).copy(alpha = 0.45f),
+                                    0.30f to Color.Transparent,
+                                    0.50f to Color(0xFF07070C).copy(alpha = 0.60f),
+                                    0.62f to Color(0xFF07070C),
+                                    1.0f to Color(0xFF07070C),
                                 ),
                                 startY = 0f, endY = Float.POSITIVE_INFINITY,
                             )
@@ -1608,7 +1667,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                             .navigationBarsPadding().padding(horizontal = 22.dp, vertical = 28.dp),
                     ) {
                         Spacer(Modifier.weight(1f))
-                        Text("Welcome to", color = Color(0xFFD8D8E2), fontSize = 15.sp)
+                        Text("Welcome to", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
                         Spacer(Modifier.height(10.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             androidx.compose.foundation.Image(
@@ -1627,11 +1686,13 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                         Spacer(Modifier.height(14.dp))
                         Text(
                             "Download your favourite anime, episode by episode.",
-                            color = Color.White, fontSize = 16.sp, lineHeight = 23.sp,
+                            color = Color.White, fontSize = 18.sp, lineHeight = 25.sp,
+                            fontWeight = FontWeight.SemiBold,
                         )
                         Text(
                             "Download-only · No streaming · No tracking",
-                            color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp),
+                            color = Muted, fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp),
+                            fontWeight = FontWeight.SemiBold,
                         )
                         Spacer(Modifier.height(26.dp))
                         Box(
@@ -1664,14 +1725,16 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                         modifier = Modifier.fillMaxSize(),
                         contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                     )
+                    // Same Anime+ fade as Welcome: solid from 62% down.
                     Box(
                         Modifier.matchParentSize().background(
                             Brush.verticalGradient(
-                                colors = listOf(
-                                    Color(0xFF07070C).copy(alpha = 0.45f),
-                                    Color.Transparent,
-                                    Color(0xFF07070C).copy(alpha = 0.55f),
-                                    Color(0xFF07070C),
+                                colorStops = arrayOf(
+                                    0.0f to Color(0xFF07070C).copy(alpha = 0.45f),
+                                    0.30f to Color.Transparent,
+                                    0.50f to Color(0xFF07070C).copy(alpha = 0.60f),
+                                    0.62f to Color(0xFF07070C),
+                                    1.0f to Color(0xFF07070C),
                                 ),
                                 startY = 0f, endY = Float.POSITIVE_INFINITY,
                             )
@@ -1685,8 +1748,8 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                         Spacer(Modifier.weight(1f))
                         Box(
                             modifier = Modifier.size(88.dp).clip(RoundedCornerShape(28.dp))
-                                .background(Color.White.copy(alpha = 0.08f))
-                                .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(28.dp)),
+                                .background(Color(0xFF1A1A24))
+                                .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(28.dp)),
                             contentAlignment = Alignment.Center,
                         ) {
                             androidx.compose.foundation.Image(
@@ -1696,14 +1759,15 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                             )
                         }
                         Spacer(Modifier.height(18.dp))
-                        Text("Stay in the loop?", color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center)
+                        Text("Stay in the loop?", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(10.dp))
                         Text(
                             "Allow notifications so we can tell you when a download finishes.",
-                            color = Color(0xFFC9C9D6), fontSize = 15.sp, lineHeight = 22.sp, textAlign = TextAlign.Center,
+                            color = Color(0xFFC9C9D6), fontSize = 17.sp, lineHeight = 24.sp, textAlign = TextAlign.Center,
+                            fontWeight = FontWeight.SemiBold,
                         )
                         Spacer(Modifier.height(6.dp))
-                        Text("Notifications only for download progress.", color = Color(0xFFFFD7E7), fontSize = 14.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                        Text("Notifications only for download progress.", color = Color(0xFFFFD7E7), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
                         Spacer(Modifier.height(26.dp))
                         Box(
                             modifier = Modifier.fillMaxWidth().height(52.dp)
@@ -1724,6 +1788,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                     }
                 }
             }
+        }
         }
     }
 }
