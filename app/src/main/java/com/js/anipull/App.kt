@@ -35,7 +35,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
@@ -68,6 +70,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -929,11 +932,12 @@ fun AnipullAppInner() {
     }
     var showLoading by remember { mutableStateOf(loadHomeCache(context) == null) }
     var fetchAttempt by remember { mutableStateOf(0) }
-    // 1.9-dev3 dock state, Nuvio-style: a continuous fraction, not a
-    // boolean. 1f = expanded (labels visible), 0f = collapsed.
+    // 1.9-dev4 dock state, Nuvio's NuvioNavBarScrollState verbatim in
+    // spirit: a continuous labelVisibility fraction, 1f = expanded
+    // (labels visible), 0f = collapsed (icons only), driven by ONE
+    // accumulated nested-scroll delta — never by list indices.
     val dockFractionState = remember { mutableStateOf(1f) }
-    var dockDownAccum by remember { mutableStateOf(0f) }
-    var dockUpAccum by remember { mutableStateOf(0f) }
+    var dockAccumulatedDelta by remember { mutableStateOf(0f) }
     var isSearchFocused by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -957,35 +961,30 @@ fun AnipullAppInner() {
         else screen = null
     }
 
-    // 1.9-dev3 dock scroll, replacing the dev2 bug: dev2 computed a
-    // fake "total scroll" as index * 1000 + offset, but the header
-    // item alone is taller than 1000px, so when the first visible
-    // item changed, that total DROPPED even while scrolling down —
-    // and the dock expanded for a frame, then shrank again: the jerk
-    // JS reported ("tries to get bigger but I'm scrolling down").
-    // This version uses real nested-scroll pixel deltas instead, so
-    // list recompositions (posters loading, sections landing) can
-    // never fake a direction change, and a 90px hysteresis means a
-    // tiny finger jitter or a single reversed frame can never flip
-    // the dock — like Nuvio's accumulatedDelta approach.
+    // 1.9-dev4 dock scroll, copied from Nuvio's
+    // NuvioNavBarScrollState.nestedScrollConnection: one accumulator,
+    // 60px threshold, direction-change reset (a reversed frame
+    // restarts accumulation in the new direction instead of
+    // cancelling the old one). Scrolls never get consumed, so the
+    // list itself is untouched — the dock only listens.
     val dockScrollConnection = remember {
         object : androidx.compose.ui.input.nestedscroll.NestedScrollConnection {
             override fun onPreScroll(
                 available: androidx.compose.ui.geometry.Offset,
                 source: androidx.compose.ui.input.nestedscroll.NestedScrollSource,
             ): androidx.compose.ui.geometry.Offset {
-                val dy = available.y
-                if (dy < 0f) {
-                    // Dragging up = scrolling content down.
-                    dockDownAccum += -dy
-                    dockUpAccum = 0f
-                    if (dockDownAccum > 90f) dockFractionState.value = 0f
-                } else if (dy > 0f) {
-                    // Dragging down = scrolling content up.
-                    dockUpAccum += dy
-                    dockDownAccum = 0f
-                    if (dockUpAccum > 90f) dockFractionState.value = 1f
+                val deltaY = available.y
+                if (deltaY == 0f) return androidx.compose.ui.geometry.Offset.Zero
+                dockAccumulatedDelta += deltaY
+                if (dockAccumulatedDelta < -60f && dockFractionState.value != 0f) {
+                    dockFractionState.value = 0f
+                    dockAccumulatedDelta = 0f
+                } else if (dockAccumulatedDelta > 60f && dockFractionState.value != 1f) {
+                    dockFractionState.value = 1f
+                    dockAccumulatedDelta = 0f
                 }
+                if (deltaY < 0f && dockAccumulatedDelta > 0f) dockAccumulatedDelta = deltaY
+                if (deltaY > 0f && dockAccumulatedDelta < 0f) dockAccumulatedDelta = deltaY
                 return androidx.compose.ui.geometry.Offset.Zero
             }
         }
@@ -1320,10 +1319,13 @@ fun AnipullAppInner() {
             modifier = Modifier.align(Alignment.BottomCenter)
                 .navigationBarsPadding().padding(bottom = 12.dp, start = 8.dp, end = 8.dp),
         ) {
-            // Home follows the scroll fraction; other tabs stay expanded.
+            // The morph state is GLOBAL, like Nuvio's: switching tabs
+            // never resets it. Mini stays mini on the new tab, and
+            // the selected pill travels there (see FloatingDock).
+            // Dev3's bug was forcing fraction = 1f off Home.
             FloatingDock(
                 current = currentTab,
-                fraction = if (currentTab == Tab.Home) dockFractionState.value else 1f,
+                fraction = dockFractionState.value,
                 onTab = { goTab(it) },
             )
         }
@@ -1341,57 +1343,97 @@ enum class Tab { Home, Library, Downloads, Settings }
 
 @Composable
 fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit) {
-    // Nuvio-style morph, after checking NuvioMobile's code
-    // (FloatingNavigationBar / NuvioNavBarScrollState): a CONTINUOUS
-    // labelVisibility fraction (1f = labels fully visible, 0f =
-    // icons only), animated with a tween, not a boolean that flips.
-    // The dev2 bug was exactly the opposite: a boolean + instant
-    // label show/hide + a spring, so the dock popped bigger for a
-    // frame whenever the scroll signal hiccuped, even while scrolling
-    // down. Here width, height AND label alpha all follow the same
-    // tweened fraction, so labels fade out as the pill shrinks and
-    // fade back in as it grows — never a pop.
+    // 1.9-dev4: Nuvio's FloatingNavigationBar, adaptive style, glow
+    // OFF — read in full from NuvioMobile (NavigationBar.kt +
+    // FloatingNavigationBar.android.kt) and mirrored, not approximated:
+    //
+    // - Morph is ONE continuous tween, never stages. The pill does
+    //   NOT animate its own width: the outer horizontal padding does
+    //   (58dp collapsed → 28dp expanded, i.e. 58 - 30*fraction) and
+    //   the track height does (48dp + 16dp*fraction, 48 → 64).
+    //   Dev3's staging bug was the label: it was dropped entirely
+    //   below fraction 0.02, so mid-morph the column height jumped
+    //   by a full label height — a snap, then the rest of the morph.
+    //   Nuvio instead scales the label's own height and spacer with
+    //   the fraction (Box height = 16dp*fraction, spacer = 2dp*
+    //   fraction, alpha = fraction, dropped only at exactly 0), so
+    //   the label shrinks away continuously with the pill.
+    // - Selected highlight is ONE pill that TRAVELS: Nuvio draws it
+    //   with JellyMotion (a frame-driven jelly pill that slides and
+    //   stretches between tabs). Ours is the same behaviour with a
+    //   spring: a single Pink pill whose X offset animates to the
+    //   selected tab, never an instant per-item background swap.
+    // - No glow: the jelly glow layer is simply not drawn, and the
+    //   bar is solid #1A1A24 (Nuvio's no-haze bar is #1C1C1E at 0.82).
     val labelFraction by animateFloatAsState(
         targetValue = fraction.coerceIn(0f, 1f),
         animationSpec = tween(350, easing = FastOutSlowInEasing),
         label = "dockFraction",
     )
-    val widthFrac = 0.62f + 0.30f * labelFraction
-    val heightDp = 52.dp + (12.dp * labelFraction)
-    androidx.compose.foundation.layout.BoxWithConstraints(
-        modifier = Modifier.fillMaxWidth(),
-        contentAlignment = Alignment.Center,
+    val horizontalPadding = 58.dp - (30.dp * labelFraction)
+    val trackHeight = 48.dp + (16.dp * labelFraction)
+    val items = listOf(
+        Triple(Tab.Home, R.drawable.ic_home, "Home"),
+        Triple(Tab.Library, R.drawable.ic_bookmark, "Library"),
+        Triple(Tab.Downloads, R.drawable.ic_download, "Downloads"),
+        Triple(Tab.Settings, R.drawable.ic_settings, "Settings"),
+    )
+    val selectedIndex = items.indexOfFirst { it.first == current }.coerceAtLeast(0)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = horizontalPadding),
+        contentAlignment = Alignment.BottomCenter,
     ) {
-        val dockWidth = maxWidth * widthFrac
-        Box(
+        androidx.compose.foundation.layout.BoxWithConstraints(
             modifier = Modifier
-                .width(dockWidth)
-                .height(heightDp)
+                .fillMaxWidth()
+                .height(trackHeight)
                 .clip(RoundedCornerShape(999.dp))
                 .background(Color(0xFF1A1A24))
-                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
-                .padding(horizontal = 6.dp),
+                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp)),
             contentAlignment = Alignment.Center,
         ) {
+            // Travelling selected pill: one pill, spring X, so it
+            // slides (and settles, jelly-style) to the new tab
+            // instead of appearing there instantly. Its width tracks
+            // the pill width, so it also morphs with the bar.
+            val innerPad = 6.dp
+            val itemWidth = (maxWidth - innerPad * 2) / items.size
+            val pillOffset by animateDpAsState(
+                targetValue = innerPad + itemWidth * selectedIndex,
+                animationSpec = spring(dampingRatio = 0.8f, stiffness = 300f),
+                label = "dockPillOffset",
+            )
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = innerPad, vertical = 6.dp),
+                contentAlignment = Alignment.CenterStart,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .offset(x = pillOffset - innerPad)
+                        .width(itemWidth)
+                        .fillMaxHeight()
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Pink),
+                )
+            }
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(horizontal = innerPad, vertical = 6.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                val items = listOf(
-                    Triple(Tab.Home, R.drawable.ic_home, "Home"),
-                    Triple(Tab.Library, R.drawable.ic_bookmark, "Library"),
-                    Triple(Tab.Downloads, R.drawable.ic_download, "Downloads"),
-                    Triple(Tab.Settings, R.drawable.ic_settings, "Settings"),
-                )
                 items.forEach { (tab, icon, label) ->
                     val selected = tab == current
                     Box(
                         modifier = Modifier
+                            .weight(1f)
+                            .fillMaxHeight()
                             .clip(RoundedCornerShape(999.dp))
-                            .background(if (selected) Pink else Color.Transparent)
-                            .clickable { onTab(tab) }
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                            .clickable { onTab(tab) },
                         contentAlignment = Alignment.Center,
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1403,17 +1445,26 @@ fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit) {
                                     if (selected) Color.White else Muted
                                 ),
                             )
-                            // Always drawn, alpha follows the fraction:
-                            // labels fade, they never pop in or out.
-                            if (labelFraction > 0.02f) {
-                                Spacer(Modifier.height(2.dp))
-                                Text(
-                                    label,
-                                    color = if (selected) Color.White else Muted,
-                                    fontSize = 11.sp,
-                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
-                                    modifier = Modifier.alpha(labelFraction),
-                                )
+                            // Nuvio NavItemLabel: height and spacer
+                            // scale with the fraction, alpha too —
+                            // continuous shrink, never a pop. Only
+                            // fully gone at exactly 0.
+                            if (labelFraction > 0f) {
+                                Spacer(Modifier.height(2.dp * labelFraction))
+                                Box(
+                                    modifier = Modifier
+                                        .height(16.dp * labelFraction)
+                                        .alpha(labelFraction)
+                                        .clipToBounds(),
+                                ) {
+                                    Text(
+                                        label,
+                                        color = if (selected) Color.White else Muted,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                        maxLines = 1,
+                                    )
+                                }
                             }
                         }
                     }
@@ -1662,57 +1713,65 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                             )
                         )
                     )
+                    // 1.9-dev4 Welcome, scaled up to FILL the solid
+                    // bottom area JS circled in his dev3 screenshot
+                    // (was ~267dp of text in a ~360dp area — tiny, not
+                    // inviting). Everything is ~1.35x: Welcome 24sp,
+                    // logo 60dp / wordmark 46sp, tagline 26sp, button
+                    // 60dp, with wider gaps, so the block now spans
+                    // the whole highlighted area instead of sitting
+                    // small at the bottom of it.
                     Column(
                         modifier = Modifier.fillMaxSize().statusBarsPadding()
                             .navigationBarsPadding().padding(horizontal = 22.dp, vertical = 28.dp),
                     ) {
                         Spacer(Modifier.weight(1f))
-                        Text("Welcome to", color = Color.White, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                        Spacer(Modifier.height(10.dp))
+                        Text("Welcome to", color = Color.White, fontSize = 24.sp, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(14.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             androidx.compose.foundation.Image(
                                 painter = painterResource(R.drawable.ic_launcher_foreground),
-                                contentDescription = null, modifier = Modifier.size(44.dp),
+                                contentDescription = null, modifier = Modifier.size(60.dp),
                             )
-                            Spacer(Modifier.width(10.dp))
+                            Spacer(Modifier.width(12.dp))
                             Text(
                                 text = buildAnnotatedString {
                                     withStyle(SpanStyle(color = Color.White)) { append("Ani") }
                                     withStyle(SpanStyle(color = Pink)) { append("pull") }
                                 },
-                                fontSize = 34.sp, fontWeight = FontWeight.ExtraBold,
+                                fontSize = 46.sp, fontWeight = FontWeight.ExtraBold,
                             )
                         }
-                        Spacer(Modifier.height(14.dp))
+                        Spacer(Modifier.height(20.dp))
                         Text(
                             "Download your favourite anime, episode by episode.",
-                            color = Color.White, fontSize = 18.sp, lineHeight = 25.sp,
+                            color = Color.White, fontSize = 26.sp, lineHeight = 34.sp,
                             fontWeight = FontWeight.SemiBold,
                         )
                         Text(
                             "Download-only · No streaming · No tracking",
-                            color = Muted, fontSize = 14.sp, modifier = Modifier.padding(top = 8.dp),
+                            color = Muted, fontSize = 16.sp, modifier = Modifier.padding(top = 12.dp),
                             fontWeight = FontWeight.SemiBold,
                         )
-                        Spacer(Modifier.height(26.dp))
+                        Spacer(Modifier.height(34.dp))
                         Box(
-                            modifier = Modifier.fillMaxWidth().height(52.dp)
+                            modifier = Modifier.fillMaxWidth().height(60.dp)
                                 .clip(RoundedCornerShape(999.dp)).background(Pink)
                                 .clickable { page = 1 },
                             contentAlignment = Alignment.Center,
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text("Start", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                                Spacer(Modifier.width(8.dp))
+                                Text("Start", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                                Spacer(Modifier.width(10.dp))
                                 androidx.compose.foundation.Image(
                                     painter = painterResource(R.drawable.ic_arrow_right),
-                                    contentDescription = null, modifier = Modifier.size(20.dp),
+                                    contentDescription = null, modifier = Modifier.size(24.dp),
                                     colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
                                 )
                             }
                         }
-                        Spacer(Modifier.height(12.dp))
-                        Text("First boot only — never shown again", color = Faint, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                        Spacer(Modifier.height(16.dp))
+                        Text("First boot only — never shown again", color = Faint, fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                     }
                 }
             } else {
@@ -1747,44 +1806,44 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                     ) {
                         Spacer(Modifier.weight(1f))
                         Box(
-                            modifier = Modifier.size(88.dp).clip(RoundedCornerShape(28.dp))
+                            modifier = Modifier.size(100.dp).clip(RoundedCornerShape(30.dp))
                                 .background(Color(0xFF1A1A24))
-                                .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(28.dp)),
+                                .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(30.dp)),
                             contentAlignment = Alignment.Center,
                         ) {
                             androidx.compose.foundation.Image(
                                 painter = painterResource(R.drawable.ic_bell),
-                                contentDescription = null, modifier = Modifier.size(44.dp),
+                                contentDescription = null, modifier = Modifier.size(52.dp),
                                 colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
                             )
                         }
-                        Spacer(Modifier.height(18.dp))
-                        Text("Stay in the loop?", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
-                        Spacer(Modifier.height(10.dp))
+                        Spacer(Modifier.height(22.dp))
+                        Text("Stay in the loop?", color = TextMain, fontSize = 34.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(12.dp))
                         Text(
                             "Allow notifications so we can tell you when a download finishes.",
-                            color = Color(0xFFC9C9D6), fontSize = 17.sp, lineHeight = 24.sp, textAlign = TextAlign.Center,
+                            color = Color(0xFFC9C9D6), fontSize = 20.sp, lineHeight = 28.sp, textAlign = TextAlign.Center,
                             fontWeight = FontWeight.SemiBold,
                         )
-                        Spacer(Modifier.height(6.dp))
-                        Text("Notifications only for download progress.", color = Color(0xFFFFD7E7), fontSize = 15.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
-                        Spacer(Modifier.height(26.dp))
+                        Spacer(Modifier.height(8.dp))
+                        Text("Notifications only for download progress.", color = Color(0xFFFFD7E7), fontSize = 17.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(32.dp))
                         Box(
-                            modifier = Modifier.fillMaxWidth().height(52.dp)
+                            modifier = Modifier.fillMaxWidth().height(60.dp)
                                 .clip(RoundedCornerShape(999.dp)).background(Pink)
                                 .clickable { requestNotif() },
                             contentAlignment = Alignment.Center,
-                        ) { Text("Allow notifications", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
-                        Spacer(Modifier.height(10.dp))
+                        ) { Text("Allow notifications", color = Color.White, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+                        Spacer(Modifier.height(12.dp))
                         Box(
-                            modifier = Modifier.fillMaxWidth().height(52.dp)
+                            modifier = Modifier.fillMaxWidth().height(60.dp)
                                 .clip(RoundedCornerShape(999.dp))
                                 .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(999.dp))
                                 .clickable { onFinish() },
                             contentAlignment = Alignment.Center,
-                        ) { Text("Skip for now", color = Muted, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
-                        Spacer(Modifier.height(12.dp))
-                        Text("You can turn this on later from Settings", color = Faint, fontSize = 12.sp, textAlign = TextAlign.Center)
+                        ) { Text("Skip for now", color = Muted, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+                        Spacer(Modifier.height(16.dp))
+                        Text("You can turn this on later from Settings", color = Faint, fontSize = 13.sp, textAlign = TextAlign.Center)
                     }
                 }
             }
@@ -2055,7 +2114,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(24.dp))
             Text("ABOUT", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
             Spacer(Modifier.height(8.dp))
-            Text("Anipull 1.9-dev2 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Anipull 1.9-dev4 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
             // Extra bottom space so the floating dock never covers this.
             Spacer(Modifier.height(100.dp))
         }
