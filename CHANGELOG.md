@@ -24,6 +24,43 @@ All notable changes to the Anipull Android app are tracked here.
   Wordmark ("Ani" white + "pull" pink) unchanged. Themed-icon
   phone check still pending.
 
+### 1.9-dev4.7 (versionCode 17) — test build, not a release
+
+- Loading screen HARD-CAPPED at 1.5s (JS, 2026-11-03): dev4.6 was
+  max(fetch, 1500ms), so a slow AniLab fetch stretched it to
+  4.5–5s. Now loading ends at 1500ms no matter what, fetch
+  continues in the background, cached rows show instantly and
+  unloaded rows show skeletons that swap in progressively.
+  First launch with no cache shows skeletons, never demo titles.
+  Caching was NOT removed — it was just hidden behind the old
+  loading gate.
+- Search animation, Nuvio-style single motion: the whole hero
+  (logo, DOWNLOAD-ONLY pill, Find it / Keep it offline,
+  subheading) collapses in ONE fade + expand/shrink animation
+  (320ms FastOutSlowIn), so the search pill rises smoothly to
+  the top instead of jumping in stages. Chips/stats/sources
+  collapse the same way. No staged snaps, no per-letter work on
+  the main thread — the animation is a vsync-driven Compose
+  animation, so on a 120Hz phone it runs at 120Hz.
+- Footer (Anipull about section) is home-only now: it no longer
+  appears when the search box is tapped, while results are
+  fetching, or on search results — it was a trailing list item,
+  so short search/skeleton lists exposed it mid-screen.
+- Search skeleton fixed to 2 cards per row (was 3), matching the
+  real 2-column results grid, so results no longer jump sideways
+  when they land. While a new search is in flight, old results
+  stay visible instead of flashing to skeleton.
+- Focused empty search now shows cached posters instantly
+  ("From your catalog", up to 12, from the home cache + poster
+  disk cache — zero network), instead of just "Type to search".
+- Live search rate-limited: 500ms debounce, distinct-query guard,
+  in-flight call cancelled on the next keystroke — a fast typer
+  fires one AniLab call, not one per letter.
+- Back button + tap-above close search: device back from search
+  returns to home (detail still outranks search, so back from a
+  detail opened via search leaves the detail first), and a 28dp
+  tappable strip above the pill in search mode closes search too.
+
 ### 1.9-dev4.6 (versionCode 16) — test build, not a release
 
 - Loading screen every launch (JS's call — it looks nice):
