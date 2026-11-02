@@ -1,0 +1,11 @@
+# Anipull Android app — local / generated files, never committed
+local.properties
+.gradle/
+.kotlin/
+build/
+app/build/
+*.apk
+*.aab
+.idea/
+*.iml
+.DS_Store

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Themed-icon (Android 13+) monochrome layer: v2 logo SIMPLIFIED.
+     Why: themed icons are a single colour by system design — Android
+     discards the pink/white distinction entirely. In the colour icon the
+     white arrow stands out against the pink chevrons, but in all-white
+     the arrow merges into the chevrons (its head even coincides with the
+     bottom chevron), which is exactly the messy blob in JS's screenshot.
+     Fix: monochrome is the stack only — diamond + two rounded chevrons,
+     no arrow. Those shapes never overlap, so they stay clean and readable
+     at launcher size in a single colour. The colour icon keeps the arrow. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:scaleX="0.9"
+        android:scaleY="0.9"
+        android:translateY="6">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M50,8 L88,26 L50,44 L12,26 Z" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="11"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M17,43 L50,59 L83,43" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="11"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M17,63 L50,79 L83,63" />
+    </group>
+</vector>

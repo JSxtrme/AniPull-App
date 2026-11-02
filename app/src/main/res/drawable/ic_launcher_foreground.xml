@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Colour foreground: JS's new v2 logo (2026-11-02, polished 2nd version).
+     Pink diamond + two rounded pink chevrons + white download arrow.
+     Paths are the SVG paths verbatim. Scaled 0.9 about the centre and
+     shifted down 4dp so the glyph bbox (y 8-83, centre 45.5) sits centred
+     in the adaptive-icon safe zone. Background is now dark (#07070C),
+     NOT pink — pink glyphs on a pink background would vanish. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+    <group
+        android:pivotX="50"
+        android:pivotY="50"
+        android:scaleX="0.9"
+        android:scaleY="0.9"
+        android:translateY="4">
+        <path
+            android:fillColor="#FF4D8D"
+            android:pathData="M50,8 L88,26 L50,44 L12,26 Z" />
+        <path
+            android:strokeColor="#FF4D8D"
+            android:strokeWidth="11"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M17,43 L50,59 L83,43" />
+        <path
+            android:strokeColor="#FF4D8D"
+            android:strokeWidth="11"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M17,63 L50,79 L83,63" />
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="7"
+            android:strokeLineCap="round"
+            android:strokeLineJoin="round"
+            android:pathData="M50,47 V83 M38,71 L50,83 L62,71" />
+    </group>
+</vector>

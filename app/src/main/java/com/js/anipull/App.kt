@@ -1,0 +1,1729 @@
+package com.js.anipull
+
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.ui.unit.toSize
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.layout.positionInParent
+import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.launch
+
+// Colours taken from the web mockup's CSS variables.
+private val OutfitFont = FontFamily(
+    Font(R.font.outfit_regular, FontWeight.Normal),
+    Font(R.font.outfit_bold, FontWeight.Bold),
+    Font(R.font.outfit_extrabold, FontWeight.ExtraBold),
+)
+
+val Bg = Color(0xFF07070C)
+private val Bg2 = Color(0xFF0B0B13)
+private val Card = Color(0xFF16161F)
+private val TextMain = Color(0xFFF5F5FA)
+private val Muted = Color(0xFFA2A2B5)
+private val Faint = Color(0xFF6D6D82)
+private val Pink = Color(0xFFFF4D8D)
+private val Lavender = Color(0xFFA78BFA)
+private val Teal = Color(0xFF2DD4BF)
+
+@Composable
+fun AnipullTheme(content: @Composable () -> Unit) {
+    MaterialTheme(
+        colorScheme = darkColorScheme(
+            background = Bg,
+            surface = Bg2,
+            primary = Pink,
+            onBackground = TextMain,
+            onSurface = TextMain,
+        ),
+        content = content,
+    )
+}
+
+@Composable
+fun LogoRow(modifier: Modifier = Modifier) {
+    Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
+        Box(
+            modifier = Modifier
+                .size(28.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(8.dp))
+                .background(Bg),
+            contentAlignment = Alignment.Center,
+        ) {
+            // v2 logo is pink on black — the old pink chip would hide
+            // the pink diamond and chevrons, leaving only the white arrow.
+            androidx.compose.foundation.Image(
+                painter = painterResource(R.drawable.ic_launcher_foreground),
+                contentDescription = "Anipull icon",
+                modifier = Modifier.size(22.dp),
+            )
+        }
+        Spacer(Modifier.width(7.dp))
+        Text(
+            text = buildAnnotatedString {
+                withStyle(SpanStyle(color = Color.White)) { append("Ani") }
+                withStyle(SpanStyle(color = Pink)) { append("pull") }
+            },
+            fontSize = 18.sp,
+            fontWeight = FontWeight.ExtraBold,
+            letterSpacing = (-0.4).sp,
+        )
+    }
+}
+
+@Composable
+fun TopBar(onSettingsClick: () -> Unit = {}, onDownloadsClick: () -> Unit = {}, scrolled: Boolean = false) {
+    // Website topbar is position:fixed — it stays at the top while the page
+    // scrolls under it, and after 30px it becomes a solid #0D0D16 pill.
+    // The app's old topbar scrolled away with the header; a stickyHeader
+    // in the LazyColumn gives the same fixed behaviour here.
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(if (scrolled) Color(0xFF0D0D16) else Color.Transparent)
+            .border(1.dp, if (scrolled) Color.White.copy(alpha = 0.09f) else Color.Transparent, RoundedCornerShape(16.dp))
+            .padding(horizontal = 10.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LogoRow()
+        Spacer(Modifier.weight(1f))
+        // The old dot pill did nothing — it is now the Downloads page,
+        // the most important page in a downloader. The bell is gone:
+        // no notifications, that button is now Settings.
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+                .background(Card)
+                .clickable(onClick = onDownloadsClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            androidx.compose.foundation.Image(
+                painter = painterResource(R.drawable.ic_download),
+                contentDescription = "Downloads",
+                modifier = Modifier.size(18.dp),
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Muted),
+            )
+        }
+        Spacer(Modifier.width(6.dp))
+        Box(
+            modifier = Modifier
+                .size(34.dp)
+                .clip(RoundedCornerShape(999.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+                .background(Card)
+                .clickable(onClick = onSettingsClick),
+            contentAlignment = Alignment.Center,
+        ) {
+            androidx.compose.foundation.Image(
+                painter = painterResource(R.drawable.ic_settings),
+                contentDescription = "Settings",
+                modifier = Modifier.size(18.dp),
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Muted),
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+fun SourceChips() {
+    // HTML sources row wraps (flex-wrap, centred) — AnimeOut lands on a
+    // second line on a phone, it must never be clipped off-screen.
+    FlowRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalArrangement = Arrangement.spacedBy(7.dp),
+    ) {
+        Text("Sources", color = Faint, fontSize = 12.sp, modifier = Modifier.padding(end = 7.dp, top = 6.dp))
+        SourceChip("AnimePahe", "healthy", Color(0xFF34D399))
+        Spacer(Modifier.width(7.dp))
+        SourceChip("AnimeTosho", "healthy", Color(0xFF34D399))
+        Spacer(Modifier.width(7.dp))
+        SourceChip("AnimeOut", "slow today", Color(0xFFFBBF24))
+    }
+}
+
+@Composable
+fun SourceChip(name: String, status: String, dot: Color) {
+    Row(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(999.dp))
+            .background(Color.White.copy(alpha = 0.03f))
+            .padding(horizontal = 10.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(modifier = Modifier.size(7.dp).clip(RoundedCornerShape(999.dp)).background(dot))
+        Spacer(Modifier.width(7.dp))
+        Text(name, color = Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.width(4.dp))
+        Text("· $status", color = Faint, fontSize = 12.sp)
+    }
+}
+
+@Composable
+fun Chip(label: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(999.dp))
+            .background(Card)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 13.dp, vertical = 8.dp),
+    ) {
+        Text(label, color = Muted, fontSize = 12.5.sp, fontWeight = FontWeight.Medium)
+    }
+}
+
+@Composable
+fun QuickChips(onChip: (String) -> Unit) {
+    // One horizontal line, like the user asked: Movies / 1080p ready /
+    // Series / OVA. LazyRow, centred, so it stays one line even if the
+    // phone font is large (it scrolls instead of wrapping to a 2nd row).
+    androidx.compose.foundation.lazy.LazyRow(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        items(listOf("Movies", "1080p ready", "Series", "OVA")) { label ->
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(999.dp))
+                    .background(Card)
+                    .clickable { onChip(label) }
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+            ) {
+                Text(label, color = Muted, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+            }
+            Spacer(Modifier.width(7.dp))
+        }
+    }
+}
+
+@Composable
+fun StatCell(value: String, label: String) {
+    // Tight, like the site's .stat: 12px/8px padding, 18px value,
+    // 1px gap to the label — no extra line-height air inside the card.
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
+            .background(Card)
+            .padding(vertical = 12.dp, horizontal = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(1.dp),
+    ) {
+        Text(value, color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 20.sp)
+        Text(label, color = Faint, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, lineHeight = 13.sp)
+    }
+}
+
+@Composable
+fun StatsGrid(live: Boolean, loading: Boolean = false) {
+    Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            Box(Modifier.weight(1f)) {
+                if (loading) StatCell("···", "LOADING")
+                else if (live) StatCell("LIVE", "ANILAB FEED")
+                else StatCell("15", "TITLES IN DEMO")
+            }
+            Box(Modifier.weight(1f)) { StatCell("3", "DDL SOURCES") }
+        }
+        Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            Box(Modifier.weight(1f)) { StatCell("1080p", "MAX QUALITY") }
+            Box(Modifier.weight(1f)) { StatCell("0", "TRACKERS") }
+        }
+    }
+}
+
+@Composable
+fun PosterImage(poster: String?, modifier: Modifier) {
+    var bitmap by remember(poster) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    if (poster != null) {
+        LaunchedEffect(poster) {
+            bitmap = PosterCache.get(poster) ?: loadPoster(poster, ctx)
+        }
+    }
+    Box(modifier = modifier.background(Color(0xFF14141F))) {
+        val bmp = bitmap
+        if (bmp != null) {
+            androidx.compose.foundation.Image(
+                bitmap = bmp.asImageBitmap(),
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+            )
+        }
+    }
+}
+
+@Composable
+fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp) {
+    val cardHeight = cardWidth * 3 / 2
+    Column(
+        modifier = Modifier
+            .width(cardWidth)
+            .clickable(onClick = onClick),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(width = cardWidth, height = cardHeight)
+                .clip(RoundedCornerShape(16.dp))
+                .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp)),
+        ) {
+            PosterImage(title.poster, Modifier.fillMaxSize())
+            val topLabel = when {
+                title.episodes != null -> "EP ${title.episodes}"
+                title.score != null -> "★ ${title.score}"
+                title.type != null -> title.type
+                else -> null
+            }
+            if (topLabel != null) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = 8.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Color.Black.copy(alpha = 0.6f))
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                ) {
+                    Text(topLabel, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(8.dp)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Pink)
+                    .padding(horizontal = 6.dp, vertical = 3.dp),
+            ) {
+                Text("1080p", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(8.dp)
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(11.dp))
+                    .background(Color.Black.copy(alpha = 0.55f))
+                    .clickable { notWired?.invoke() },
+                contentAlignment = Alignment.Center,
+            ) {
+                androidx.compose.foundation.Image(
+                    painter = painterResource(R.drawable.ic_download),
+                    contentDescription = "Download",
+                    modifier = Modifier.size(18.dp),
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+                )
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(title.title, color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, minLines = 2, lineHeight = 16.sp)
+        Spacer(Modifier.height(2.dp))
+        val meta = listOfNotNull(title.type, title.year).joinToString(" · ")
+        if (meta.isNotBlank()) Text(meta, color = Muted, fontSize = 11.sp)
+    }
+}
+
+data class RowTag(val text: String, val solid: Boolean = false)
+
+@Composable
+fun SkeletonRow() {
+    // What loading looks like now: dark placeholder cards, NOT demo titles.
+    // Demo titles as a placeholder were the confusing part — they looked
+    // like real data, then swapped. Skeletons say "still loading" honestly.
+    Column {
+        Box(Modifier.width(140.dp).height(18.dp).clip(RoundedCornerShape(8.dp)).background(Card))
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            repeat(3) {
+                Box(Modifier.width(118.dp).height(177.dp).clip(RoundedCornerShape(12.dp)).background(Card))
+            }
+        }
+    }
+}
+
+@Composable
+fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null) {
+    Column {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (iconRes != null) {
+                androidx.compose.foundation.Image(
+                    painter = painterResource(iconRes),
+                    contentDescription = null,
+                    modifier = Modifier.size(17.dp),
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
+                )
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(heading, color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            tags.forEach { tag ->
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(999.dp))
+                        .background(if (tag.solid) Color.White else Card)
+                        .padding(horizontal = 10.dp, vertical = 4.dp),
+                ) { Text(tag.text, color = if (tag.solid) Color.Black else Muted, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+            }
+        }
+        Spacer(Modifier.height(12.dp))
+        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            items(titles) { PosterCard(it, { onOpen(it) }, notWired) }
+        }
+    }
+}
+
+@Composable
+fun EditorsPick(pick: ApiTitle, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit) {
+    // Website pick: a wide card, image behind, content over a shade that
+    // gets darker toward the bottom so both buttons stay readable.
+    // matchParentSize (not fillMaxSize) is what makes the poster cover
+    // the whole card, including the Details button area — fillMaxSize
+    // in a scrolling column left that bottom strip poster-less.
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp))
+            .background(Color(0xFF14141F))
+            .clickable { onOpen(pick) },
+    ) {
+        PosterImage(pick.poster, Modifier.matchParentSize())
+        // Website shade is horizontal (left dark .88 -> right .08); stack a
+        // vertical darkening underneath it so the bottom buttons stay readable.
+        Box(
+            Modifier.matchParentSize().background(
+                Brush.horizontalGradient(
+                    colors = listOf(
+                        Color(0xFF05050A).copy(alpha = 0.88f),
+                        Color(0xFF05050A).copy(alpha = 0.45f),
+                        Color(0xFF05050A).copy(alpha = 0.08f),
+                    )
+                )
+            )
+        )
+        Box(
+            Modifier.matchParentSize().background(
+                Brush.verticalGradient(
+                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f))
+                )
+            )
+        )
+        Column(modifier = Modifier.padding(18.dp)) {
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .border(1.dp, Pink.copy(alpha = 0.45f), RoundedCornerShape(999.dp))
+                    .background(Pink.copy(alpha = 0.22f))
+                    .padding(horizontal = 11.dp, vertical = 5.dp),
+            ) {
+                val typeLabel = (pick.type ?: "ANIME").uppercase()
+                // Website .pick-tag exactly: light pink #FFD7E7 text, not
+                // plain pink — that's why the app pill looked washed out
+                // over a bright poster.
+                Text("$typeLabel · 1080P READY", color = Color(0xFFFFD7E7), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp)
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(pick.title, color = TextMain, fontSize = 25.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 28.sp)
+            Spacer(Modifier.height(6.dp))
+            val syn = pick.overview
+                ?: "Kyoto Animation's film about a boy seeking redemption from the deaf girl he bullied. One file, no episodes to chase — pull it and keep it forever."
+            Text(syn, color = Color.White.copy(alpha = 0.85f), fontSize = 13.5.sp, lineHeight = 19.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(15.dp))
+            Button(
+                onClick = notWired,
+                colors = ButtonDefaults.buttonColors(containerColor = Pink),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                androidx.compose.foundation.Image(
+                    painter = painterResource(R.drawable.ic_download),
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+                )
+                Spacer(Modifier.width(8.dp))
+                Text("Download · 1080p", color = Color.White, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = { onOpen(pick) }, modifier = Modifier.fillMaxWidth()) {
+                Text("Details & other qualities", color = Color.White)
+            }
+        }
+    }
+}
+
+
+// ---- Finger trail, header only -------------------------------------------
+// Behaviour only, borrowed from Nothing OS 3.0's hold-interact: hold your
+// finger down, then drag in the SAME gesture — no lift, no button.
+// Implementation: detectDragGesturesAfterLongPress on the header Box.
+// A tap, or a drag that starts without a long-press, is cancelled by that
+// detector, so normal taps, search typing and LazyColumn scrolling still
+// work. The trail Canvas lives only inside this header Box, points are
+// clamped to its height, and poster rows are separate LazyColumn items
+// below it, so the trail cannot leak below the header. Background dots
+// live in the top ~third of the header (the hero area), never piled up
+// on the search pill.
+private data class BgDot(val xFrac: Float, val yFrac: Float, val radius: Float, val color: Color, val phase: Float, val speed: Float, val drift: Float)
+private data class TrailDot(val pos: Offset, val radius: Float)
+
+@Composable
+fun HeaderSection(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    onSearchSubmit: () -> Unit,
+    onChip: (String) -> Unit,
+    live: Boolean,
+    loadingHome: Boolean,
+    onFocusChange: (Boolean) -> Unit,
+    isSearching: Boolean,
+    onPillPositioned: (androidx.compose.ui.layout.LayoutCoordinates) -> Unit = {},
+    particlesOn: Boolean = true,
+) {
+    // No "Trail mode" text anywhere: the trail is an easter egg now.
+    // Hold anywhere in the header, drag, lift to fade — nothing announces it.
+    val focusRequester = remember { FocusRequester() }
+    val focusManager = LocalFocusManager.current
+    var pillFocused by remember { mutableStateOf(false) }
+    var armed by remember { mutableStateOf(false) }
+    var trail by remember { mutableStateOf<List<TrailDot>>(emptyList()) }
+    var fading by remember { mutableStateOf(false) }
+    var headerSize by remember { mutableStateOf(IntSize.Zero) }
+    var searchTopPx by remember { mutableStateOf<Float?>(null) }
+    var bgOffsets by remember { mutableStateOf(List(48) { Offset.Zero }) }
+    // 20fps ticker: drives particle drift + twinkle. 20fps, not 60,
+    // so it stays cheap on low-spec phones.
+    var animTime by remember { mutableStateOf(0L) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            kotlinx.coroutines.delay(50)
+            animTime += 50
+        }
+    }
+    var lastFinger by remember { mutableStateOf<Offset?>(null) }
+    var lastFingerMs by remember { mutableStateOf(0L) }
+    val fadeAnim = remember { Animatable(1f) }
+    val haptics = LocalHapticFeedback.current
+    val keyboard = LocalSoftwareKeyboardController.current
+
+    val bgDots = remember {
+        val rnd = kotlin.random.Random(42)
+        List(48) { i ->
+            BgDot(
+                xFrac = rnd.nextFloat(),
+                yFrac = rnd.nextFloat() * 0.45f,
+                radius = 2f + rnd.nextFloat() * 5f,
+                color = if (i % 5 == 0) Pink else Color.White,
+                phase = rnd.nextFloat() * 6.28f,
+                speed = 0.6f + rnd.nextFloat() * 1.4f,
+                drift = 6f + rnd.nextFloat() * 8f,
+            )
+        }
+    }
+
+    LaunchedEffect(armed, fading) {
+        while (armed || fading || bgOffsets.any { it.getDistance() > 0.5f }) {
+            kotlinx.coroutines.delay(32)
+            bgOffsets = bgOffsets.map { off ->
+                val decayed = off * 0.80f
+                if (decayed.getDistance() < 0.5f) Offset.Zero else decayed
+            }
+        }
+    }
+
+    LaunchedEffect(fading) {
+        if (fading) {
+            fadeAnim.animateTo(0f, tween(350))
+            trail = emptyList()
+            lastFinger = null
+            fading = false
+            armed = false
+            fadeAnim.snapTo(1f)
+        }
+    }
+
+    fun pushDots(finger: Offset, width: Float) {
+        bgOffsets = bgDots.mapIndexed { i, dot ->
+            val home = Offset(dot.xFrac * width, dot.yFrac * headerSize.height.toFloat())
+            val delta = (home + bgOffsets[i]) - finger
+            val dist = delta.getDistance()
+            if (dist in 0.01f..110f && dist > 0f) {
+                val push = (110f - dist) / 110f * 18f
+                val next = bgOffsets[i] + delta / dist * push
+                if (next.getDistance() > 40f) next / next.getDistance() * 40f else next
+            } else {
+                bgOffsets[i]
+            }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .onSizeChanged { headerSize = it }
+            .pointerInput(Unit) {
+                detectDragGesturesAfterLongPress(
+                    onDragStart = { pos ->
+                        armed = true
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        val start = Offset(
+                            pos.x.coerceIn(0f, headerSize.width.toFloat()),
+                            pos.y.coerceIn(0f, headerSize.height.toFloat()),
+                        )
+                        trail = listOf(TrailDot(start, 6f))
+                        lastFinger = start
+                        lastFingerMs = 0L
+                        pushDots(start, headerSize.width.toFloat())
+                    },
+                    onDrag = { change, _ ->
+                        change.consume()
+                        val clamped = Offset(
+                            change.position.x.coerceIn(0f, headerSize.width.toFloat()),
+                            change.position.y.coerceIn(0f, headerSize.height.toFloat()),
+                        )
+                        pushDots(clamped, headerSize.width.toFloat())
+                        val last = lastFinger
+                        val prev = trail.lastOrNull()
+                        if (last != null && prev != null) {
+                            val dist = (clamped - last).getDistance()
+                            if (dist >= 14f) {
+                                val dt = (change.uptimeMillis - lastFingerMs).coerceAtLeast(1L)
+                                val speed = dist / dt.toFloat()
+                                val vel = (speed / 1.5f).coerceIn(0f, 1f)
+                                val radius = 4f + vel * 6f + (trail.size % 3) * 1.5f
+                                trail = (trail + TrailDot(clamped, radius)).takeLast(40)
+                            }
+                        }
+                        lastFinger = clamped
+                        lastFingerMs = change.uptimeMillis
+                    },
+                    onDragEnd = { fading = true },
+                    onDragCancel = { fading = true },
+                )
+            },
+    ) {
+        Canvas(modifier = Modifier.matchParentSize()) {
+            val w = size.width
+            val h = size.height
+            val searchTop = searchTopPx ?: h
+            val t = animTime / 1000f
+            if (particlesOn) bgDots.forEachIndexed { i, dot ->
+                // Slow drift + twinkle: each dot has its own phase/speed,
+                // so they shimmer out of sync instead of pulsing together.
+                val driftX = kotlin.math.sin(t * dot.speed + dot.phase) * dot.drift
+                val driftY = kotlin.math.cos(t * dot.speed * 0.8f + dot.phase) * dot.drift * 0.6f
+                val twinkle = 0.5f + 0.5f * kotlin.math.sin(t * dot.speed * 1.5f + dot.phase * 2f)
+                var pos = Offset(dot.xFrac * w, dot.yFrac * h) + Offset(driftX, driftY) + bgOffsets[i]
+                if (pos.y > searchTop - 8f) pos = Offset(pos.x, searchTop - 8f)
+                // Glow halo first, then the core dot.
+                drawCircle(color = dot.color, radius = dot.radius * 3f, center = pos, alpha = 0.10f * twinkle)
+                drawCircle(color = dot.color, radius = dot.radius, center = pos, alpha = 0.25f + 0.45f * twinkle)
+            }
+            // One continuous glowing line: a wide low-alpha pink stroke
+            // for the glow, then a thin bright core stroke. Round caps
+            // and joins so the ~14px-spaced points read as a line, not dots.
+            if (trail.size >= 2) {
+                val path = androidx.compose.ui.graphics.Path()
+                path.moveTo(trail.first().pos.x, trail.first().pos.y)
+                trail.drop(1).forEach { dot -> path.lineTo(dot.pos.x, dot.pos.y) }
+                drawPath(
+                    path = path, color = Pink, alpha = 0.35f * fadeAnim.value,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 28f, cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round),
+                )
+                drawPath(
+                    path = path, color = Color.White, alpha = 1f * fadeAnim.value,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(width = 7f, cap = androidx.compose.ui.graphics.StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round),
+                )
+            } else {
+                trail.firstOrNull()?.let {
+                    drawCircle(color = Color.White, radius = 4f, center = it.pos, alpha = fadeAnim.value)
+                }
+            }
+        }
+        Column {
+            Spacer(Modifier.height(10.dp))
+            // TopBar is a stickyHeader in the LazyColumn now, not here.
+            Spacer(Modifier.height(24.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+                        .background(Card)
+                        .padding(horizontal = 11.dp, vertical = 6.dp),
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(modifier = Modifier.size(7.dp).clip(RoundedCornerShape(999.dp)).background(Color(0xFF34D399)))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "DOWNLOAD-ONLY · NO STREAMING · NO TRACKING",
+                            color = Muted, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.1.sp,
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "Find it. Pull it.",
+                color = TextMain, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold,
+                letterSpacing = (-1).sp, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(), lineHeight = 37.sp,
+            )
+            Text(
+                "Keep it offline.",
+                color = Pink, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold,
+                letterSpacing = (-1).sp, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(), lineHeight = 37.sp,
+            )
+            Spacer(Modifier.height(13.dp))
+            Text(
+                "Search any anime, pick resolution, and pull clean direct-download links episode by episode or the whole season in one go.",
+                color = Muted, fontSize = 15.sp, lineHeight = 23.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(Modifier.height(22.dp))
+            // Search pill, website size: 48dp tall, full width (no trail
+            // button beside it any more). BasicTextField, not Material
+            // TextField, so the pill is not inflated to 56dp+ by the
+            // field's own padding, and the placeholder stays one line.
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp)
+                    .onGloballyPositioned { searchTopPx = it.positionInParent().y; onPillPositioned(it) }
+                    .border(
+                        width = 1.dp,
+                        color = if (pillFocused) Pink.copy(alpha = 0.6f) else Color.White.copy(alpha = 0.09f),
+                        shape = RoundedCornerShape(999.dp),
+                    )
+                    .background(Color(0xFF10101A))
+                    .padding(start = 15.dp, end = 5.dp, top = 5.dp, bottom = 5.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxSize()) {
+                    androidx.compose.foundation.Image(
+                        painter = painterResource(R.drawable.ic_search),
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Faint),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Box(modifier = Modifier.weight(1f)) {
+                        BasicTextField(
+                            value = query,
+                            onValueChange = onQueryChange,
+                            singleLine = true,
+                            textStyle = TextStyle(color = TextMain, fontSize = 15.sp),
+                            cursorBrush = SolidColor(Pink),
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                            keyboardActions = KeyboardActions(onSearch = {
+                                keyboard?.hide()
+                                onSearchSubmit()
+                            }),
+                            modifier = Modifier.fillMaxWidth()
+                                .focusRequester(focusRequester)
+                                .onFocusChanged { pillFocused = it.isFocused; onFocusChange(it.isFocused) },
+                            decorationBox = { inner ->
+                                Box(
+                                    modifier = Modifier.fillMaxSize(),
+                                    contentAlignment = Alignment.CenterStart,
+                                ) {
+                                    if (query.isEmpty()) {
+                                        Text(
+                                            "Search anime...",
+                                            color = Faint, fontSize = 15.sp,
+                                            maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        )
+                                    }
+                                    inner()
+                                }
+                            },
+                        )
+                    }
+                    if (query.isNotEmpty()) {
+                        Spacer(Modifier.width(4.dp))
+                        // Unmissable now: 32dp grey circle, 20dp icon in
+                        // Muted (not faint), not a faint 16dp glyph.
+                        // One tap clears the text, hides the keyboard and
+                        // clears focus, so the home rows come straight back.
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .background(Card)
+                                .clickable {
+                                    onQueryChange("")
+                                    keyboard?.hide()
+                                    focusManager.clearFocus()
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            androidx.compose.foundation.Image(
+                                painter = painterResource(R.drawable.ic_close),
+                                contentDescription = "Clear search and return home",
+                                modifier = Modifier.size(20.dp),
+                                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Muted),
+                            )
+                        }
+                        Spacer(Modifier.width(4.dp))
+                    }
+                    // Fixed 38dp height, content centred: the button can
+                    // no longer sit off-centre inside the 48dp pill.
+                    Box(
+                        modifier = Modifier
+                            .height(38.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(Pink)
+                            .clickable {
+                                keyboard?.hide()
+                                focusManager.clearFocus()
+                                onSearchSubmit()
+                            }
+                            .padding(horizontal = 16.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("Search", color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+            AnimatedVisibility(
+                visible = !isSearching,
+                enter = fadeIn(),
+                exit = fadeOut() + slideOutVertically { -it / 2 },
+            ) {
+                Column {
+                    Spacer(Modifier.height(13.dp))
+                    QuickChips(onChip = onChip)
+                    Spacer(Modifier.height(28.dp))
+                    StatsGrid(live, loadingHome)
+                    Spacer(Modifier.height(12.dp))
+                    SourceChips()
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    }
+}
+
+@Composable
+fun AnipullApp() {
+    // HTML version's font is Outfit — bundle the same OFL family and make
+    // every Text in the app use it by default, so the app reads like the site.
+    androidx.compose.runtime.CompositionLocalProvider(
+        androidx.compose.material3.LocalTextStyle provides androidx.compose.ui.text.TextStyle(fontFamily = OutfitFont)
+    ) {
+        AnipullAppInner()
+    }
+}
+
+@Composable
+fun AnipullAppInner() {
+    val context = LocalContext.current
+    var screen by remember { mutableStateOf<ApiTitle?>(null) }
+    var query by remember { mutableStateOf("") }
+    var sheetFor by remember { mutableStateOf<ApiTitle?>(null) }
+    var liveSections by remember { mutableStateOf<List<HomeSection>?>(null) }
+    var featured by remember { mutableStateOf<ApiTitle?>(null) }
+    var homeFailed by remember { mutableStateOf(false) }
+    var extraSections by remember { mutableStateOf<List<HomeSection>>(emptyList()) }
+    var extraStarted by remember { mutableStateOf(false) }
+    var isChipQuery by remember { mutableStateOf(false) }
+    var liveSearchDone by remember { mutableStateOf(false) }
+    var pillCoords by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    var lazyColumnCoords by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    val homeKeyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
+    var liveResults by remember { mutableStateOf<List<ApiTitle>?>(null) }
+    var searching by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var showDownloads by remember { mutableStateOf(false) }
+    var isSearchFocused by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+    val appFocusManager = LocalFocusManager.current
+    // Tapping out = scrolling away: the cursor stops blinking, and the
+    // header content comes back (unless a query is still typed).
+    LaunchedEffect(listState.isScrollInProgress) {
+        if (listState.isScrollInProgress) appFocusManager.clearFocus()
+    }
+    val notWired: () -> Unit = {
+        Toast.makeText(context, "Not wired yet — downloads come after the AniLab stage", Toast.LENGTH_SHORT).show()
+    }
+
+    // System back: sheet first, then notifications, then detail -> home,
+    // never straight out of the app from a detail page.
+    BackHandler(enabled = screen != null || sheetFor != null || showSettings || showDownloads) {
+        if (sheetFor != null) sheetFor = null
+        else if (showSettings) showSettings = false
+        else if (showDownloads) showDownloads = false
+        else screen = null
+    }
+
+    // Dynamic home, instant second time: (1) cached live home renders
+    // immediately if there is one, (2) a progressive refresh updates each
+    // row the moment it lands, (3) demo titles appear ONLY if the fetch
+    // actually fails and there is no cache — never as a loading placeholder.
+    LaunchedEffect(Unit) {
+        val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched")
+        val cached = loadHomeCache(context)
+        val localSections = cached?.sections?.toMutableList() ?: mutableListOf()
+        var localFeatured = cached?.featured
+        if (cached != null) {
+            liveSections = localSections.sortedBy { wanted.indexOf(it.name) }
+            featured = localFeatured
+        }
+        fetchHomeProgressive(
+            onSection = { _, sec ->
+                val existing = localSections.indexOfFirst { it.name == sec.name }
+                if (existing >= 0) localSections[existing] = sec else localSections += sec
+                liveSections = localSections.sortedBy { wanted.indexOf(it.name) }
+            },
+            onFeatured = { localFeatured = it; featured = it },
+        )
+        val ordered = localSections.sortedBy { wanted.indexOf(it.name) }
+        if (ordered.isEmpty() && localFeatured == null) {
+            homeFailed = true
+        } else {
+            saveHomeCache(context, HomeData(ordered, localFeatured))
+        }
+    }
+
+    fun submitSearch(q: String) {
+        appFocusManager.clearFocus()
+        isChipQuery = false
+        if (q.isBlank()) {
+            liveResults = null
+            searching = false
+            return
+        }
+        searching = true
+        scope.launch {
+            val results = searchAniLab(q)
+            liveResults = if (results.isNotEmpty()) results else null
+            liveSearchDone = true
+            searching = false
+        }
+    }
+
+    // Extra genre catalogs: fetch once, in parallel, when live home lands.
+    LaunchedEffect(liveSections) {
+        if (liveSections != null && !extraStarted) {
+            extraStarted = true
+            val genres = listOf(1 to "Action anime", 14 to "Romance anime", 5 to "Comedy anime", 4 to "Fantasy anime")
+            genres.forEach { (id, name) ->
+                scope.launch {
+                    fetchCategory(id, name)?.let { sec ->
+                        extraSections = extraSections + sec
+                    }
+                }
+            }
+        }
+    }
+
+    // Live search as you type, debounced 600ms: AniLab itself DOES have
+    // Kimi ni Todoke, Neon Genesis, Blue Spring Ride and Cyberpunk
+    // (verified live 2026-11-02) — the app just never asked it until the
+    // Search button was pressed. Now typing asks AniLab automatically.
+    LaunchedEffect(query, isChipQuery) {
+        if (query.isBlank() || isChipQuery) return@LaunchedEffect
+        kotlinx.coroutines.delay(600)
+        // Query may have changed during the delay; LaunchedEffect restarts
+        // on query change, so this only runs for the latest query.
+        searching = true
+        liveSearchDone = false
+        val results = searchAniLab(query)
+        liveResults = if (results.isNotEmpty()) results else null
+        liveSearchDone = true
+        searching = false
+    }
+
+    val demoApi = remember { DEMO_TITLES.map { demoToApi(it) } }
+
+    if (showSettings) {
+        SettingsScreen(onBack = { showSettings = false })
+    } else if (showDownloads) {
+        DownloadsScreen(onBack = { showDownloads = false }, onBrowse = { showDownloads = false })
+    } else if (screen == null) {
+        val shownDemo = if (query.isBlank()) null else demoApi.filter {
+            when (query) {
+                "Movies", "Movie" -> it.type == "Movie"
+                "Series" -> it.type == "TV"
+                "OVA" -> it.type == "ONA"
+                "1080p ready" -> true
+                else -> it.title.contains(query, ignoreCase = true)
+            }
+        }
+        LazyColumn(
+            state = listState,
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Bg)
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp)
+                .onGloballyPositioned { lazyColumnCoords = it }
+                .pointerInput(pillCoords, isSearchFocused, lazyColumnCoords) {
+                    detectTapGestures(onTap = { offset ->
+                        if (isSearchFocused) {
+                            // Pill bounds in LazyColumn coordinates, via
+                            // localBoundingBoxOf (no root/window API needed).
+                            val b = lazyColumnCoords?.let { lc -> pillCoords?.let { pc -> lc.localBoundingBoxOf(pc) } }
+                            if (b == null || !b.contains(offset)) {
+                                homeKeyboard?.hide()
+                                appFocusManager.clearFocus()
+                            }
+                        }
+                    })
+                },
+            verticalArrangement = Arrangement.spacedBy(36.dp),
+        ) {
+            stickyHeader {
+                TopBar(
+                    onSettingsClick = { showSettings = true },
+                    onDownloadsClick = { showDownloads = true },
+                    scrolled = listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 90,
+                )
+            }
+            item {
+                HeaderSection(
+                    query = query,
+                    onQueryChange = { query = it; isChipQuery = false; if (it.isBlank()) { liveResults = null; searching = false } else { searching = true } },
+                    onSearchSubmit = { submitSearch(query) },
+                    onChip = { chip ->
+                        query = chip
+                        isChipQuery = true
+                        liveResults = null
+                        searching = false
+                        appFocusManager.clearFocus()
+                    },
+                    live = liveSections != null,
+                    loadingHome = liveSections == null && !homeFailed,
+                    onFocusChange = { isSearchFocused = it },
+                    isSearching = isSearchFocused || query.isNotBlank(),
+                    onPillPositioned = { pillCoords = it },
+                    particlesOn = LocalContext.current.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("particles", true),
+                )
+            }
+            if (query.isNotBlank()) {
+                item {
+                    Text(
+                        if (searching) "Searching AniLab…" else "Search results",
+                        color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    // Live first; chip queries use the demo type filter;
+                    // a manual query falls back to demo only AFTER AniLab
+                    // has answered empty — never before, which was the bug.
+                    val results = when {
+                        liveResults != null -> liveResults!!
+                        isChipQuery -> shownDemo ?: emptyList()
+                        searching -> emptyList()
+                        liveSearchDone -> shownDemo ?: emptyList()
+                        else -> shownDemo ?: emptyList()
+                    }
+                    if (results.isEmpty() && !searching) {
+                        Text("Nothing found — try another title.", color = Muted, fontSize = 13.sp)
+                    } else if (searching) {
+                        SkeletonRow()
+                    } else {
+                        // HTML results grid: two columns on a phone.
+                        // Cards fill the full content width — the old fixed
+                        // 164dp cards left an awkward empty strip on the
+                        // right on wider phones (e.g. 411dp wide).
+                        androidx.compose.foundation.layout.BoxWithConstraints {
+                            val cardW = (maxWidth - 12.dp) / 2
+                            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                                results.chunked(2).forEach { pair ->
+                                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        pair.forEach { t ->
+                                            PosterCard(t, onClick = { screen = t }, notWired = notWired, cardWidth = cardW)
+                                        }
+                                        if (pair.size == 1) Spacer(Modifier.width(cardW))
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if (isSearchFocused) {
+                item { Text("Type to search AniLab…", color = Faint, fontSize = 13.sp) }
+            } else if (liveSections != null) {
+                val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
+                if (spotlight != null) {
+                    item { PosterRow("Weekend marathon picks", listOf(RowTag("Sun", true), RowTag("Full seasons ready")), spotlight.titles.take(5), { screen = it }, notWired, R.drawable.ic_calendar) }
+                }
+                featured?.let { pick ->
+                    item {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            androidx.compose.foundation.Image(
+                                painter = painterResource(R.drawable.ic_star),
+                                contentDescription = null,
+                                modifier = Modifier.size(17.dp),
+                                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Editor's pick", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        EditorsPick(pick, { screen = it }, notWired)
+                    }
+                }
+                liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
+                    val icon = when (section.name) {
+                        "Spotlight" -> R.drawable.ic_star
+                        "Trending" -> R.drawable.ic_flame
+                        "Most Popular" -> R.drawable.ic_chart
+                        "Top Airing" -> R.drawable.ic_film
+                        "Most Watched" -> R.drawable.ic_eye
+                        else -> null
+                    }
+                    item { PosterRow(section.name, emptyList(), section.titles, { screen = it }, notWired, icon) }
+                }
+            } else if (homeFailed) {
+                item { Text("Offline — showing demo titles", color = Faint, fontSize = 12.sp) }
+                item { PosterRow("Weekend marathon picks", listOf(RowTag("Sun", true), RowTag("Full seasons ready")), DEMO_TITLES.take(5).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_calendar) }
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.foundation.Image(
+                            painter = painterResource(R.drawable.ic_star),
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Editor's pick", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    EditorsPick(demoApi.first { it.title == "A Silent Voice" }, { screen = it }, notWired)
+                }
+                item { PosterRow("Trending", emptyList(), DEMO_TITLES.drop(2).take(5).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_flame) }
+                item { PosterRow("Popular anime", emptyList(), DEMO_TITLES.drop(5).take(5).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_chart) }
+                item { PosterRow("Season picks", listOf(RowTag("Curated"), RowTag("Recent years")), DEMO_TITLES.drop(8).take(5).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_calendar) }
+                item { PosterRow("Top anime", listOf(RowTag("All time")), DEMO_TITLES.take(5).reversed().map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_trophy) }
+                item { PosterRow("Studio spotlight", listOf(RowTag("Madhouse")), listOf(DEMO_TITLES[4], DEMO_TITLES[10], DEMO_TITLES[0]).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_film) }
+            } else {
+                // First load, no cache, fetch still running: skeletons, not demo.
+                item { SkeletonRow() }
+                item { SkeletonRow() }
+            }
+            // Extra catalogs, below the AniLab home rows: genre rows from
+            // /api/category (Action 1, Romance 14, Comedy 5, Fantasy 4).
+            // They load progressively in the background, like home rows.
+            if (!isSearchFocused && query.isBlank() && liveSections != null) {
+                extraSections.forEach { section ->
+                    item { PosterRow(section.name, emptyList(), section.titles, { screen = it }, notWired, null) }
+                }
+            }
+            item {
+                Column {
+                    LogoRow()
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Download-only anime. Anipull indexes direct-download sources and resolves links — it doesn't host files, stream video, or track what you pull.",
+                        color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    Text("Sources: AnimePahe · AnimeTosho · AnimeOut", color = Faint, fontSize = 12.sp)
+                    Spacer(Modifier.height(24.dp))
+                }
+            }
+        }
+    } else {
+        DetailScreen(
+            title = screen!!,
+            onBack = { screen = null },
+            onPull = { sheetFor = it },
+        )
+    }
+
+    sheetFor?.let { title ->
+        DownloadSheet(title = title, onDismiss = { sheetFor = null }, notWired = notWired)
+    }
+}
+
+@Composable
+fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
+    // The download queue lives here once the resolver lands. Until then
+    // this is an honest empty state, not a fake list.
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Bg)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text("← Back", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable(onClick = onBack))
+        }
+        Spacer(Modifier.height(80.dp))
+        Box(
+            modifier = Modifier
+                .size(64.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Card)
+                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(18.dp)),
+            contentAlignment = Alignment.Center,
+        ) {
+            androidx.compose.foundation.Image(
+                painter = painterResource(R.drawable.ic_download),
+                contentDescription = null,
+                modifier = Modifier.size(28.dp),
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
+            )
+        }
+        Spacer(Modifier.height(16.dp))
+        Text("Downloads is empty", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "Nothing downloaded yet — pull an episode and it will show up here, with progress, pause and resume.",
+            color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp, textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(24.dp))
+        Box(
+            modifier = Modifier
+                .clip(RoundedCornerShape(999.dp))
+                .background(Pink)
+                .clickable(onClick = onBrowse)
+                .padding(horizontal = 20.dp, vertical = 11.dp),
+            contentAlignment = Alignment.Center,
+        ) { Text("Browse anime", color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
+    }
+}
+
+@Composable
+fun SettingsScreen(onBack: () -> Unit) {
+    val ctx = LocalContext.current
+    val prefs = remember { ctx.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE) }
+    // Saved now, applied when the resolver lands — downloads are still
+    // demo-only, so these do not download anything yet. Saying so here
+    // beats silently pretending they work.
+    var parallel by remember { mutableStateOf(prefs.getInt("parallel", 2)) }
+    var speedLimit by remember { mutableStateOf(prefs.getInt("speed_mbps", 0)) }
+    var folder by remember { mutableStateOf(prefs.getString("folder", "Downloads/Anipull") ?: "Downloads/Anipull") }
+    var quality by remember { mutableStateOf(prefs.getString("quality", "1080p") ?: "1080p") }
+    var language by remember { mutableStateOf(prefs.getString("language", "Sub") ?: "Sub") }
+    var wifiOnly by remember { mutableStateOf(prefs.getBoolean("wifi_only", true)) }
+    var askSeason by remember { mutableStateOf(prefs.getBoolean("ask_season", true)) }
+    var subs by remember { mutableStateOf(prefs.getBoolean("subs", true)) }
+    var particles by remember { mutableStateOf(prefs.getBoolean("particles", true)) }
+    var cacheMsg by remember { mutableStateOf<String?>(null) }
+    fun save() {
+        prefs.edit()
+            .putInt("parallel", parallel)
+            .putInt("speed_mbps", speedLimit)
+            .putString("folder", folder)
+            .putString("quality", quality)
+            .putString("language", language)
+            .putBoolean("wifi_only", wifiOnly)
+            .putBoolean("ask_season", askSeason)
+            .putBoolean("subs", subs)
+            .putBoolean("particles", particles)
+            .apply()
+    }
+    // System folder picker — no hand-typing a path. The picked tree Uri
+    // is stored too (folder_uri) so the download engine can later write
+    // via DocumentFile; the human-readable path is what shows in the field.
+    val folderPicker = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri != null) {
+            try {
+                ctx.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            } catch (_: Exception) { }
+            val raw = java.net.URLDecoder.decode(uri.toString(), "UTF-8")
+            val afterColon = raw.substringAfter(":", raw)
+            val display = afterColon.removePrefix("/tree/").replace("primary:", "").trim()
+            if (display.isNotBlank()) {
+                folder = display
+                prefs.edit().putString("folder", display).putString("folder_uri", uri.toString()).apply()
+            }
+        }
+    }
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Bg)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp),
+    ) {
+        item {
+            Text("← Back", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable(onClick = onBack))
+            Spacer(Modifier.height(16.dp))
+            Text("Settings", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "Saved on this phone. Download settings apply once the download engine lands — right now downloads are still demo-only.",
+                color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
+            )
+            Spacer(Modifier.height(24.dp))
+        }
+        item {
+            Text("DOWNLOADS", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            Spacer(Modifier.height(12.dp))
+            Text("Parallel downloads", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                if (parallel <= 1) "1 episode at a time" else "$parallel episodes at once",
+                color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            )
+            androidx.compose.material3.Slider(
+                value = parallel.toFloat(), onValueChange = { parallel = it.toInt(); save() },
+                valueRange = 1f..5f, steps = 3,
+            )
+            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                Text("1", color = Faint, fontSize = 11.sp)
+                Text("5", color = Faint, fontSize = 11.sp)
+            }
+            Spacer(Modifier.height(20.dp))
+            Text("Download speed limit", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                if (speedLimit == 0) "Unlimited" else "$speedLimit MB/s",
+                color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            )
+            androidx.compose.material3.Slider(
+                value = speedLimit.toFloat(), onValueChange = { speedLimit = it.toInt(); save() },
+                valueRange = 0f..10f, steps = 9,
+            )
+            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
+                Text("Unlimited", color = Faint, fontSize = 11.sp)
+                Text("10 MB/s", color = Faint, fontSize = 11.sp)
+            }
+            Spacer(Modifier.height(20.dp))
+            Text("Download folder", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp))
+                        .background(Color(0xFF10101A))
+                        .padding(horizontal = 12.dp, vertical = 11.dp),
+                ) {
+                    BasicTextField(
+                        value = folder,
+                        onValueChange = { folder = it; save() },
+                        singleLine = true,
+                        textStyle = TextStyle(color = TextMain, fontSize = 14.sp),
+                        cursorBrush = SolidColor(Pink),
+                    )
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Pink)
+                        .clickable { folderPicker.launch(null) }
+                        .padding(horizontal = 14.dp, vertical = 11.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.foundation.Image(
+                            painter = painterResource(R.drawable.ic_folder),
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text("Browse", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Text("Tap Browse to pick a folder from your phone — no need to type a path by hand.", color = Faint, fontSize = 12.sp)
+            Spacer(Modifier.height(20.dp))
+            Text("Preferred quality", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("360p", "480p", "720p", "1080p").forEach { q ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .border(1.dp, if (quality == q) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+                            .background(if (quality == q) Pink.copy(alpha = 0.2f) else Card)
+                            .clickable { quality = q; save() }
+                            .padding(horizontal = 14.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text(q, color = if (quality == q) Color.White else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+            Spacer(Modifier.height(20.dp))
+            Text("Preferred language", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("Sub", "Dub").forEach { lang ->
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .border(1.dp, if (language == lang) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+                            .background(if (language == lang) Pink.copy(alpha = 0.2f) else Card)
+                            .clickable { language = lang; save() }
+                            .padding(horizontal = 18.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text(lang, color = if (language == lang) Color.White else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+            Text("Sub = Japanese audio with subtitles. Dub = English audio.", color = Faint, fontSize = 12.sp)
+            Spacer(Modifier.height(24.dp))
+        }
+        item {
+            Text("BEHAVIOUR", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            Spacer(Modifier.height(8.dp))
+        }
+        item { SettingsToggle("Download only on Wi-Fi", "Pause downloads on mobile data.", wifiOnly) { wifiOnly = it; save() } }
+        item { SettingsToggle("Ask before a whole season", "Confirm before pulling every episode at once.", askSeason) { askSeason = it; save() } }
+        item { SettingsToggle("Include subtitles when available", "Soft subs are fine — hard subs are not required.", subs) { subs = it; save() } }
+        item { SettingsToggle("Home particles", "Drifting, glowing, twinkling dots on the home page.", particles) { particles = it; save() } }
+        item {
+            Spacer(Modifier.height(24.dp))
+            Text("STORAGE", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            Spacer(Modifier.height(12.dp))
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp))
+                    .background(Card)
+                    .clickable {
+                        ctx.cacheDir.resolve("posters").deleteRecursively()
+                        ctx.getSharedPreferences("anipull_cache", android.content.Context.MODE_PRIVATE).edit().clear().apply()
+                        cacheMsg = "Home cache cleared — next open reloads live."
+                    }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+            ) { Text("Clear home cache", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+            if (cacheMsg != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(cacheMsg!!, color = Teal, fontSize = 12.5.sp)
+            }
+            Spacer(Modifier.height(24.dp))
+            Text("ABOUT", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            Spacer(Modifier.height(8.dp))
+            Text("Anipull 1.5 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Spacer(Modifier.height(32.dp))
+        }
+    }
+}
+
+@Composable
+fun SettingsToggle(title: String, sub: String, checked: Boolean, onChange: (Boolean) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(title, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(sub, color = Muted, fontSize = 12.5.sp, lineHeight = 17.sp)
+        }
+        androidx.compose.material3.Switch(checked = checked, onCheckedChange = onChange)
+    }
+}
+
+@Composable
+fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit) {
+    var season by remember { mutableStateOf(1) }
+    var synExpanded by remember { mutableStateOf(false) }
+    val isFrierenDemo = title.title.startsWith("Frieren") && title.episodes != null
+    val episodes = if (isFrierenDemo && season == 2) emptyList()
+        else title.episodes?.let { (1..it).toList() }
+    val watchOrder = if (isFrierenDemo) listOf("Season 1", "Season 2")
+        else if (title.title == "Attack on Titan" && title.episodes != null) listOf("Attack on Titan (watch-order guide in the web demo)")
+        else title.seasons.takeIf { it.isNotEmpty() }
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Bg)
+            .statusBarsPadding()
+            .navigationBarsPadding()
+            .padding(horizontal = 16.dp),
+    ) {
+        item {
+            Spacer(Modifier.height(16.dp))
+            Text("← Back", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable(onClick = onBack))
+            Spacer(Modifier.height(16.dp))
+            Row {
+                PosterCard(title, onClick = {})
+                Spacer(Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp)
+                    Spacer(Modifier.height(4.dp))
+                    val meta = listOfNotNull(title.type, title.year).joinToString(" · ")
+                    if (meta.isNotBlank()) Text(meta, color = Muted, fontSize = 13.sp)
+                    Spacer(Modifier.height(4.dp))
+                    if (title.score != null) Text("★ ${title.score}", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    if (title.genres != null) Text(title.genres, color = Muted, fontSize = 13.sp)
+                    if (title.status != null) Text(title.status, color = Teal, fontSize = 13.sp)
+                    if (isFrierenDemo) Text("You are currently in Season $season", color = Lavender, fontSize = 13.sp)
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            val syn = title.overview
+                ?: "Synopsis placeholder (demo). Real synopsis comes with the metadata stage — Stage 1 shows the layout only."
+            Text(
+                syn, color = Muted, fontSize = 14.sp, lineHeight = 20.sp,
+                maxLines = if (synExpanded) Int.MAX_VALUE else 4,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (syn.length > 220) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    if (synExpanded) "Show less" else "Read more",
+                    color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clickable { synExpanded = !synExpanded },
+                )
+            }
+        }
+        if (isFrierenDemo) {
+            item {
+                Spacer(Modifier.height(16.dp))
+                Text("Season", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(1, 2).forEach { s ->
+                        OutlinedButton(
+                            onClick = { season = s },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (season == s) Pink else Color.Transparent,
+                                contentColor = Color.White,
+                            ),
+                        ) { Text("Season $s") }
+                    }
+                }
+                if (season == 2) {
+                    Spacer(Modifier.height(8.dp))
+                    Text("Season 2 episode count: TBD (as in the web demo).", color = Teal, fontSize = 13.sp)
+                }
+            }
+        }
+        item {
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("Episodes", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Text("via AnimePahe · healthy", color = Teal, fontSize = 12.sp)
+            }
+            Spacer(Modifier.height(8.dp))
+            when {
+                episodes == null -> Text(
+                    "AniLab gives metadata (title, poster, synopsis) but no episode list for this title yet — episode pull is the next stage, after this AniLab step.",
+                    color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
+                )
+                episodes.isEmpty() -> Text("No episodes yet for this season.", color = Muted, fontSize = 13.sp)
+                else -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    episodes.forEach { ep ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(Card)
+                                .padding(12.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Episode $ep", color = TextMain, fontSize = 14.sp)
+                            Text("Pull ↓", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable { onPull(title) })
+                        }
+                    }
+                }
+            }
+        }
+        if (watchOrder != null) {
+            item {
+                Spacer(Modifier.height(16.dp))
+                Text("Watch order", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                watchOrder.forEachIndexed { i, step ->
+                    Text("${i + 1}. $step", color = Muted, fontSize = 14.sp)
+                }
+                Spacer(Modifier.height(24.dp))
+            }
+        }
+        item {
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = { onPull(title) },
+                colors = ButtonDefaults.buttonColors(containerColor = Pink),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Download", color = Color.White, fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, notWired: () -> Unit) {
+    var quality by remember { mutableStateOf("720") }
+    var season by remember { mutableStateOf(1) }
+    val isFrierenDemo = title.title.startsWith("Frieren") && title.episodes != null
+    val episodes = if (isFrierenDemo && season == 2) emptyList()
+        else title.episodes?.let { (1..it).toList() }
+    ModalBottomSheet(onDismissRequest = onDismiss) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(title.title, color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text(title.overview ?: "Synopsis placeholder (demo).", color = Muted, fontSize = 13.sp)
+            Spacer(Modifier.height(12.dp))
+            Text("Quality", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("360", "480", "720", "1080").forEach { q ->
+                    OutlinedButton(
+                        onClick = { quality = q },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (quality == q) Pink else Color.Transparent,
+                            contentColor = Color.White,
+                        ),
+                    ) { Text("${q}p") }
+                }
+            }
+            if (isFrierenDemo) {
+                Spacer(Modifier.height(8.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(1, 2).forEach { s ->
+                        OutlinedButton(
+                            onClick = { season = s },
+                            colors = ButtonDefaults.outlinedButtonColors(
+                                containerColor = if (season == s) Pink else Color.Transparent,
+                                contentColor = Color.White,
+                            ),
+                        ) { Text("Season $s") }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Button(
+                onClick = notWired,
+                colors = ButtonDefaults.buttonColors(containerColor = Pink),
+                modifier = Modifier.fillMaxWidth(),
+                enabled = episodes?.isNotEmpty() == true,
+            ) { Text("Download Season ($quality" + "p)", color = Color.White, fontWeight = FontWeight.Bold) }
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(onClick = notWired, modifier = Modifier.fillMaxWidth()) {
+                Text("Copy-all-links", color = Color.White)
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("Episodes", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            when {
+                episodes == null -> Text("Episode pull is the next stage — AniLab metadata only for now.", color = Muted, fontSize = 13.sp)
+                episodes.isEmpty() -> Text("Copy-all-links is blocked for Season 2 until its episode count is known (as in the web demo).", color = Muted, fontSize = 13.sp)
+                else -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    episodes.forEach { ep ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Episode $ep · $quality" + "p", color = TextMain, fontSize = 14.sp)
+                            Text("Pull", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable(onClick = notWired))
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(24.dp))
+        }
+    }
+}
