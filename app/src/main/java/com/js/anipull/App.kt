@@ -185,21 +185,21 @@ fun LogoRow(
 
 @Composable
 fun TopBar() {
-    // 1.9-dev4, JS's call: the header is NOT sticky any more — the
+    // 1.9-dev4.5, JS's call: the header is NOT sticky any more — the
     // dock owns navigation now, so a sticky bar is just dead space
-    // at the top while scrolling. This is a plain first item that
-    // scrolls away with the hero, with no solid pill on scroll and
-    // no extra gap above it (only the status-bar inset from the
-    // LazyColumn itself). Logo + name stay in the left corner, a
-    // bit bigger than before: chip 36dp, icon 28dp, name 22sp.
-    // The footer LogoRow keeps the old smaller size via defaults.
+    // at the top while scrolling. It scrolls away with the hero,
+    // with no solid pill on scroll and no extra gap above it (only
+    // the status-bar inset). Logo + name stay in the left corner,
+    // bigger again — dev4's 36/28/22 was still not big enough, so
+    // now chip 48dp, icon 38dp, name 28sp. The footer LogoRow
+    // keeps the old smaller size via defaults.
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        LogoRow(chipSize = 36.dp, iconSize = 28.dp, nameSize = 22.sp)
+        LogoRow(chipSize = 48.dp, iconSize = 38.dp, nameSize = 28.sp)
     }
 }
 
@@ -729,10 +729,13 @@ fun HeaderSection(
             }
         }
         Column {
-            Spacer(Modifier.height(10.dp))
-            // TopBar is a plain first item in the LazyColumn now
-            // (1.9-dev4: not sticky any more), not here.
-            Spacer(Modifier.height(24.dp))
+            // 1.9-dev4.5: header lives here, at the very top of the
+            // hero, so the gap JS circled (36dp list spacing + the
+            // old 10dp + 24dp hero top spacers = ~70dp of dead space
+            // between logo and the DOWNLOAD-ONLY pill) is gone.
+            // Header -> pill is now just TopBar's 4dp padding + 12dp.
+            TopBar()
+            Spacer(Modifier.height(12.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.Center,
@@ -1175,9 +1178,9 @@ fun AnipullAppInner() {
                 },
             verticalArrangement = Arrangement.spacedBy(36.dp),
         ) {
-            // 1.9-dev4: NOT a stickyHeader any more — plain first
-            // item, scrolls away with the rest of Home.
-            item { TopBar() }
+            // 1.9-dev4.5: no separate header item at all — TopBar
+            // lives inside HeaderSection (below), so the LazyColumn's
+            // 36dp spacedBy never lands between header and hero.
             item {
                 HeaderSection(
                     query = query,
@@ -2119,7 +2122,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(24.dp))
             Text("ABOUT", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
             Spacer(Modifier.height(8.dp))
-            Text("Anipull 1.9-dev4 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Anipull 1.9-dev4.5 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
             // Extra bottom space so the floating dock never covers this.
             Spacer(Modifier.height(100.dp))
         }
