@@ -24,6 +24,29 @@ All notable changes to the Anipull Android app are tracked here.
   Wordmark ("Ani" white + "pull" pink) unchanged. Themed-icon
   phone check still pending.
 
+### 1.9-dev3 (versionCode 13) — test build, not a release
+
+- Dock jerk fix (JS feedback on dev2): dev2 computed scroll as
+  index * 1000 + offset, but the header alone is taller than
+  1000px, so that total dropped when the first item changed even
+  while scrolling down — the dock expanded for a frame, then
+  shrank again. Rebuilt Nuvio-style after checking NuvioMobile's
+  FloatingNavigationBar / NuvioNavBarScrollState: real nested-
+  scroll pixel deltas with a 90px hysteresis, and a continuous
+  labelVisibility fraction (1f expanded, 0f icons-only) animated
+  with a tween, so width, height and label alpha all fade
+  together — labels never pop in or out.
+- Onboarding readability fix (JS feedback on dev2 screenshots):
+  fade now goes solid #07070C from 62% down (Anime+ style), so
+  all text and buttons sit on solid black with room to breathe,
+  never on busy art. "Welcome to" is now solid white, larger.
+  Onboarding text is now SF Pro Display Semibold (JS-supplied
+  OTF, onboarding screens only — rest of the app stays Outfit),
+  with larger semibold body text on both screens and a solid
+  dark bell card on the notification screen. Note: the SF OTF
+  uses CFF outlines — if it fails to render on a phone, the fix
+  is a TrueType conversion, not a redesign.
+
 ### 1.9-dev2 (versionCode 12) — test build, not a release
 
 - Morphing floating dock (Nuvio-style, very smooth spring):
