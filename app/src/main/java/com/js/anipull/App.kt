@@ -147,11 +147,16 @@ fun AnipullTheme(content: @Composable () -> Unit) {
 }
 
 @Composable
-fun LogoRow(modifier: Modifier = Modifier) {
+fun LogoRow(
+    modifier: Modifier = Modifier,
+    chipSize: androidx.compose.ui.unit.Dp = 28.dp,
+    iconSize: androidx.compose.ui.unit.Dp = 22.dp,
+    nameSize: androidx.compose.ui.unit.TextUnit = 18.sp,
+) {
     Row(modifier = modifier, verticalAlignment = Alignment.CenterVertically) {
         Box(
             modifier = Modifier
-                .size(28.dp)
+                .size(chipSize)
                 .clip(RoundedCornerShape(8.dp))
                 .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(8.dp))
                 .background(Bg),
@@ -162,7 +167,7 @@ fun LogoRow(modifier: Modifier = Modifier) {
             androidx.compose.foundation.Image(
                 painter = painterResource(R.drawable.ic_launcher_foreground),
                 contentDescription = "Anipull icon",
-                modifier = Modifier.size(22.dp),
+                modifier = Modifier.size(iconSize),
             )
         }
         Spacer(Modifier.width(7.dp))
@@ -171,7 +176,7 @@ fun LogoRow(modifier: Modifier = Modifier) {
                 withStyle(SpanStyle(color = Color.White)) { append("Ani") }
                 withStyle(SpanStyle(color = Pink)) { append("pull") }
             },
-            fontSize = 18.sp,
+            fontSize = nameSize,
             fontWeight = FontWeight.ExtraBold,
             letterSpacing = (-0.4).sp,
         )
@@ -179,21 +184,22 @@ fun LogoRow(modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun TopBar(scrolled: Boolean = false) {
-    // 1.9-dev2: logo only. Downloads and Settings moved to the floating
-    // dock at the bottom, so the header no longer duplicates them.
-    // Website topbar is position:fixed — it stays at the top while the
-    // page scrolls under it, and after 30px it becomes a solid pill.
+fun TopBar() {
+    // 1.9-dev4, JS's call: the header is NOT sticky any more — the
+    // dock owns navigation now, so a sticky bar is just dead space
+    // at the top while scrolling. This is a plain first item that
+    // scrolls away with the hero, with no solid pill on scroll and
+    // no extra gap above it (only the status-bar inset from the
+    // LazyColumn itself). Logo + name stay in the left corner, a
+    // bit bigger than before: chip 36dp, icon 28dp, name 22sp.
+    // The footer LogoRow keeps the old smaller size via defaults.
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .background(if (scrolled) Color(0xFF0D0D16) else Color.Transparent)
-            .border(1.dp, if (scrolled) Color.White.copy(alpha = 0.09f) else Color.Transparent, RoundedCornerShape(16.dp))
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        LogoRow()
+        LogoRow(chipSize = 36.dp, iconSize = 28.dp, nameSize = 22.sp)
     }
 }
 
@@ -724,7 +730,8 @@ fun HeaderSection(
         }
         Column {
             Spacer(Modifier.height(10.dp))
-            // TopBar is a stickyHeader in the LazyColumn now, not here.
+            // TopBar is a plain first item in the LazyColumn now
+            // (1.9-dev4: not sticky any more), not here.
             Spacer(Modifier.height(24.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -1168,11 +1175,9 @@ fun AnipullAppInner() {
                 },
             verticalArrangement = Arrangement.spacedBy(36.dp),
         ) {
-            stickyHeader {
-                TopBar(
-                    scrolled = listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 90,
-                )
-            }
+            // 1.9-dev4: NOT a stickyHeader any more — plain first
+            // item, scrolls away with the rest of Home.
+            item { TopBar() }
             item {
                 HeaderSection(
                     query = query,
