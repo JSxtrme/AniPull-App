@@ -15,10 +15,11 @@ All notable changes to the Anipull Android app are tracked here.
 
 ## Unreleased (1.9 — in progress)
 
-_Empty for now. Add a line here for every feature, fix, or change
-as it lands, so the 1.9 release notes write themselves._
-
-- _Nothing yet — add the first 1.9 change here._
+- Logo: Orbit spark replaces the v2 stack everywhere — launcher
+  colour icon, themed/monochrome icon, and in-app header logo.
+  Pink sparkle inside a broken orbit ring, dot on the ring.
+  Wordmark ("Ani" white + "pull" pink) unchanged. Themed-icon
+  phone check still pending.
 
 ## 1.8 — 2026-11-02
 

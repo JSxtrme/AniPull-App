@@ -133,8 +133,8 @@ fun LogoRow(modifier: Modifier = Modifier) {
                 .background(Bg),
             contentAlignment = Alignment.Center,
         ) {
-            // v2 logo is pink on black — the old pink chip would hide
-            // the pink diamond and chevrons, leaving only the white arrow.
+            // Orbit logo is pink on black — the old pink chip would hide
+            // the pink ring and sparkle, leaving nothing visible.
             androidx.compose.foundation.Image(
                 painter = painterResource(R.drawable.ic_launcher_foreground),
                 contentDescription = "Anipull icon",

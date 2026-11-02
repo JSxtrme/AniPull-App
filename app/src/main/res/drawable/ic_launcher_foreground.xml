@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Colour foreground: JS's new v2 logo (2026-11-02, polished 2nd version).
-     Pink diamond + two rounded pink chevrons + white download arrow.
-     Paths are the SVG paths verbatim. Scaled 0.9 about the centre and
-     shifted down 4dp so the glyph bbox (y 8-83, centre 45.5) sits centred
-     in the adaptive-icon safe zone. Background is now dark (#07070C),
-     NOT pink — pink glyphs on a pink background would vanish. -->
+<!-- Colour foreground: Orbit spark logo (JS's D Orbit concept, 2026-11-02).
+     Pink sparkle inside a broken orbit ring, dot on the ring at the
+     south-east. Paths are the SVG paths verbatim, except the ring:
+     Android vectors have no stroke-dasharray, so the SVG dash
+     (180 of a 238.8 circumference, rotated -45deg) is written as an
+     explicit large arc instead — start (76.87, 19.13) at -45deg,
+     clockwise 271deg to (23.6, 18.67), gap across the top.
+     Glyph bbox x 12-88, y 8-84, centre (50, 46); scaled 0.9 about
+     (50, 50) + translateY 3.6 centres it exactly at (50, 50).
+     Background stays dark (#07070C) — pink on black, as before.
+     In-app header logo reuses this drawable, so it changes too.
+     Wordmark unchanged. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -15,27 +21,17 @@
         android:pivotY="50"
         android:scaleX="0.9"
         android:scaleY="0.9"
-        android:translateY="4">
+        android:translateY="3.6">
+        <path
+            android:strokeColor="#FF4D8D"
+            android:strokeWidth="6"
+            android:strokeLineCap="round"
+            android:pathData="M76.87,19.13 A38,38 0 1,1 23.6,18.67" />
         <path
             android:fillColor="#FF4D8D"
-            android:pathData="M50,8 L88,26 L50,44 L12,26 Z" />
+            android:pathData="M50,22 L57,39 L74,46 L57,53 L50,70 L43,53 L26,46 L43,39 Z" />
         <path
-            android:strokeColor="#FF4D8D"
-            android:strokeWidth="11"
-            android:strokeLineCap="round"
-            android:strokeLineJoin="round"
-            android:pathData="M17,43 L50,59 L83,43" />
-        <path
-            android:strokeColor="#FF4D8D"
-            android:strokeWidth="11"
-            android:strokeLineCap="round"
-            android:strokeLineJoin="round"
-            android:pathData="M17,63 L50,79 L83,63" />
-        <path
-            android:strokeColor="#FFFFFF"
-            android:strokeWidth="7"
-            android:strokeLineCap="round"
-            android:strokeLineJoin="round"
-            android:pathData="M50,47 V83 M38,71 L50,83 L62,71" />
+            android:fillColor="#FF4D8D"
+            android:pathData="M83,73 A6,6 0 1,1 71,73 A6,6 0 1,1 83,73 Z" />
     </group>
 </vector>
