@@ -2,10 +2,19 @@ package com.js.anipull
 
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.togetherWith
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
@@ -155,11 +164,11 @@ fun LogoRow(modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun TopBar(onSettingsClick: () -> Unit = {}, onDownloadsClick: () -> Unit = {}, scrolled: Boolean = false) {
-    // Website topbar is position:fixed — it stays at the top while the page
-    // scrolls under it, and after 30px it becomes a solid #0D0D16 pill.
-    // The app's old topbar scrolled away with the header; a stickyHeader
-    // in the LazyColumn gives the same fixed behaviour here.
+fun TopBar(scrolled: Boolean = false) {
+    // 1.9-dev2: logo only. Downloads and Settings moved to the floating
+    // dock at the bottom, so the header no longer duplicates them.
+    // Website topbar is position:fixed — it stays at the top while the
+    // page scrolls under it, and after 30px it becomes a solid pill.
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -170,43 +179,6 @@ fun TopBar(onSettingsClick: () -> Unit = {}, onDownloadsClick: () -> Unit = {}, 
         verticalAlignment = Alignment.CenterVertically,
     ) {
         LogoRow()
-        Spacer(Modifier.weight(1f))
-        // The old dot pill did nothing — it is now the Downloads page,
-        // the most important page in a downloader. The bell is gone:
-        // no notifications, that button is now Settings.
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(RoundedCornerShape(999.dp))
-                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
-                .background(Card)
-                .clickable(onClick = onDownloadsClick),
-            contentAlignment = Alignment.Center,
-        ) {
-            androidx.compose.foundation.Image(
-                painter = painterResource(R.drawable.ic_download),
-                contentDescription = "Downloads",
-                modifier = Modifier.size(18.dp),
-                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Muted),
-            )
-        }
-        Spacer(Modifier.width(6.dp))
-        Box(
-            modifier = Modifier
-                .size(34.dp)
-                .clip(RoundedCornerShape(999.dp))
-                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
-                .background(Card)
-                .clickable(onClick = onSettingsClick),
-            contentAlignment = Alignment.Center,
-        ) {
-            androidx.compose.foundation.Image(
-                painter = painterResource(R.drawable.ic_settings),
-                contentDescription = "Settings",
-                modifier = Modifier.size(18.dp),
-                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Muted),
-            )
-        }
     }
 }
 
@@ -263,15 +235,15 @@ fun Chip(label: String, onClick: () -> Unit) {
 
 @Composable
 fun QuickChips(onChip: (String) -> Unit) {
-    // One horizontal line, like the user asked: Movies / 1080p ready /
-    // Series / OVA. LazyRow, centred, so it stays one line even if the
-    // phone font is large (it scrolls instead of wrapping to a 2nd row).
+    // 1.9-dev2 order, JS's call: Movies / Series / OVA / Specials.
+    // "1080p ready" is dropped (quality already lives in Settings and
+    // in the hero stats). One horizontal line, LazyRow, centred.
     androidx.compose.foundation.lazy.LazyRow(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        items(listOf("Movies", "1080p ready", "Series", "OVA")) { label ->
+        items(listOf("Movies", "Series", "OVA", "Specials")) { label ->
             Box(
                 modifier = Modifier
                     .clip(RoundedCornerShape(999.dp))
@@ -311,9 +283,12 @@ fun StatsGrid(live: Boolean, loading: Boolean = false) {
     Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             Box(Modifier.weight(1f)) {
+                // 1.9-dev2: the LIVE/ANILAB FEED cell becomes a title
+                // count. AniLab exposes no total count, but its IDs run
+                // to 1000006620 (verified 2026-11-02, 6700+ are 404), so
+                // "6000+" is evidence-backed and does not overstate.
                 if (loading) StatCell("···", "LOADING")
-                else if (live) StatCell("LIVE", "ANILAB FEED")
-                else StatCell("15", "TITLES IN DEMO")
+                else StatCell("6000+", "ANIME TITLES")
             }
             Box(Modifier.weight(1f)) { StatCell("3", "DDL SOURCES") }
         }
@@ -930,6 +905,21 @@ fun AnipullAppInner() {
     var searching by remember { mutableStateOf(false) }
     var showSettings by remember { mutableStateOf(false) }
     var showDownloads by remember { mutableStateOf(false) }
+    // 1.9-dev2 states: Library tab, saved favourites, onboarding,
+    // loading screen, and the morphing dock's shrink state.
+    var showLibrary by remember { mutableStateOf(false) }
+    var savedTitles by remember { mutableStateOf(loadLibraryTitles(context)) }
+    var onboardingDone by remember {
+        mutableStateOf(
+            context.getSharedPreferences("anipull_onboarding", android.content.Context.MODE_PRIVATE)
+                .getBoolean("done", false)
+        )
+    }
+    var showLoading by remember { mutableStateOf(loadHomeCache(context) == null) }
+    var fetchAttempt by remember { mutableStateOf(0) }
+    var dockShrunk by remember { mutableStateOf(false) }
+    var lastScrollIndex by remember { mutableStateOf(0) }
+    var lastScrollOffset by remember { mutableStateOf(0) }
     var isSearchFocused by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
@@ -945,18 +935,59 @@ fun AnipullAppInner() {
 
     // System back: sheet first, then notifications, then detail -> home,
     // never straight out of the app from a detail page.
-    BackHandler(enabled = screen != null || sheetFor != null || showSettings || showDownloads) {
+    BackHandler(enabled = screen != null || sheetFor != null || showSettings || showDownloads || showLibrary) {
         if (sheetFor != null) sheetFor = null
         else if (showSettings) showSettings = false
         else if (showDownloads) showDownloads = false
+        else if (showLibrary) showLibrary = false
         else screen = null
+    }
+
+    // Nuvio dock morph, Home only: scrolling down shrinks the dock,
+    // scrolling up expands it again. Other tabs keep it expanded.
+    LaunchedEffect(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset) {
+        val idx = listState.firstVisibleItemIndex
+        val off = listState.firstVisibleItemScrollOffset
+        val total = idx * 1000 + off
+        val lastTotal = lastScrollIndex * 1000 + lastScrollOffset
+        if (total > lastTotal && total > 200) dockShrunk = true
+        else if (total < lastTotal) dockShrunk = false
+        lastScrollIndex = idx
+        lastScrollOffset = off
+    }
+
+    fun toggleSave(title: ApiTitle) {
+        savedTitles = if (savedTitles.any { it.id == title.id }) {
+            savedTitles.filter { it.id != title.id }
+        } else {
+            savedTitles + title
+        }
+        saveLibraryTitles(context, savedTitles)
+    }
+
+    fun goTab(tab: Tab) {
+        showSettings = tab == Tab.Settings
+        showDownloads = tab == Tab.Downloads
+        showLibrary = tab == Tab.Library
+        // Home = all three off, which is the Home branch below.
+    }
+    val currentTab: Tab = when {
+        showLibrary -> Tab.Library
+        showDownloads -> Tab.Downloads
+        showSettings -> Tab.Settings
+        else -> Tab.Home
     }
 
     // Dynamic home, instant second time: (1) cached live home renders
     // immediately if there is one, (2) a progressive refresh updates each
     // row the moment it lands, (3) demo titles appear ONLY if the fetch
     // actually fails and there is no cache — never as a loading placeholder.
-    LaunchedEffect(Unit) {
+    // 1.9-dev2: keyed on fetchAttempt so the Retry button on a failed
+    // load actually re-runs this. Loading screen (if shown) ends here,
+    // whether the fetch succeeded or failed — a failed load shows
+    // skeletons + retry, never demo titles.
+    LaunchedEffect(fetchAttempt) {
+        homeFailed = false
         val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched")
         val cached = loadHomeCache(context)
         val localSections = cached?.sections?.toMutableList() ?: mutableListOf()
@@ -979,6 +1010,7 @@ fun AnipullAppInner() {
         } else {
             saveHomeCache(context, HomeData(ordered, localFeatured))
         }
+        showLoading = false
     }
 
     fun submitSearch(q: String) {
@@ -1030,22 +1062,53 @@ fun AnipullAppInner() {
         searching = false
     }
 
-    val demoApi = remember { DEMO_TITLES.map { demoToApi(it) } }
-
-    if (showSettings) {
-        SettingsScreen(onBack = { showSettings = false })
-    } else if (showDownloads) {
-        DownloadsScreen(onBack = { showDownloads = false }, onBrowse = { showDownloads = false })
-    } else if (screen == null) {
-        val shownDemo = if (query.isBlank()) null else demoApi.filter {
-            when (query) {
-                "Movies", "Movie" -> it.type == "Movie"
-                "Series" -> it.type == "TV"
-                "OVA" -> it.type == "ONA"
-                "1080p ready" -> true
-                else -> it.title.contains(query, ignoreCase = true)
-            }
+    // 1.9-dev2 rendering: onboarding first (fetch already runs above),
+    // then the loading screen, then the tab screens with the floating
+    // dock overlaid, then Detail on top with no dock.
+    // Chip queries now filter LIVE titles by type — no demo fallback
+    // anywhere in search or chips any more.
+    val liveChipResults = if (query.isBlank()) emptyList() else run {
+        val allLive = (liveSections?.flatMap { it.titles } ?: emptyList()) + extraSections.flatMap { it.titles }
+        val wantedTypes = when (query) {
+            "Movies", "Movie" -> listOf("Movie")
+            "Series" -> listOf("TV")
+            "OVA" -> listOf("OVA", "ONA")
+            "Specials" -> listOf("Special", "Specials")
+            else -> null
         }
+        if (wantedTypes == null) emptyList()
+        else allLive.filter { it.type in wantedTypes }.distinctBy { it.id }
+    }
+
+    if (!onboardingDone) {
+        OnboardingScreen(onFinish = {
+            context.getSharedPreferences("anipull_onboarding", android.content.Context.MODE_PRIVATE)
+                .edit().putBoolean("done", true).apply()
+            onboardingDone = true
+        })
+    } else if (showLoading) {
+        LoadingScreen()
+    } else if (screen != null) {
+        DetailScreen(
+            title = screen!!,
+            onBack = { screen = null },
+            onPull = { sheetFor = it },
+            isSaved = savedTitles.any { it.id == screen!!.id },
+            onSaveToggle = { screen?.let { toggleSave(it) } },
+        )
+    } else Box(modifier = Modifier.fillMaxSize().background(Bg)) {
+    if (showSettings) {
+        SettingsScreen(onBack = { goTab(Tab.Home) })
+    } else if (showDownloads) {
+        DownloadsScreen(onBack = { goTab(Tab.Home) }, onBrowse = { goTab(Tab.Home) })
+    } else if (showLibrary) {
+        LibraryScreen(
+            saved = savedTitles,
+            onOpen = { screen = it },
+            onBrowseHome = { goTab(Tab.Home) },
+            onRemove = { toggleSave(it) },
+        )
+    } else if (screen == null) {
         LazyColumn(
             state = listState,
             modifier = Modifier
@@ -1072,8 +1135,6 @@ fun AnipullAppInner() {
         ) {
             stickyHeader {
                 TopBar(
-                    onSettingsClick = { showSettings = true },
-                    onDownloadsClick = { showDownloads = true },
                     scrolled = listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > 90,
                 )
             }
@@ -1104,15 +1165,14 @@ fun AnipullAppInner() {
                         color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold,
                     )
                     Spacer(Modifier.height(10.dp))
-                    // Live first; chip queries use the demo type filter;
-                    // a manual query falls back to demo only AFTER AniLab
-                    // has answered empty — never before, which was the bug.
+                    // 1.9-dev2: live only. Chip queries filter live
+                    // titles by type; a manual query with no live
+                    // results is "Nothing found" — no demo fallback.
                     val results = when {
                         liveResults != null -> liveResults!!
-                        isChipQuery -> shownDemo ?: emptyList()
+                        isChipQuery -> liveChipResults
                         searching -> emptyList()
-                        liveSearchDone -> shownDemo ?: emptyList()
-                        else -> shownDemo ?: emptyList()
+                        else -> emptyList()
                     }
                     if (results.isEmpty() && !searching) {
                         Text("Nothing found — try another title.", color = Muted, fontSize = 13.sp)
@@ -1173,27 +1233,20 @@ fun AnipullAppInner() {
                     item { PosterRow(section.name, emptyList(), section.titles, { screen = it }, notWired, icon) }
                 }
             } else if (homeFailed) {
-                item { Text("Offline — showing demo titles", color = Faint, fontSize = 12.sp) }
-                item { PosterRow("Weekend marathon picks", listOf(RowTag("Sun", true), RowTag("Full seasons ready")), DEMO_TITLES.take(5).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_calendar) }
+                // 1.9-dev2: failed load = skeletons + retry, never demo
+                // titles pretending to be a catalog.
                 item {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.foundation.Image(
-                            painter = painterResource(R.drawable.ic_star),
-                            contentDescription = null,
-                            modifier = Modifier.size(17.dp),
-                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("Editor's pick", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(Modifier.height(12.dp))
-                    EditorsPick(demoApi.first { it.title == "A Silent Voice" }, { screen = it }, notWired)
+                    Text("Couldn't load catalogs.", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Check your connection and try again — no demo titles are shown in place of the live feed.", color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp)
+                    Spacer(Modifier.height(16.dp))
+                    Box(
+                        modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink)
+                            .clickable { fetchAttempt += 1 }.padding(horizontal = 20.dp, vertical = 11.dp),
+                    ) { Text("Retry", color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
                 }
-                item { PosterRow("Trending", emptyList(), DEMO_TITLES.drop(2).take(5).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_flame) }
-                item { PosterRow("Popular anime", emptyList(), DEMO_TITLES.drop(5).take(5).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_chart) }
-                item { PosterRow("Season picks", listOf(RowTag("Curated"), RowTag("Recent years")), DEMO_TITLES.drop(8).take(5).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_calendar) }
-                item { PosterRow("Top anime", listOf(RowTag("All time")), DEMO_TITLES.take(5).reversed().map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_trophy) }
-                item { PosterRow("Studio spotlight", listOf(RowTag("Madhouse")), listOf(DEMO_TITLES[4], DEMO_TITLES[10], DEMO_TITLES[0]).map { demoToApi(it) }, { screen = it }, notWired, R.drawable.ic_film) }
+                item { SkeletonRow() }
+                item { SkeletonRow() }
             } else {
                 // First load, no cache, fetch still running: skeletons, not demo.
                 item { SkeletonRow() }
@@ -1217,20 +1270,461 @@ fun AnipullAppInner() {
                     )
                     Spacer(Modifier.height(8.dp))
                     Text("Sources: AnimePahe · AnimeTosho · AnimeOut", color = Faint, fontSize = 12.sp)
-                    Spacer(Modifier.height(24.dp))
+                    // Extra bottom space so the floating dock never
+                    // covers the footer.
+                    Spacer(Modifier.height(100.dp))
                 }
             }
         }
-    } else {
-        DetailScreen(
-            title = screen!!,
-            onBack = { screen = null },
-            onPull = { sheetFor = it },
-        )
+    }
+    // Floating dock, tab screens only (Detail is handled above, with
+    // no dock). Aligned to the bottom, above the navigation bar.
+    if (screen == null) {
+        Box(
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .navigationBarsPadding().padding(bottom = 12.dp, start = 8.dp, end = 8.dp),
+        ) {
+            FloatingDock(current = currentTab, shrunk = dockShrunk && currentTab == Tab.Home, onTab = { goTab(it) })
+        }
+    }
     }
 
     sheetFor?.let { title ->
         DownloadSheet(title = title, onDismiss = { sheetFor = null }, notWired = notWired)
+    }
+}
+
+// ---- 1.9-dev2: floating dock, Library, loading, onboarding ------------
+
+enum class Tab { Home, Library, Downloads, Settings }
+
+@Composable
+fun FloatingDock(current: Tab, shrunk: Boolean, onTab: (Tab) -> Unit) {
+    // Nuvio-style morph: expanded = icon + label, large pill; scrolling
+    // down shrinks it, very smoothly, to a smaller icons-only pill;
+    // scrolling up expands it again. Spring, not a jump, so the morph
+    // reads as one pill changing shape, not two pills swapping.
+    val widthFrac by animateFloatAsState(
+        targetValue = if (shrunk) 0.62f else 0.92f,
+        animationSpec = spring(dampingRatio = 0.85f, stiffness = 180f),
+        label = "dockWidth",
+    )
+    val heightDp by animateDpAsState(
+        targetValue = if (shrunk) 52.dp else 64.dp,
+        animationSpec = spring(dampingRatio = 0.85f, stiffness = 180f),
+        label = "dockHeight",
+    )
+    androidx.compose.foundation.layout.BoxWithConstraints(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+    ) {
+        val dockWidth = maxWidth * widthFrac
+        Box(
+            modifier = Modifier
+                .width(dockWidth)
+                .height(heightDp)
+                .clip(RoundedCornerShape(999.dp))
+                .background(Color(0xFF1A1A24))
+                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+                .padding(horizontal = 6.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                val items = listOf(
+                    Triple(Tab.Home, R.drawable.ic_home, "Home"),
+                    Triple(Tab.Library, R.drawable.ic_bookmark, "Library"),
+                    Triple(Tab.Downloads, R.drawable.ic_download, "Downloads"),
+                    Triple(Tab.Settings, R.drawable.ic_settings, "Settings"),
+                )
+                items.forEach { (tab, icon, label) ->
+                    val selected = tab == current
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(if (selected) Pink else Color.Transparent)
+                            .clickable { onTab(tab) }
+                            .padding(horizontal = 12.dp, vertical = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            androidx.compose.foundation.Image(
+                                painter = painterResource(icon),
+                                contentDescription = label,
+                                modifier = Modifier.size(22.dp),
+                                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(
+                                    if (selected) Color.White else Muted
+                                ),
+                            )
+                            if (!shrunk) {
+                                Spacer(Modifier.height(2.dp))
+                                Text(
+                                    label,
+                                    color = if (selected) Color.White else Muted,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun LibraryScreen(
+    saved: List<ApiTitle>,
+    onOpen: (ApiTitle) -> Unit,
+    onBrowseHome: () -> Unit,
+    onRemove: (ApiTitle) -> Unit,
+) {
+    // Library = manage what the user already touched. Saved = favourited
+    // for later downloading. Downloaded = actually on the device — that
+    // section only becomes real in 2.0, when downloads land officially,
+    // so until then it is an honest empty state, not a fake list.
+    var section by remember { mutableStateOf("Saved") }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Bg)
+            .statusBarsPadding()
+            .padding(horizontal = 16.dp),
+    ) {
+        Spacer(Modifier.height(8.dp))
+        Text("Library", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+        Spacer(Modifier.height(4.dp))
+        Text("Your saved anime, and what is actually on your device.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+        Spacer(Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf("Saved", "Downloaded").forEach { name ->
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .border(1.dp, if (section == name) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+                        .background(if (section == name) Pink.copy(alpha = 0.2f) else Card)
+                        .clickable { section = name }
+                        .padding(horizontal = 18.dp, vertical = 9.dp),
+                ) {
+                    Text(
+                        if (name == "Saved") "Saved (${saved.size})" else name,
+                        color = if (section == name) Color.White else Muted,
+                        fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+        if (section == "Saved") {
+            if (saved.isEmpty()) {
+                Text("Nothing saved yet.", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Tap the bookmark on a title's detail page to save it for later downloading. It stays saved even if you clear the home cache.",
+                    color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp,
+                )
+                Spacer(Modifier.height(20.dp))
+                Box(
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink)
+                        .clickable(onClick = onBrowseHome).padding(horizontal = 20.dp, vertical = 11.dp),
+                ) { Text("Browse anime", color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
+            } else {
+                androidx.compose.foundation.layout.BoxWithConstraints {
+                    val cardW = (maxWidth - 12.dp) / 2
+                    LazyColumn(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                        items(saved.chunked(2)) { pair ->
+                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                pair.forEach { t ->
+                                    Column(modifier = Modifier.width(cardW)) {
+                                        PosterCard(t, onClick = { onOpen(t) }, cardWidth = cardW)
+                                        Spacer(Modifier.height(6.dp))
+                                        Text(
+                                            "Remove from Library",
+                                            color = Faint, fontSize = 12.sp,
+                                            modifier = Modifier.clickable { onRemove(t) },
+                                        )
+                                    }
+                                }
+                                if (pair.size == 1) Spacer(Modifier.width(cardW))
+                            }
+                        }
+                        item { Spacer(Modifier.height(100.dp)) }
+                    }
+                }
+            }
+        } else {
+            Text("Nothing downloaded yet.", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "Downloads land officially in 2.0. When they do, titles you pull will show up here with how many episodes are on your device — for example, “2 eps downloaded” — and a Download more action back to the detail page.",
+                color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp,
+            )
+            Spacer(Modifier.height(100.dp))
+        }
+    }
+}
+
+@Composable
+fun LoadingScreen() {
+    // 1.9-dev2 loading screen, JS's spec: a soft pink / black / white
+    // gradient moving very calmly, the Orbit logo appears and moves up,
+    // then the "AniPull" name appears, with a small loading bar under
+    // it — then Home. No demo titles, ever, on this path.
+    val transition = rememberInfiniteTransition(label = "loadingGradient")
+    val shift by transition.animateFloat(
+        initialValue = 0f, targetValue = 1f,
+        animationSpec = androidx.compose.animation.core.infiniteRepeatable(
+            animation = tween(4000, easing = androidx.compose.animation.core.LinearEasing),
+            repeatMode = androidx.compose.animation.core.RepeatMode.Reverse,
+        ),
+        label = "gradientShift",
+    )
+    var nameVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(450)
+        nameVisible = true
+    }
+    val logoOffset by animateDpAsState(
+        targetValue = if (nameVisible) 0.dp else 28.dp,
+        animationSpec = tween(800),
+        label = "logoRise",
+    )
+    val logoAlpha by animateFloatAsState(
+        targetValue = if (nameVisible) 1f else 0f,
+        animationSpec = tween(800),
+        label = "logoAlpha",
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(
+                Brush.linearGradient(
+                    colors = listOf(
+                        Color(0xFF2A1020),
+                        Color(0xFF07070C),
+                        Color(0xFF1A1A24),
+                        Color(0xFF07070C),
+                    ),
+                    start = Offset(0f, shift * 1000f),
+                    end = Offset(1000f, 1000f - shift * 1000f),
+                )
+            ),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Box(
+                modifier = Modifier
+                    .size(96.dp)
+                    .padding(top = logoOffset)
+                    .background(Color.Transparent),
+                contentAlignment = Alignment.Center,
+            ) {
+                androidx.compose.foundation.Image(
+                    painter = painterResource(R.drawable.ic_launcher_foreground),
+                    contentDescription = "Anipull",
+                    modifier = Modifier.size(88.dp),
+                    alpha = logoAlpha,
+                )
+            }
+            Spacer(Modifier.height(16.dp))
+            if (nameVisible) {
+                Text(
+                    text = buildAnnotatedString {
+                        withStyle(SpanStyle(color = Color.White)) { append("Ani") }
+                        withStyle(SpanStyle(color = Pink)) { append("Pull") }
+                    },
+                    fontSize = 34.sp, fontWeight = FontWeight.ExtraBold,
+                )
+                Spacer(Modifier.height(20.dp))
+                androidx.compose.material3.LinearProgressIndicator(
+                    modifier = Modifier.width(120.dp),
+                    color = Pink,
+                    trackColor = Color.White.copy(alpha = 0.12f),
+                )
+                Spacer(Modifier.height(12.dp))
+                Text("Loading catalogs…", color = Muted, fontSize = 13.sp)
+            }
+        }
+    }
+}
+
+@Composable
+fun OnboardingScreen(onFinish: () -> Unit) {
+    // First boot only. Welcome -> notification grant, sliding like
+    // attached pages: welcome out left, notification in from the right.
+    // Real Outfit font (via the app theme), a real arrow vector drawable
+    // on Start, and a real bell vector drawable — never a text arrow or
+    // an emoji, per JS's explicit 1.9-dev2 rule.
+    var page by remember { mutableStateOf(0) }
+    val context = LocalContext.current
+    val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { _ -> onFinish() }
+    fun requestNotif() {
+        val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+            context, android.Manifest.permission.POST_NOTIFICATIONS,
+        ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+        if (granted) onFinish()
+        else permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+    }
+    Box(modifier = Modifier.fillMaxSize().background(Bg)) {
+        AnimatedContent(
+            targetState = page,
+            transitionSpec = {
+                slideInHorizontally(initialOffsetX = { it }) + fadeIn() togetherWith
+                    slideOutHorizontally(targetOffsetX = { -it }) + fadeOut()
+            },
+            label = "onboardingPages",
+        ) { current ->
+            if (current == 0) {
+                // Welcome: MHA wallpaper, fading out to solid #07070C
+                // at the bottom, exactly like the demo preview.
+                Box(modifier = Modifier.fillMaxSize()) {
+                    androidx.compose.foundation.Image(
+                        painter = painterResource(R.drawable.onboarding_welcome),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    )
+                    Box(
+                        Modifier.matchParentSize().background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color(0xFF07070C).copy(alpha = 0.45f),
+                                    Color.Transparent,
+                                    Color(0xFF07070C).copy(alpha = 0.55f),
+                                    Color(0xFF07070C),
+                                ),
+                                startY = 0f, endY = Float.POSITIVE_INFINITY,
+                            )
+                        )
+                    )
+                    Column(
+                        modifier = Modifier.fillMaxSize().statusBarsPadding()
+                            .navigationBarsPadding().padding(horizontal = 22.dp, vertical = 28.dp),
+                    ) {
+                        Spacer(Modifier.weight(1f))
+                        Text("Welcome to", color = Color(0xFFD8D8E2), fontSize = 15.sp)
+                        Spacer(Modifier.height(10.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            androidx.compose.foundation.Image(
+                                painter = painterResource(R.drawable.ic_launcher_foreground),
+                                contentDescription = null, modifier = Modifier.size(44.dp),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                text = buildAnnotatedString {
+                                    withStyle(SpanStyle(color = Color.White)) { append("Ani") }
+                                    withStyle(SpanStyle(color = Pink)) { append("pull") }
+                                },
+                                fontSize = 34.sp, fontWeight = FontWeight.ExtraBold,
+                            )
+                        }
+                        Spacer(Modifier.height(14.dp))
+                        Text(
+                            "Download your favourite anime, episode by episode.",
+                            color = Color.White, fontSize = 16.sp, lineHeight = 23.sp,
+                        )
+                        Text(
+                            "Download-only · No streaming · No tracking",
+                            color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp),
+                        )
+                        Spacer(Modifier.height(26.dp))
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(52.dp)
+                                .clip(RoundedCornerShape(999.dp)).background(Pink)
+                                .clickable { page = 1 },
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("Start", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                                Spacer(Modifier.width(8.dp))
+                                androidx.compose.foundation.Image(
+                                    painter = painterResource(R.drawable.ic_arrow_right),
+                                    contentDescription = null, modifier = Modifier.size(20.dp),
+                                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Text("First boot only — never shown again", color = Faint, fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                    }
+                }
+            } else {
+                // Notification grant: AoT portrait wallpaper, same fade,
+                // plus the bell. Skip goes straight home, no blocking.
+                Box(modifier = Modifier.fillMaxSize()) {
+                    androidx.compose.foundation.Image(
+                        painter = painterResource(R.drawable.onboarding_notif),
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                    )
+                    Box(
+                        Modifier.matchParentSize().background(
+                            Brush.verticalGradient(
+                                colors = listOf(
+                                    Color(0xFF07070C).copy(alpha = 0.45f),
+                                    Color.Transparent,
+                                    Color(0xFF07070C).copy(alpha = 0.55f),
+                                    Color(0xFF07070C),
+                                ),
+                                startY = 0f, endY = Float.POSITIVE_INFINITY,
+                            )
+                        )
+                    )
+                    Column(
+                        modifier = Modifier.fillMaxSize().statusBarsPadding()
+                            .navigationBarsPadding().padding(horizontal = 22.dp, vertical = 28.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                    ) {
+                        Spacer(Modifier.weight(1f))
+                        Box(
+                            modifier = Modifier.size(88.dp).clip(RoundedCornerShape(28.dp))
+                                .background(Color.White.copy(alpha = 0.08f))
+                                .border(1.dp, Color.White.copy(alpha = 0.12f), RoundedCornerShape(28.dp)),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            androidx.compose.foundation.Image(
+                                painter = painterResource(R.drawable.ic_bell),
+                                contentDescription = null, modifier = Modifier.size(44.dp),
+                                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
+                            )
+                        }
+                        Spacer(Modifier.height(18.dp))
+                        Text("Stay in the loop?", color = TextMain, fontSize = 24.sp, fontWeight = FontWeight.ExtraBold, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(10.dp))
+                        Text(
+                            "Allow notifications so we can tell you when a download finishes.",
+                            color = Color(0xFFC9C9D6), fontSize = 15.sp, lineHeight = 22.sp, textAlign = TextAlign.Center,
+                        )
+                        Spacer(Modifier.height(6.dp))
+                        Text("Notifications only for download progress.", color = Color(0xFFFFD7E7), fontSize = 14.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                        Spacer(Modifier.height(26.dp))
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(52.dp)
+                                .clip(RoundedCornerShape(999.dp)).background(Pink)
+                                .clickable { requestNotif() },
+                            contentAlignment = Alignment.Center,
+                        ) { Text("Allow notifications", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
+                        Spacer(Modifier.height(10.dp))
+                        Box(
+                            modifier = Modifier.fillMaxWidth().height(52.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(999.dp))
+                                .clickable { onFinish() },
+                            contentAlignment = Alignment.Center,
+                        ) { Text("Skip for now", color = Muted, fontSize = 16.sp, fontWeight = FontWeight.Bold) }
+                        Spacer(Modifier.height(12.dp))
+                        Text("You can turn this on later from Settings", color = Faint, fontSize = 12.sp, textAlign = TextAlign.Center)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1496,8 +1990,9 @@ fun SettingsScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(24.dp))
             Text("ABOUT", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
             Spacer(Modifier.height(8.dp))
-            Text("Anipull 1.5 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
-            Spacer(Modifier.height(32.dp))
+            Text("Anipull 1.9-dev2 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            // Extra bottom space so the floating dock never covers this.
+            Spacer(Modifier.height(100.dp))
         }
     }
 }
@@ -1517,7 +2012,7 @@ fun SettingsToggle(title: String, sub: String, checked: Boolean, onChange: (Bool
 }
 
 @Composable
-fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit) {
+fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}) {
     var season by remember { mutableStateOf(1) }
     var synExpanded by remember { mutableStateOf(false) }
     val isFrierenDemo = title.title.startsWith("Frieren") && title.episodes != null
@@ -1552,6 +2047,33 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
                     if (title.genres != null) Text(title.genres, color = Muted, fontSize = 13.sp)
                     if (title.status != null) Text(title.status, color = Teal, fontSize = 13.sp)
                     if (isFrierenDemo) Text("You are currently in Season $season", color = Lavender, fontSize = 13.sp)
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            // 1.9-dev2: save to Library. Real vector bookmark icon, not
+            // an emoji — and it survives "Clear home cache" because
+            // Library lives in its own prefs file, not the home cache.
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .border(1.dp, if (isSaved) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+                    .background(if (isSaved) Pink.copy(alpha = 0.2f) else Card)
+                    .clickable(onClick = onSaveToggle)
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    androidx.compose.foundation.Image(
+                        painter = painterResource(R.drawable.ic_bookmark),
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(if (isSaved) Pink else Muted),
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        if (isSaved) "Saved in Library" else "Save to Library",
+                        color = if (isSaved) Color.White else Muted,
+                        fontSize = 13.5.sp, fontWeight = FontWeight.Bold,
+                    )
                 }
             }
             Spacer(Modifier.height(12.dp))
