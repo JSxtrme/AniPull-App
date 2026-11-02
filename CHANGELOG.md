@@ -26,6 +26,13 @@ All notable changes to the Anipull Android app are tracked here.
 
 ### 1.9-dev4 (versionCode 14) — test build, not a release
 
+- Header no longer sticky (JS's call, folded into dev4 before
+  ship): the stickyHeader + solid-on-scroll pill are gone, the
+  header is a plain first item that scrolls away with the hero,
+  so there is no reserved sticky strip at the top — only the
+  status-bar inset above it. Logo + name stay in the left
+  corner, a bit bigger: chip 36dp, icon 28dp, name 22sp
+  (footer logo keeps the old size).
 - Welcome scaled up to fill the solid bottom area (JS's dev3
   screenshot, red circle): Welcome 24sp, logo 60dp / wordmark
   46sp, tagline 26sp, button 60dp, wider gaps — the block now
