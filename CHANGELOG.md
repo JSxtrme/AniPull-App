@@ -24,6 +24,32 @@ All notable changes to the Anipull Android app are tracked here.
   Wordmark ("Ani" white + "pull" pink) unchanged. Themed-icon
   phone check still pending.
 
+### 1.9-dev4.6 (versionCode 16) — test build, not a release
+
+- Loading screen every launch (JS's call — it looks nice):
+  previously it only showed when there was no cached home, so
+  every relaunch skipped it and the cached home appeared
+  instantly. Now it shows on every launch, with a 1500ms
+  minimum so the logo-rise + name animation always plays out
+  fully instead of flashing by. Safety valve: if AniLab is
+  slow, a cached home still breaks out after 5s and the
+  refresh continues in the background — the loading screen
+  never traps a cached user behind a hanging fetch. First
+  boot still shows onboarding first, as before.
+
+### 1.9-dev4.5 (versionCode 15) — test build, not a release
+
+- Header gap, fixed properly (JS's circled space in his dev4
+  screenshot): the gap was 36dp LazyColumn spacing between the
+  header item and the hero PLUS 10dp + 24dp spacers at the top
+  of the hero — ~70dp of dead space. The header is now folded
+  INTO the hero (TopBar is the first thing in HeaderSection),
+  so no list spacing lands between them: header -> pill is
+  now 4dp + 12dp, and everything below moves up ~54dp.
+- Header logo bigger again — dev4's 36/28/22 was still not
+  big enough: now chip 48dp, icon 38dp, name 28sp, left corner
+  as before. Footer logo unchanged.
+
 ### 1.9-dev4 (versionCode 14) — test build, not a release
 
 - Header no longer sticky (JS's call, folded into dev4 before
