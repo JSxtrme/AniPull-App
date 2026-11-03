@@ -1,3 +1,11 @@
+## 1.9-dev4.8.6-hotfix2 (2026-11-03, versionCode 26) — reverse overlay visual bugs, not a 4.8.7
+
+JS, on the (non-crashing) hotfix: reverse has the same two bugs forward hero had early on, and they are the hotfix's own doing:
+1. Poster flies back at full-card height, then snaps to poster height when the real card appears.
+2. Title/type/rating do not travel with it — they pop in at the end.
+Cause: the first hotfix made the reverse overlay poster-only for grid AND carousel, so PosterImage filled the whole card box (233dp) instead of the poster area (177dp), with no title/meta at all. Fix: reverse overlay is full PosterCard for grid sources again, exactly like forward hero — its height is cardWidth*1.5 + title/meta, which is exactly the lerped rect height, so no snap and the title travels. Carousel stays poster-only, because a carousel card is not a PosterCard (its poster already fills the card). Restoring the card is safe: the logcat-confirmed crash was in home cards' onPlaced reverse check, not in the overlay card, and the overlay card reports no bounds, so its onPlaced only stores coordinates. Signing key 51f74e55, SAME as hotfix/4.8.6, updates in place.
+Observation from JS, not built yet: after a very fast/hard scroll, Nuvio (screenshot) still shows empty poster placeholders — it takes its sweet time loading posters, while Anipull tries very hard to keep up with the fling. That lazy-during-fling behaviour is a strong scroll-smoothness lead: deferring poster decodes until scroll settles (or a short delay so cards that flash past never decode) would trade a moment of placeholders for less decode/GPU work during the fling. Not built here — needs JS's call, since it changes poster-appear timing.
+
 ## 1.9-dev4.8.6-hotfix (2026-11-03, versionCode 25) — reverse crash hotfix, NOT a 4.8.7
 
 JS, on 4.8.6: app force-closes when pressing back from a detail — animation starts, then the app closes before the overlay lands in the empty slot. Twice, not a one-off phone glitch. No stack trace was available from the phone, so this hotfix removes every risky reverse mechanism by construction instead of patching one line:

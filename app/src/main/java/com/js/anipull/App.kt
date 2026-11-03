@@ -2193,13 +2193,21 @@ fun AnipullAppInner() {
     // stays above it, as it should). Same spring, same card:
     // grid sources fly back as a full PosterCard, carousel
     // sources as poster-only, exactly mirroring the forward path.
-    // 1.9-dev4.8.6-hotfix: reverse overlay is POSTER-ONLY, for grid
-    // and carousel alike. The old version rendered a full PosterCard
-    // in the overlay (interaction, press scale, title/meta, its own
-    // onPlaced) while home was also recomposing underneath — more
-    // moving state during the flight than a 0.45s animation needs,
-    // and another crash suspect. A poster + clip + border cannot
-    // press, cannot report bounds, and cannot set state.
+    // 1.9-dev4.8.6-hotfix2: reverse overlay is FULL PosterCard for
+    // grid sources, poster-only for carousel sources — exactly like
+    // the forward hero. The first hotfix made it poster-only for
+    // both, to be safe, and JS caught the two bugs that caused:
+    // (1) poster flew back at full-card height (233dp) then snapped
+    // to poster height (177dp) when the real card appeared, because
+    // PosterImage filled the whole card box; (2) title/type/rating
+    // never travelled, they just popped in at the end. A full
+    // PosterCard in the overlay fixes both, because its height is
+    // cardWidth*1.5 + title/meta, exactly the lerped rect height.
+    // Restoring it is safe now: the logcat-confirmed crash was in
+    // HOME cards' onPlaced reverse check, not in the overlay card,
+    // and the overlay card reports no bounds (reportBoundsOnPlace
+    // false, onPosterBounds null, reverseHiddenId null), so its
+    // onPlaced only stores coordinates — no boundsInWindow call.
     if (reverseTitle != null && reverseSourceRect != null && reverseDestRect != null) {
         val rSrc = reverseSourceRect!!; val rDst = reverseDestRect!!; val pr = reverseProgress
         val rLeft = rSrc.left + (rDst.left - rSrc.left) * pr
@@ -2210,14 +2218,24 @@ fun AnipullAppInner() {
         // non-finite size/position — skip the flight, don't crash.
         if (rW > 1f && rH > 1f && rW.isFinite() && rH.isFinite() && rLeft.isFinite() && rTop.isFinite()) {
             val rDensity = LocalDensity.current
-            Box(
-                modifier = Modifier
-                    .offset { androidx.compose.ui.unit.IntOffset(rLeft.toInt(), rTop.toInt()) }
-                    .size(with(rDensity) { rW.toDp() }, with(rDensity) { rH.toDp() })
-                    .clip(RoundedCornerShape(16.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp)),
-            ) {
-                PosterImage(reverseTitle!!.poster, Modifier.fillMaxSize())
+            if (reverseIsCarousel) {
+                Box(
+                    modifier = Modifier
+                        .offset { androidx.compose.ui.unit.IntOffset(rLeft.toInt(), rTop.toInt()) }
+                        .size(with(rDensity) { rW.toDp() }, with(rDensity) { rH.toDp() })
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp)),
+                ) {
+                    PosterImage(reverseTitle!!.poster, Modifier.fillMaxSize())
+                }
+            } else {
+                Box(
+                    modifier = Modifier
+                        .offset { androidx.compose.ui.unit.IntOffset(rLeft.toInt(), rTop.toInt()) }
+                        .size(with(rDensity) { rW.toDp() }, with(rDensity) { rH.toDp() }),
+                ) {
+                    PosterCard(reverseTitle!!, onClick = {}, cardWidth = with(rDensity) { rW.toDp() })
+                }
             }
         }
     }
