@@ -1,3 +1,29 @@
+## 1.9-dev4.8.3 (2026-11-03, versionCode 21) — initial fast-scroll fix, Nuvio-informed
+
+JS: "scroll is still not smooth, initial fast scrolls right after app opening, it's cancer" — even at 90Hz. Checked NuvioMobile (cmp-rewrite) for how they keep lists smooth.
+
+What Nuvio actually does (verified in their repo, not guessed):
+- Every LazyColumn item has `key =` + `contentType =` (HomeScreen.kt) — ours had none, so every progressive home update recomposed/re-measured all visible items.
+- Images go through Coil AsyncImage: size-aware decode to the composable's size, memory-cached, no per-poster state recomposition.
+- Blur uses `HazeInputScale.Fixed(0.66f)` for large blur areas, `Auto` for small overlays.
+
+What changed here (no Coil added — Gradle cannot fetch new deps on this VM, so we mirrored Coil's behaviour in our own loader):
+- Home LazyColumn items now all carry keys + contentTypes (header, search, cached, weekend, carousel, genre rows, skeletons, extra rows, Explore, Explore-more/done, footer).
+- Poster decode is now size-aware: PosterImage passes the card width in px, loadPoster downsamples via inSampleSize to that width, and the memory cache is keyed by URL + target width (grid card vs carousel no longer share one bitmap).
+- Haze: dock blur input scale Fixed(0.5f) (Nuvio's trick, halved for a dock-sized area), and — the big one — translucent dock + haze source turn OFF while the home list is actually scrolling and back on when it stops. Translucent-default-on in dev4.8.2 meant every fast scroll paid a full blur re-render at 90Hz.
+- Particles and carousel auto-scroll pause while scrolling (they only flip at scroll start/end, so no per-frame cost).
+- Explore no longer starts the moment home lands: it starts when the Explore item composes (user actually scrolls near it). It used to fire 12 category fetches + poster loads in parallel with the home fetch, right during the first fast scroll.
+- Extra genre rows: fetched in parallel but applied in ONE state update, after a 1.5s delay so they never compete with the first scroll.
+- Home cache JSON build + prefs write moved off the main thread to Dispatchers.IO (it used to run right as the fresh home finished, exactly when the user is scrolling).
+
+Same debug key as dev4.8.1/dev4.8.2, so it updates dev4.8.2 in place.
+
+Catalogs added in the same build (JS: "more catalogs before Explore, and before the genre catalogs starts", then "only 4 if we exclude Weekend marathon, need more"):
+- 4 new AniLab home catalogs, placed between the home rows and the genre rows: Most Favorite, Top 10 Today, Top 10 Week, Top 10 Month (verified live in /api/home, which returns 9 sections — we were showing only 5).
+- Genre rows expanded 4 -> 11: Action, Romance, Comedy, Fantasy + Drama, Adventure, Sci-Fi, Mystery, Slice of Life, Supernatural, Sports (all verified AniLab category IDs).
+- Final order before Explore: 9 home rows (incl. Weekend marathon picks) + 11 genre rows. Genre fetch is still batched into one state update after a 1.5s delay, so the extra rows do not compete with the first fast scroll.
+- Build fixes in this round: listState was used before it was defined (moved up), and HazeMaterials.ultraThin() is @Composable so it cannot be called inside the hazeEffect {} block — the style is now computed outside the block and assigned inside.
+
 # Changelog
 
 All notable changes to the Anipull Android app are tracked here.

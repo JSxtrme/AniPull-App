@@ -218,7 +218,7 @@ suspend fun fetchHome(): HomeData? {
         onSection = { _, sec -> synchronized(sections) { sections += sec } },
         onFeatured = { featured = it },
     )
-    val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched")
+    val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched", "Most Favorite", "Top 10 Today", "Top 10 Week", "Top 10 Month")
     val ordered = sections.sortedBy { wanted.indexOf(it.name) }
     return if (ordered.isEmpty() && featured == null) null else HomeData(ordered, featured)
 }
@@ -236,7 +236,7 @@ suspend fun fetchHomeProgressive(
         val root = JSONObject(text)
         val featuredObj = root.optJSONObject("featured")
         val sectionsJson = root.optJSONArray("sections") ?: return@withContext
-        val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched")
+        val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched", "Most Favorite", "Top 10 Today", "Top 10 Week", "Top 10 Month")
         val jobs = mutableListOf<kotlinx.coroutines.Job>()
         // coroutineScope so this returns only after every section finished,
         // while callbacks already fired progressively inside each launch.
@@ -319,28 +319,40 @@ suspend fun searchAniLab(query: String): List<ApiTitle> = withContext(Dispatcher
 
 // --- Tiny poster loader: no Coil dependency, so no new download risk.
 // Small AniLab posters only, in-memory cache, decoded off the main thread.
+// 1.9-dev4.8.3: size-aware decode, Coil-style without Coil.
+// The cache key includes the target width, because the same poster
+// shows at 118dp in a row and at full width in the carousel —
+// sharing one bitmap would either upscale the row or waste a
+// full-size texture on every grid card during a fast scroll.
 object PosterCache {
     private val map = LinkedHashMap<String, Bitmap>()
-    fun get(url: String): Bitmap? = synchronized(map) { map[url] }
-    fun put(url: String, bmp: Bitmap) = synchronized(map) {
+    fun get(url: String, targetWidthPx: Int = 0): Bitmap? = synchronized(map) { map["$url@$targetWidthPx"] }
+    fun put(url: String, bmp: Bitmap, targetWidthPx: Int = 0) = synchronized(map) {
         if (map.size > 200) map.remove(map.keys.first())
-        map[url] = bmp
+        map["$url@$targetWidthPx"] = bmp
     }
 }
 
-suspend fun loadPoster(url: String, context: Context? = null): Bitmap? {
-    PosterCache.get(url)?.let { return it }
+private fun sampleSizeFor(width: Int, targetWidthPx: Int): Int {
+    if (targetWidthPx <= 0 || width <= targetWidthPx) return 1
+    var s = 1
+    while (width / (s * 2) >= targetWidthPx) s *= 2
+    return s
+}
+
+suspend fun loadPoster(url: String, context: Context? = null, targetWidthPx: Int = 0): Bitmap? {
+    PosterCache.get(url, targetWidthPx)?.let { return it }
     return withContext(Dispatchers.IO) {
         try {
-            // Disk first: a poster downloaded on a previous launch is
-            // already on the phone, so a cached home row renders instantly
-            // with no network at all.
             if (context != null) {
                 val dir = java.io.File(context.cacheDir, "posters").apply { mkdirs() }
                 val file = java.io.File(dir, "${url.hashCode()}.jpg")
                 if (file.exists()) {
-                    BitmapFactory.decodeFile(file.absolutePath)?.let {
-                        PosterCache.put(url, it); return@withContext it
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(file.absolutePath, bounds)
+                    val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx) }
+                    BitmapFactory.decodeFile(file.absolutePath, opts)?.let {
+                        PosterCache.put(url, it, targetWidthPx); return@withContext it
                     }
                 }
             }
@@ -351,14 +363,17 @@ suspend fun loadPoster(url: String, context: Context? = null): Bitmap? {
             }
             if (conn.responseCode != 200) return@withContext null
             val bytes = conn.inputStream.use { it.readBytes() }
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withContext null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx) }
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return@withContext null
             if (context != null) {
                 try {
                     val dir = java.io.File(context.cacheDir, "posters").apply { mkdirs() }
                     java.io.File(dir, "${url.hashCode()}.jpg").writeBytes(bytes)
                 } catch (_: Exception) { }
             }
-            PosterCache.put(url, bmp)
+            PosterCache.put(url, bmp, targetWidthPx)
             bmp
         } catch (_: Exception) {
             null

@@ -129,6 +129,9 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.async
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 // Colours taken from the web mockup's CSS variables.
 private val OutfitFont = FontFamily(
@@ -406,12 +409,18 @@ fun StatsGrid(live: Boolean, loading: Boolean = false) {
 }
 
 @Composable
-fun PosterImage(poster: String?, modifier: Modifier) {
-    var bitmap by remember(poster) { mutableStateOf<android.graphics.Bitmap?>(null) }
+fun PosterImage(poster: String?, modifier: Modifier, targetWidthPx: Int = 0) {
+    // 1.9-dev4.8.3 (Nuvio lesson): Coil decodes to the size the
+    // composable actually shows, not the full poster. We do the same
+    // without adding Coil (Gradle cannot fetch new deps on this VM):
+    // targetWidthPx is the card width in pixels, loadPoster
+    // downsamples to it, so a 118dp card never decodes/uploads a
+    // full-size poster texture during a fast scroll.
+    var bitmap by remember(poster, targetWidthPx) { mutableStateOf<android.graphics.Bitmap?>(null) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
     if (poster != null) {
-        LaunchedEffect(poster) {
-            bitmap = PosterCache.get(poster) ?: loadPoster(poster, ctx)
+        LaunchedEffect(poster, targetWidthPx) {
+            bitmap = PosterCache.get(poster, targetWidthPx) ?: loadPoster(poster, ctx, targetWidthPx)
         }
     }
     Box(modifier = modifier.background(PosterBg)) {
@@ -449,6 +458,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
         animationSpec = spring(stiffness = 400f, dampingRatio = 0.7f),
         label = "posterPress",
     )
+    val cardTargetPx = with(LocalDensity.current) { cardWidth.toPx().toInt() }
     Column(
         modifier = Modifier
             .width(cardWidth)
@@ -469,7 +479,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
                 .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
                 .onPlaced { coords -> onPosterBounds?.invoke(coords.boundsInWindow()) },
         ) {
-            PosterImage(title.poster, Modifier.fillMaxSize())
+            PosterImage(title.poster, Modifier.fillMaxSize(), cardTargetPx)
             val topLabel = when {
                 title.episodes != null -> "EP ${title.episodes}"
                 title.score != null -> "★ ${title.score}"
@@ -722,7 +732,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                         onOpen(pick)
                     },
             ) {
-                PosterImage(pick.poster, Modifier.matchParentSize())
+                PosterImage(pick.poster, Modifier.matchParentSize(), with(LocalDensity.current) { config.screenWidthDp.dp.toPx().toInt() })
                 Box(
                     Modifier.matchParentSize().background(
                         Brush.horizontalGradient(
@@ -1291,14 +1301,23 @@ fun AnipullAppInner() {
     // Same @Composable-modifier rule as the dock below: hazeSource
     // cannot live inside a Modifier.then() argument, so build it
     // here in the composable body and .then() the result.
-    val hazeSourceModifier: Modifier = if (context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("translucent_dock", true))
+    // 1.9-dev4.8.3: haze is OFF while the home list is actually
+    // scrolling (solid dock instead), and back on when it stops.
+    // Translucent-on-by-default in dev4.8.2 meant every fast scroll
+    // paid a full blur re-render at 90Hz — that was the biggest
+    // single cost in the initial scroll. listState.isScrollInProgress
+    // only flips at scroll start/end, so this costs one
+    // recomposition per fling, not one per frame.
+    val listState = rememberLazyListState()
+    val translucentPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("translucent_dock", true)
+    val dockTranslucent = translucentPref && !listState.isScrollInProgress
+    val hazeSourceModifier: Modifier = if (dockTranslucent)
         Modifier.hazeSource(hazeState) else Modifier
     // 1.9-dev4.8.1: Show Explore toggle, re-read on every composition
     // (tab switches recompose this), so turning it off in Settings
     // hides Explore and un-gates the footer immediately.
     val showExplore = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("show_explore", true)
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
     val appFocusManager = LocalFocusManager.current
     // 1.9-dev4.8.2: scrolling while search is open hides the
     // KEYBOARD ONLY — no clearFocus, no closeSearch, so the results
@@ -1418,10 +1437,12 @@ fun AnipullAppInner() {
             exploreLoading = false
         }
     }
-    LaunchedEffect(liveSections) {
-        if (liveSections != null && !exploreStarted) { exploreStarted = true; loadExploreNext() }
-    }
-
+    // 1.9-dev4.8.3: Explore is NO LONGER started the moment home
+    // lands. It used to fire 12 category fetches + poster loads in
+    // parallel with the home fetch, right when the user starts
+    // their first fast scroll. Now it starts only when the Explore
+    // item itself composes (i.e. the user actually scrolls near
+    // it) — see the Explore item below.
     // Dynamic home: (1) cached live home is loaded into the rows
     // immediately if there is one, (2) a progressive refresh updates
     // each row the moment it lands, (3) demo titles appear ONLY if
@@ -1446,7 +1467,7 @@ fun AnipullAppInner() {
     }
     LaunchedEffect(fetchAttempt) {
         homeFailed = false
-        val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched")
+        val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched", "Most Favorite", "Top 10 Today", "Top 10 Week", "Top 10 Month")
         val cached = loadHomeCache(context)
         val localSections = cached?.sections?.toMutableList() ?: mutableListOf()
         var localFeatured = cached?.featured
@@ -1470,7 +1491,7 @@ fun AnipullAppInner() {
             if (ordered.isEmpty() && localFeatured == null) {
                 homeFailed = true
             } else {
-                saveHomeCache(context, HomeData(ordered, localFeatured))
+                withContext(Dispatchers.IO) { saveHomeCache(context, HomeData(ordered, localFeatured)) }
             }
         }
     }
@@ -1496,13 +1517,13 @@ fun AnipullAppInner() {
     LaunchedEffect(liveSections) {
         if (liveSections != null && !extraStarted) {
             extraStarted = true
-            val genres = listOf(1 to "Action anime", 14 to "Romance anime", 5 to "Comedy anime", 4 to "Fantasy anime")
-            genres.forEach { (id, name) ->
-                scope.launch {
-                    fetchCategory(id, name)?.let { sec ->
-                        extraSections = extraSections + sec
-                    }
-                }
+            scope.launch {
+                kotlinx.coroutines.delay(1500)
+                val genres = listOf(1 to "Action anime", 14 to "Romance anime", 5 to "Comedy anime", 4 to "Fantasy anime", 2 to "Drama anime", 3 to "Adventure anime", 6 to "Sci-Fi anime", 7 to "Mystery anime", 9 to "Slice of Life anime", 10 to "Supernatural anime", 11 to "Sports anime")
+                val results = genres.map { (id, name) ->
+                    async { fetchCategory(id, name) }
+                }.mapNotNull { runCatching { it.await() }.getOrNull() }
+                if (results.isNotEmpty()) extraSections = results
             }
         }
     }
@@ -1659,7 +1680,7 @@ fun AnipullAppInner() {
             // 1.9-dev4.5: no separate header item at all — TopBar
             // lives inside HeaderSection (below), so the LazyColumn's
             // 36dp spacedBy never lands between header and hero.
-            item {
+            item(key = "home_header", contentType = "header") {
                 HeaderSection(
                     query = query,
                     onQueryChange = { query = it; isChipQuery = false; if (it.isBlank()) { liveResults = null; searching = false } },
@@ -1677,11 +1698,11 @@ fun AnipullAppInner() {
                     isSearching = isSearchFocused || query.isNotBlank(),
                     onPillPositioned = { pillCoords = it },
                     onCloseSearch = { closeSearch() },
-                    particlesOn = LocalContext.current.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("particles", true),
+                    particlesOn = LocalContext.current.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("particles", true) && !listState.isScrollInProgress,
                 )
             }
             if (query.isNotBlank()) {
-                item {
+                item(key = "home_search_results", contentType = "search") {
                     Text(
                         if (searching) "Searching AniLab…" else "Search results",
                         color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont,
@@ -1726,7 +1747,7 @@ fun AnipullAppInner() {
                 // the pill instantly (they are already on the phone
                 // from the home cache + poster disk cache, so this
                 // costs zero network and zero wait). No footer here.
-                item {
+                item(key = "home_cached", contentType = "search") {
                     val cachedTitles = (liveSections?.flatMap { it.titles } ?: emptyList()).distinctBy { it.id }
                     if (cachedTitles.isEmpty()) {
                         Text("Type to search AniLab…", color = Faint, fontSize = 13.sp)
@@ -1753,10 +1774,10 @@ fun AnipullAppInner() {
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
-                    item { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { openTitle(it) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
+                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { openTitle(it) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
                 }
                 featured?.let { pick ->
-                    item {
+                    item(key = "home_carousel", contentType = "carousel") {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             androidx.compose.foundation.Image(
                                 painter = painterResource(R.drawable.ic_star),
@@ -1770,7 +1791,7 @@ fun AnipullAppInner() {
                         Spacer(Modifier.height(12.dp))
                         val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
                             .distinctBy { it.id }.take(5)
-                        EditorsPickCarousel(picks, { openTitle(it, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true), onBounds = { t, rect -> posterBounds[t.id] = rect })
+                        EditorsPickCarousel(picks, { openTitle(it, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress, onBounds = { t, rect -> posterBounds[t.id] = rect })
                     }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
@@ -1780,14 +1801,18 @@ fun AnipullAppInner() {
                         "Most Popular" -> R.drawable.ic_chart
                         "Top Airing" -> R.drawable.ic_film
                         "Most Watched" -> R.drawable.ic_eye
+                        "Most Favorite" -> R.drawable.ic_star
+                        "Top 10 Today" -> R.drawable.ic_trophy
+                        "Top 10 Week" -> R.drawable.ic_trophy
+                        "Top 10 Month" -> R.drawable.ic_trophy
                         else -> null
                     }
-                    item { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
+                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
                 }
             } else if (homeFailed) {
                 // 1.9-dev2: failed load = skeletons + retry, never demo
                 // titles pretending to be a catalog.
-                item {
+                item(key = "home_failed", contentType = "error") {
                     Text("Couldn't load catalogs.", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
                     Spacer(Modifier.height(8.dp))
                     Text("Check your connection and try again — no demo titles are shown in place of the live feed.", color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp)
@@ -1797,19 +1822,19 @@ fun AnipullAppInner() {
                             .clickable { fetchAttempt += 1 }.padding(horizontal = 20.dp, vertical = 11.dp),
                     ) { Text("Retry", color = OnAccent, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
                 }
-                item { SkeletonRow() }
-                item { SkeletonRow() }
+                item(key = "home_skeleton_0", contentType = "skeleton") { SkeletonRow() }
+                item(key = "home_skeleton_1", contentType = "skeleton") { SkeletonRow() }
             } else {
                 // First load, no cache, fetch still running: skeletons, not demo.
-                item { SkeletonRow() }
-                item { SkeletonRow() }
+                item(key = "home_skeleton_0", contentType = "skeleton") { SkeletonRow() }
+                item(key = "home_skeleton_1", contentType = "skeleton") { SkeletonRow() }
             }
             // Extra catalogs, below the AniLab home rows: genre rows from
             // /api/category (Action 1, Romance 14, Comedy 5, Fantasy 4).
             // They load progressively in the background, like home rows.
             if (!isSearchFocused && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
-                    item { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
+                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
                 }
             }
             // 1.9-dev4.8: Explore — after all catalogs, a grid (not a
@@ -1820,7 +1845,10 @@ fun AnipullAppInner() {
             // This is what the Downloads "Browse anime" button points
             // at: home no longer has only a handful of picks.
             if (!isSearchFocused && query.isBlank() && liveSections != null && showExplore) {
-                item {
+                item(key = "home_explore", contentType = "explore") {
+                    // First composition of Explore = user scrolled
+                    // near it, so now (and only now) start loading.
+                    LaunchedEffect(Unit) { if (!exploreStarted) { exploreStarted = true; loadExploreNext() } }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         androidx.compose.foundation.Image(
                             painter = painterResource(R.drawable.ic_grid),
@@ -1871,7 +1899,7 @@ fun AnipullAppInner() {
                     }
                 }
                 if (!exploreFinished) {
-                    item {
+                    item(key = "home_explore_more", contentType = "explore_more") {
                         // Composed only when the user reaches the bottom:
                         // that composition is the scroll trigger for the
                         // next page. The footer stays hidden until the
@@ -1887,7 +1915,7 @@ fun AnipullAppInner() {
                         }
                     }
                 } else {
-                    item {
+                    item(key = "home_explore_done", contentType = "explore_done") {
                         Text("That's the whole Explore catalog for now — back to the top for the picks above, or pull something below.", color = Faint, fontSize = 13.sp)
                     }
                 }
@@ -1897,7 +1925,7 @@ fun AnipullAppInner() {
             // it stayed visible when the search box was tapped
             // (short focused list) and while results were fetching
             // (short skeleton list) — both screenshots JS circled.
-            if (!isSearchFocused && query.isBlank() && !searching && (liveSections == null || exploreFinished || !showExplore)) item {
+            if (!isSearchFocused && query.isBlank() && !searching && (liveSections == null || exploreFinished || !showExplore)) item(key = "home_footer", contentType = "footer") {
                 Column {
                     LogoRow()
                     Spacer(Modifier.height(8.dp))
@@ -1935,7 +1963,7 @@ fun AnipullAppInner() {
                 current = currentTab,
                 fraction = dockFraction,
                 onTab = { goTab(it) },
-                translucent = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("translucent_dock", true),
+                translucent = dockTranslucent,
                 hazeState = hazeState,
             )
         }
@@ -1999,8 +2027,16 @@ fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit, translucen
         // hazeEffect is itself a @Composable modifier, so it cannot be
     // called inside a Modifier.then() argument — build the branch
     // here, in the composable body, and .then() the result.
-    val dockBgModifier = if (translucent && hazeState != null)
-        Modifier.hazeEffect(hazeState, style = HazeMaterials.ultraThin(if (ThemeState.lightMode) Color.White else Color(0xFF1A1A24)))
+    val dockBgModifier = if (translucent && hazeState != null) {
+        val dockStyle = HazeMaterials.ultraThin(if (ThemeState.lightMode) Color.White else Color(0xFF1A1A24))
+        Modifier.hazeEffect(hazeState) {
+            // Nuvio's large-blur trick: a fixed 0.5x input scale
+            // halves the blur work for a dock-sized area, with no
+            // visible difference at this size.
+            inputScale = dev.chrisbanes.haze.HazeInputScale.Fixed(0.5f)
+            style = dockStyle
+        }
+    }
     else Modifier.background(if (ThemeState.lightMode) Color.White else Color(0xFF1A1A24))
     androidx.compose.foundation.layout.BoxWithConstraints(
             modifier = Modifier
