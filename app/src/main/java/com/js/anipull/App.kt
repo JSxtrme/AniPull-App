@@ -750,7 +750,7 @@ fun CarouselDot(selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f) {
+fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, initialPage: Int = -1, onPageChange: ((Int) -> Unit)? = null) {
     // 1.9-dev4.8: Editor's pick is now Editor's PICKS, a 5-item
     // carousel, and the description lines are GONE altogether (JS's
     // call) — title + type pill + buttons only, over the poster.
@@ -767,7 +767,16 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
     // never travels backwards, and the picks just keep repeating.
     // Dots show currentPage % 5, and a dot tap jumps to that pick's
     // NEXT occurrence to the right, never left.
-    val pagerState = rememberPagerState(initialPage = picks.size * 100, pageCount = { picks.size * 1000 })
+    // 1.9-dev4.8.7-hotfix: pager page is hoisted to App, not
+    // remembered inside the carousel. The carousel composable is
+    // disposed while a detail is open (home list is gone), so a
+    // local pagerState reset to page 500 (pick 0) on every back —
+    // the reverse then flew to a slot holding a different pick,
+    // and the opened pick's name/buttons jerked back into place
+    // when the user swiped to it again. Hoisted, the carousel
+    // resumes on the exact pick that was opened.
+    val pagerState = rememberPagerState(initialPage = if (initialPage >= 0) initialPage else picks.size * 100, pageCount = { picks.size * 1000 })
+    LaunchedEffect(pagerState.currentPage) { onPageChange?.invoke(pagerState.currentPage) }
     val scope = rememberCoroutineScope()
     var carouselVisible by remember { mutableStateOf(true) }
     val density = LocalDensity.current
@@ -1496,10 +1505,20 @@ fun AnipullAppInner() {
             if (heroTitle != null) { heroTitle = null; heroDestRect = null; heroDestPosterRect = null }
         }
     }
-    // 1.9-dev4.8.7: fade-in value for the reverse destination
-    // card (0 at reverse start, 1 at landing). When no reverse
-    // is running it is 1, so normal cards are fully opaque.
-    val reverseFade = if (reverseTitle != null) reverseProgress else 1f
+    // 1.9-dev4.8.7-hotfix: crossfade value for the reverse
+    // destination card, NOT a linear fade. 4.8.7 used a linear
+    // reverseProgress fade, so the destination card was visible
+    // (faint, then full) throughout the flight — the slot was no
+    // longer empty, and the overlay landed on a duplicate, which
+    // is exactly the bug slot-clear fixed in 4.8.5. Now: 0 for
+    // the first 80% of the flight (slot truly empty, overlay is
+    // the only poster), then 0 -> 1 over the last 20% as the
+    // overlay fades out. At landing the card is already fully
+    // visible, so there is no pop, and the card was always
+    // composed and clickable (alpha 0 does not disable clicks),
+    // so the re-tap fix from 4.8.7 survives.
+    val reverseFade = if (reverseTitle != null) ((reverseProgress - 0.8f) / 0.2f).coerceIn(0f, 1f) else 1f
+    var carouselPage by remember { mutableStateOf(500) }
     fun openTitle(t: ApiTitle, isCarousel: Boolean = false) {
         // 1.9-dev4.8.7 re-tap fix: if a reverse is already flying
         // to this exact card, tapping it reopens the detail
@@ -1834,7 +1853,7 @@ fun AnipullAppInner() {
                 isSaved = savedTitles.any { it.id == screen!!.id },
                 onSaveToggle = { screen?.let { toggleSave(it) } },
                 heroPosterHidden = heroActive,
-                detailFade = if (heroActive) 0.2f + 0.8f * heroProgress else 1f,
+                detailFade = if (heroActive) heroProgress else 1f,
                 onPosterBounds = { rect -> detailCardRect = rect; if (heroTitle?.id == screen!!.id) heroDestRect = rect },
                 onPosterImageBounds = { rect -> detailPosterRect = rect; if (heroTitle?.id == screen!!.id) heroDestPosterRect = rect },
             )
@@ -2048,7 +2067,7 @@ fun AnipullAppInner() {
                         Spacer(Modifier.height(12.dp))
                         val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
                             .distinctBy { it.id }.take(5)
-                        EditorsPickCarousel(picks, { openTitle(it, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade)
+                        EditorsPickCarousel(picks, { openTitle(it, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade, initialPage = carouselPage, onPageChange = { carouselPage = it })
                     }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
@@ -2256,6 +2275,7 @@ fun AnipullAppInner() {
             if (reverseIsCarousel) {
                 Box(
                     modifier = Modifier
+                        .alpha(1f - reverseFade)
                         .offset { androidx.compose.ui.unit.IntOffset(rLeft.toInt(), rTop.toInt()) }
                         .size(with(rDensity) { rW.toDp() }, with(rDensity) { rH.toDp() })
                         .clip(RoundedCornerShape(16.dp))
@@ -2267,6 +2287,7 @@ fun AnipullAppInner() {
             } else {
                 Box(
                     modifier = Modifier
+                        .alpha(1f - reverseFade)
                         .offset { androidx.compose.ui.unit.IntOffset(rLeft.toInt(), rTop.toInt()) }
                         .size(with(rDensity) { rW.toDp() }, with(rDensity) { rH.toDp() }),
                 ) {
