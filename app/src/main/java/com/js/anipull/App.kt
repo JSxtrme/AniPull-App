@@ -432,7 +432,18 @@ fun PosterImage(poster: String?, modifier: Modifier, targetWidthPx: Int = 0) {
             if (cached != null) {
                 bitmap = cached
             } else {
-                if (!isPosterOnDisk(poster, ctx)) kotlinx.coroutines.delay(120)
+                // 4.8.10 Nuvio-style lazy load: network posters
+                // wait 300ms (was 120ms) before starting, so a
+                // card that flashes past in a fling never starts
+                // a network fetch + decode at all. Disk/memory
+                // hits still load instantly. This is the main
+                // scroll-during-loading fix: during initial load,
+                // dozens of network fetches + GPU uploads were
+                // competing with scroll frames, then everything
+                // went smooth once cached — exactly what JS
+                // reported. Slower poster appearance during a
+                // fling, smoother scroll, same posters after settle.
+                if (!isPosterOnDisk(poster, ctx)) kotlinx.coroutines.delay(300)
                 bitmap = loadPoster(poster, ctx, targetWidthPx)
             }
         }
@@ -1463,18 +1474,58 @@ fun AnipullAppInner() {
     var detailPosterFinal by remember { mutableStateOf<Rect?>(null) }
     val pageAnim = remember { androidx.compose.animation.core.Animatable(0f) }
     val pageProgress = pageAnim.value
+    val pageDensity0 = LocalDensity.current
+    val pageConfig0 = LocalConfiguration.current
+    val screenWidthPx0 = with(pageDensity0) { pageConfig0.screenWidthDp.dp.toPx() }
     var pageClosing by remember { mutableStateOf(false) }
     val heroMotion = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getString("hero_motion", "normal") ?: "normal"
-    val pageSpec: androidx.compose.animation.core.AnimationSpec<Float> = when (heroMotion) {
-        "cinematic" -> tween(700, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))
-        "easeout" -> tween(500, easing = FastOutSlowInEasing)
-        "easein" -> tween(550, easing = FastOutLinearInEasing)
-        else -> tween(400, easing = FastOutSlowInEasing)
-    }
+    // 1.9-dev4.8.10: shonenx EXACT — AppPageTransition in
+    // shonenx/lib/core/theme/app_theme.dart: easeInOutCubic
+    // (CubicBezier 0.65, 0, 0.35, 1), slide in Offset(1,0)->0,
+    // slide out Offset(0)->(-1,0), go_router default 300ms.
+    // Previous 400ms FastOutSlowIn was the wrong curve and the
+    // wrong duration, and it made page + poster drift from the
+    // shonenx feel even when rects were right. heroMotion
+    // setting is ignored for the page transition now — one
+    // motion, copied exactly, not a menu of approximations.
+    val pageSpec: androidx.compose.animation.core.AnimationSpec<Float> = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))
     LaunchedEffect(screen, pageClosing) {
         val target = if (screen != null && !pageClosing) 1f else 0f
         pageAnim.animateTo(target, pageSpec)
-        if (target == 0f && screen != null) { screen = null; pageClosing = false; detailCardFinal = null; detailPosterFinal = null }
+        // 4.8.10: do NOT clear detail dest cache here. Detail
+        // poster position is constant (118dp, fixed header),
+        // so a once-captured dest is valid for every title.
+        // Clearing it forced a re-measure on every tap, and
+        // that re-measure during a slide is exactly what made
+        // the overlay fly to the wrong place / appear late.
+        if (target == 0f && screen != null) { screen = null; pageClosing = false }
+    }
+    // 4.8.10 pre-measure: on the FIRST ever tap, dest is null,
+    // so we do NOT start the slide yet. Instead we render a
+    // hidden detail page at final position (offset 0, alpha 0)
+    // for one frame, capture its poster rects, THEN start the
+    // slide with dest already known. That is the whole black-
+    // snap fix: before, dest was captured DURING the slide,
+    // when the detail page was off-screen / partially visible,
+    // so the overlay either never appeared (black empty slot)
+    // or appeared late at an intermediate rect and snapped.
+    // After the first capture, dest is cached forever, so all
+    // later taps slide immediately with overlay from frame 1.
+    var pendingTitle by remember { mutableStateOf<ApiTitle?>(null) }
+    var pendingIsCarousel by remember { mutableStateOf(false) }
+    LaunchedEffect(pendingTitle, detailCardFinal, detailPosterFinal) {
+        val pt = pendingTitle
+        if (pt != null) {
+            val needCard = !pendingIsCarousel
+            val ready = if (needCard) detailCardFinal != null else detailPosterFinal != null
+            if (ready) {
+                heroSourceRect = posterBounds[pt.id]
+                heroSourceIsCarousel = pendingIsCarousel
+                pendingTitle = null
+                pageClosing = false
+                screen = pt
+            }
+        }
     }
     // Poster-hidden for the transitioning title: only the POSTER
     // is hidden (see PosterCard/Carousel below), title/buttons
@@ -1497,8 +1548,14 @@ fun AnipullAppInner() {
         if (screen?.id == t.id && pageClosing) { pageClosing = false; return }
         if (screen?.id == t.id && !pageClosing) return
         val src = posterBounds[t.id]
+        // First ever tap: dest not yet cached -> pre-measure
+        // (see above), do not start slide with a null dest.
+        if (detailCardFinal == null && detailPosterFinal == null && pendingTitle == null) {
+            if (src != null) heroSourceRect = src
+            pendingTitle = t; pendingIsCarousel = isCarousel
+            return
+        }
         if (src != null) { heroSourceRect = src; heroSourceIsCarousel = isCarousel }
-        detailCardFinal = null; detailPosterFinal = null
         pageClosing = false
         screen = t
     }
@@ -1655,6 +1712,13 @@ fun AnipullAppInner() {
             if (sec == null) {
                 exploreFinished = true
             } else {
+                // 4.8.10 scroll lag: same rule as home/extra
+                // sections — never apply a batch mid-scroll.
+                // Explore used to land mid-fling, recomposing
+                // the list + starting new poster decodes while
+                // the user was still scrolling, which is part of
+                // why scroll felt laggy until everything loaded.
+                while (listState.isScrollInProgress) kotlinx.coroutines.delay(100)
                 exploreTitles = (exploreTitles + sec.titles.take(9)).distinctBy { it.id }
                 explorePage += 1
                 if (explorePage >= exploreSeq.size) exploreFinished = true
@@ -1808,7 +1872,7 @@ fun AnipullAppInner() {
         })
     } else if (showLoading) {
         LoadingScreen()
-    } else Box(modifier = Modifier.fillMaxSize().background(Bg)) {
+    } else Box(modifier = Modifier.fillMaxSize().background(Bg).graphicsLayer { translationX = if (screen != null) -pageProgress * screenWidthPx0 else 0f }) {
     // Haze source: the whole tab content behind the dock, so the
     // translucent dock (when enabled) blurs real posters, not a
     // solid colour. The dock itself sits outside this inner Box.
@@ -2275,6 +2339,28 @@ fun AnipullAppInner() {
                     }
                 }
             }
+        }
+    }
+
+    // 4.8.10 hidden pre-measure instance: only on the first
+    // ever tap, while pendingTitle is set. Rendered at final
+    // position (offset 0) with alpha 0, so the user never sees
+    // it, but its poster IS laid out and onPlaced fires with
+    // the true final rect. Once captured, the LaunchedEffect
+    // above starts the real slide with dest already known.
+    if (pendingTitle != null) {
+        Box(modifier = Modifier.fillMaxSize().background(Bg).alpha(0f)) {
+            DetailScreen(
+                title = pendingTitle!!,
+                onBack = {},
+                onPull = {},
+                isSaved = false,
+                onSaveToggle = {},
+                heroPosterHidden = false,
+                detailFade = 1f,
+                onPosterBounds = { rect -> if (detailCardFinal == null) detailCardFinal = rect },
+                onPosterImageBounds = { rect -> if (detailPosterFinal == null) detailPosterFinal = rect },
+            )
         }
     }
 
