@@ -6,6 +6,7 @@ JS, on 4.8.6: app force-closes when pressing back from a detail — animation st
 - Clearing is now single-path: tab switches clear the reverse synchronously in goTab()'s tap handler, not in a separate LaunchedEffect(currentTab) that could fire mid-composition. Progress and timeout clearing remain, and all three clear reverseHiddenId too.
 - Guard: a reverse overlay with a zero, negative, or non-finite rect is skipped, not rendered.
 - Nothing else changed: same hero motions, same scroll code, same dock, same settings. Signing key 51f74e55, SAME as dev4.8.6, so it updates dev4.8.6 in place.
+- Root cause CONFIRMED by JS's logcat (2026-11-03 21:05, FATAL, PID 29002): java.lang.IllegalStateException: LayoutCoordinate operations are only valid when isAttached is true, at LayoutCoordinatesKt.boundsInWindow, at AppKt.PosterCard lambda (App.kt:494, OnPlacedNode.onPlaced) — exactly the 4.8.6 reverse slot-clear onPlaced check, on a LazyList item whose parent chain was deactivated (first node in the dump: deactivated=true). The hotfix above already removes that call. Second pass, same hotfix build: every remaining placement-time bounds read (detail report, poster bounds, carousel visibility, tap-time bounds, search-pill localBoundingBoxOf) now goes through safeBounds(), which tries boundsInWindow() and returns null on IllegalStateException instead of crashing — checking isAttached on the child alone would NOT have been enough, because the log's node was isAttached=true and the throw came from a parent coordinator.
 
 ## 1.9-dev4.8.6
 

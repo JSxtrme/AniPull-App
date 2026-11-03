@@ -437,6 +437,21 @@ fun PosterImage(poster: String?, modifier: Modifier, targetWidthPx: Int = 0) {
     }
 }
 
+// 1.9-dev4.8.6-hotfix, root-cause guard (logcat 2026-11-03 21:05):
+// boundsInWindow() throws IllegalStateException ("LayoutCoordinate
+// operations are only valid when isAttached is true") when called on
+// a node whose parent chain is deactivated — exactly what happens to
+// a LazyList item being placed as a disappearing item. Checking
+// isAttached on the child alone is NOT enough (the log's first node
+// was isAttached=true, deactivated=true, and the throw came from a
+// parent coordinator). So every placement-time bounds read goes
+// through this: try, and skip on failure. A skipped bounds read
+// just means "no reverse source this frame", never a crash.
+private fun safeBounds(coords: androidx.compose.ui.layout.LayoutCoordinates?): androidx.compose.ui.geometry.Rect? {
+    if (coords == null) return null
+    return try { coords.boundsInWindow() } catch (e: IllegalStateException) { null }
+}
+
 @Composable
 fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseHiddenId: Long? = null) {
     val cardHeight = cardWidth * 3 / 2
@@ -492,10 +507,10 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
                 // Reverse-only placement check: when home is freshly
                 // composed on back, LaunchedEffect above runs before
                 // placement (holder still null), so this is the
-                if (reportBoundsOnPlace) onBounds?.invoke(coords.boundsInWindow())
+                if (reportBoundsOnPlace) safeBounds(coords)?.let { onBounds?.invoke(it) }
             }
             .clickable(interactionSource = interaction, indication = null, onClick = {
-                coordsHolder[0]?.let { onBounds?.invoke(it.boundsInWindow()) }
+                coordsHolder[0]?.let { c -> safeBounds(c)?.let { onBounds?.invoke(it) } }
                 onClick()
             }),
     ) {
@@ -504,7 +519,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
                 .size(width = cardWidth, height = cardHeight)
                 .clip(RoundedCornerShape(16.dp))
                 .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
-                .onPlaced { coords -> onPosterBounds?.invoke(coords.boundsInWindow()) },
+                .onPlaced { coords -> safeBounds(coords)?.let { onPosterBounds?.invoke(it) } },
         ) {
             PosterImage(title.poster, Modifier.fillMaxSize(), cardTargetPx)
             val topLabel = when {
@@ -776,7 +791,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
             state = pagerState,
             modifier = Modifier.fillMaxWidth()
                 .onGloballyPositioned { coords ->
-                    val r = coords.boundsInWindow()
+                    val r = safeBounds(coords) ?: return@onGloballyPositioned
                     carouselVisible = r.bottom > 0f && r.top < screenHeightPx
                 },
         ) { page ->
@@ -816,7 +831,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                         cardCoords[0] = coords
                     }
                     .clickable(interactionSource = cInteraction, indication = null) {
-                        cardCoords[0]?.let { onBounds?.invoke(pick, it.boundsInWindow()) }
+                        cardCoords[0]?.let { c -> safeBounds(c)?.let { onBounds?.invoke(pick, it) } }
                         onOpen(pick)
                     },
             ) {
@@ -1874,7 +1889,7 @@ fun AnipullAppInner() {
                         if (isSearchFocused) {
                             val lc = lazyColumnCoordsHolder[0]
                             val pc = pillCoordsHolder[0]
-                            val b = lc?.let { l -> pc?.let { p -> l.localBoundingBoxOf(p) } }
+                            val b = try { lc?.let { l -> pc?.let { p -> l.localBoundingBoxOf(p) } } } catch (e: IllegalStateException) { null } catch (e: IllegalArgumentException) { null }
                             if (b == null || !b.contains(offset)) {
                                 homeKeyboard?.hide()
                                 appFocusManager.clearFocus()
