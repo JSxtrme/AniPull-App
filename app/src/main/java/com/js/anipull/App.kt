@@ -438,7 +438,7 @@ fun PosterImage(poster: String?, modifier: Modifier, targetWidthPx: Int = 0) {
 }
 
 @Composable
-fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false) {
+fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseDestRect: Rect? = null) {
     val cardHeight = cardWidth * 3 / 2
     // 1.9-dev4.8.2 scroll optimisation + full-card hero: bounds are
     // NO LONGER reported by onGloballyPositioned, which fires on
@@ -460,12 +460,38 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
         label = "posterPress",
     )
     val cardTargetPx = with(LocalDensity.current) { cardWidth.toPx().toInt() }
+    // 1.9-dev4.8.5 reverse slot-clear: if this card's window bounds
+    // match the reverse destination (within 20px), it IS the slot
+    // the overlay is flying back to — render it as an empty slot
+    // (same size, Bg background, no poster/title) while the flight
+    // runs, so the overlay never sits on top of a duplicate.
+    // Position-matched, not id-matched: the same title in another
+    // row stays visible, only the destination slot clears. When
+    // reverse ends, reverseDestRect becomes null and the card
+    // reappears exactly as the overlay lands.
+    var cardBoundsState by remember { mutableStateOf<Rect?>(null) }
+    val isReverseHidden = reverseDestRect != null && cardBoundsState != null &&
+        kotlin.math.abs(cardBoundsState!!.left - reverseDestRect.left) < 20f &&
+        kotlin.math.abs(cardBoundsState!!.top - reverseDestRect.top) < 20f &&
+        kotlin.math.abs(cardBoundsState!!.width - reverseDestRect.width) < 20f &&
+        kotlin.math.abs(cardBoundsState!!.height - reverseDestRect.height) < 20f
+    if (isReverseHidden) {
+        Column(modifier = Modifier.width(cardWidth)) {
+            Box(modifier = Modifier.size(width = cardWidth, height = cardWidth * 3 / 2).background(Bg))
+            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(32.dp))
+            Spacer(Modifier.height(2.dp))
+            Spacer(Modifier.height(14.dp))
+        }
+        return
+    }
     Column(
         modifier = Modifier
             .width(cardWidth)
             .graphicsLayer(scaleX = pressScale, scaleY = pressScale)
             .onPlaced { coords ->
                 coordsHolder[0] = coords
+                cardBoundsState = coords.boundsInWindow()
                 if (reportBoundsOnPlace) onBounds?.invoke(coords.boundsInWindow())
             }
             .clickable(interactionSource = interaction, indication = null, onClick = {
@@ -592,14 +618,14 @@ fun CarouselSkeleton() {
 }
 
 @Composable
-fun ExploreSkeletonRow(cardW: Dp) {
+fun ExploreSkeletonRow(cardW: Dp, cols: Int = 3) {
     // Shimmer: a slow alpha pulse on the whole row, so it reads as
     // "loading" rather than a dead grey box. Only ever shown for
     // one row at a time, so it costs almost nothing.
     val shimmer = rememberInfiniteTransition(label = "exploreShimmer")
     val alpha by shimmer.animateFloat(initialValue = 0.45f, targetValue = 0.9f, animationSpec = infiniteRepeatable(tween(900, easing = FastOutSlowInEasing), RepeatMode.Reverse), label = "shimmerAlpha")
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.alpha(alpha)) {
-        repeat(3) {
+        repeat(cols) {
             Column(modifier = Modifier.width(cardW)) {
                 Box(modifier = Modifier.size(width = cardW, height = cardW * 3 / 2).clip(RoundedCornerShape(16.dp)).background(Card))
                 Spacer(Modifier.height(8.dp))
@@ -643,7 +669,7 @@ fun SearchSkeletonGrid() {
 }
 
 @Composable
-fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null) {
+fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseDestRect: Rect? = null) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (iconRes != null) {
@@ -669,7 +695,7 @@ fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpe
         }
         Spacer(Modifier.height(12.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it) }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }) }
+            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it) }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseDestRect = reverseDestRect) }
         }
     }
 }
@@ -693,7 +719,7 @@ fun CarouselDot(selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null) {
+fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseDestRect: Rect? = null) {
     // 1.9-dev4.8: Editor's pick is now Editor's PICKS, a 5-item
     // carousel, and the description lines are GONE altogether (JS's
     // call) — title + type pill + buttons only, over the poster.
@@ -724,6 +750,14 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
     // animate fully, repeat. A manual drag just delays the next tick
     // (isScrollInProgress check), it never cancels an animation.
     // Reduce-motion also forces auto-scroll off.
+    // 1.9-dev4.8.5: auto-scroll FREEZES while any detail is
+    // open (screen != null, passed in via autoScroll at the call
+    // site). Before, the carousel kept advancing in the background
+    // under a detail, so on back the slot the reverse was flying
+    // to already held a different pick (e.g. 3rd instead of 1st).
+    // LaunchedEffect is keyed on autoOn, so opening a detail
+    // cancels the 5s timer and closing it restarts it fresh — the
+    // pager never jumps, it resumes from the same pick.
     val autoOn = autoScroll && !ThemeState.reduceMotion
     LaunchedEffect(carouselVisible, autoOn) {
         if (!carouselVisible || !autoOn) return@LaunchedEffect
@@ -763,7 +797,19 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                 targetValue = if (cPressed && !ThemeState.reduceMotion) 0.98f else 1f,
                 animationSpec = spring(stiffness = 400f, dampingRatio = 0.7f), label = "carouselPress",
             )
-            Box(
+            // 1.9-dev4.8.5 reverse slot-clear, carousel version:
+            // same position-match as PosterCard — if this carousel
+            // card's bounds match the reverse destination, render
+            // an empty 275dp slot instead of a duplicate poster.
+            var carouselBoundsState by remember { mutableStateOf<Rect?>(null) }
+            val carouselHidden = reverseDestRect != null && carouselBoundsState != null &&
+                kotlin.math.abs(carouselBoundsState!!.left - reverseDestRect.left) < 20f &&
+                kotlin.math.abs(carouselBoundsState!!.top - reverseDestRect.top) < 20f &&
+                kotlin.math.abs(carouselBoundsState!!.width - reverseDestRect.width) < 20f &&
+                kotlin.math.abs(carouselBoundsState!!.height - reverseDestRect.height) < 20f
+            if (carouselHidden) {
+                Box(modifier = Modifier.fillMaxWidth().height(275.dp).background(Bg))
+            } else Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(275.dp)
@@ -771,7 +817,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                     .clip(RoundedCornerShape(20.dp))
                     .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp))
                     .background(Color(0xFF14141F))
-                    .onPlaced { cardCoords[0] = it }
+                    .onPlaced { cardCoords[0] = it; carouselBoundsState = it.boundsInWindow() }
                     .clickable(interactionSource = cInteraction, indication = null) {
                         cardCoords[0]?.let { onBounds?.invoke(pick, it.boundsInWindow()) }
                         onOpen(pick)
@@ -1287,8 +1333,8 @@ fun AnipullAppInner() {
     var extraStarted by remember { mutableStateOf(false) }
     var isChipQuery by remember { mutableStateOf(false) }
     var liveSearchDone by remember { mutableStateOf(false) }
-    var pillCoords by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
-    var lazyColumnCoords by remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    val pillCoordsState = remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    val lazyColumnCoordsState = remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
     val homeKeyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     var liveResults by remember { mutableStateOf<List<ApiTitle>?>(null) }
     var searching by remember { mutableStateOf(false) }
@@ -1345,13 +1391,36 @@ fun AnipullAppInner() {
     var reverseSourceRect by remember { mutableStateOf<Rect?>(null) }
     var reverseDestRect by remember { mutableStateOf<Rect?>(null) }
     var reverseIsCarousel by remember { mutableStateOf(false) }
+    // 1.9-dev4.8.5 hero motion options (Settings > Layout):
+    // Normal = the BitChord spring (195, damping 1, no bounce).
+    // Ease out = the graph JS described: fast start, then
+    // gradually sitting there (FastOutSlowIn, 500ms).
+    // Overshoot = spring 300 / 0.75, slight bounce past target.
+    // Bouncy = spring 400 / 0.5, more bounce.
+    // Cinematic = slow ease-in-out cubic, 700ms.
+    // Same spec drives forward AND reverse, so back feels like
+    // the same motion in reverse, not a different animation.
+    val heroMotion = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getString("hero_motion", "normal") ?: "normal"
+    val heroSpec: androidx.compose.animation.core.AnimationSpec<Float> = when (heroMotion) {
+        "easeout" -> tween(500, easing = FastOutSlowInEasing)
+        "overshoot" -> spring(stiffness = 300f, dampingRatio = 0.75f)
+        "bouncy" -> spring(stiffness = 400f, dampingRatio = 0.5f)
+        "cinematic" -> tween(700, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))
+        else -> spring(stiffness = 195f, dampingRatio = 1f)
+    }
+    // Settle-aware clearing: with overshoot/bouncy the progress
+    // crosses 0.999 several times before settling — clearing on
+    // the first crossing would cut the bounce short. Only clear
+    // when TWO consecutive frames are near 1, i.e. it has settled.
+    val lastReverseProgress = remember { floatArrayOf(0f) }
     val reverseProgress by animateFloatAsState(
         targetValue = if (reverseTitle != null) 1f else 0f,
-        animationSpec = spring(stiffness = 195f, dampingRatio = 1f),
+        animationSpec = heroSpec,
         label = "reverseHeroProgress",
     )
     LaunchedEffect(reverseProgress) {
-        if (reverseProgress >= 0.999f && reverseTitle != null) { reverseTitle = null; reverseSourceRect = null; reverseDestRect = null }
+        if (reverseProgress >= 0.999f && lastReverseProgress[0] >= 0.999f && reverseTitle != null) { reverseTitle = null; reverseSourceRect = null; reverseDestRect = null }
+        lastReverseProgress[0] = reverseProgress
     }
     // BitChord-style hero, adapted: BitChord keeps ONE player sheet
     // mounted and drives its artwork on a critically damped spring
@@ -1360,13 +1429,15 @@ fun AnipullAppInner() {
     // same spring drives a hero overlay poster from the tapped
     // grid card's bounds to the detail poster's bounds, while the
     // detail text fades in — never an instant swap.
+    val lastHeroProgress = remember { floatArrayOf(0f) }
     val heroProgress by animateFloatAsState(
         targetValue = if (heroTitle != null && heroDestRect != null) 1f else 0f,
-        animationSpec = spring(stiffness = 195f, dampingRatio = 1f),
+        animationSpec = heroSpec,
         label = "heroProgress",
     )
     LaunchedEffect(heroProgress) {
-        if (heroProgress >= 0.999f && heroTitle != null) { heroTitle = null; heroDestRect = null; heroDestPosterRect = null }
+        if (heroProgress >= 0.999f && lastHeroProgress[0] >= 0.999f && heroTitle != null) { heroTitle = null; heroDestRect = null; heroDestPosterRect = null }
+        lastHeroProgress[0] = heroProgress
     }
     fun openTitle(t: ApiTitle, isCarousel: Boolean = false) {
         val src = posterBounds[t.id]
@@ -1760,13 +1831,20 @@ fun AnipullAppInner() {
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp)
                 .nestedScroll(dockScrollConnection)
-                .onGloballyPositioned { lazyColumnCoords = it }
-                .pointerInput(pillCoords, isSearchFocused, lazyColumnCoords) {
+                .onGloballyPositioned { lazyColumnCoordsState.value = it }
+                .pointerInput(isSearchFocused) {
+                    // 1.9-dev4.8.5 scroll fix: this handler used to be
+                    // keyed on pillCoords + lazyColumnCoords, both of
+                    // which change every frame while the header scrolls
+                    // — so the tap detector RESTARTED on every scroll
+                    // frame during a fling. Now it reads coords from
+                    // State objects (stable identity, current value),
+                    // so it only restarts when search focus changes.
                     detectTapGestures(onTap = { offset ->
                         if (isSearchFocused) {
-                            // Pill bounds in LazyColumn coordinates, via
-                            // localBoundingBoxOf (no root/window API needed).
-                            val b = lazyColumnCoords?.let { lc -> pillCoords?.let { pc -> lc.localBoundingBoxOf(pc) } }
+                            val lc = lazyColumnCoordsState.value
+                            val pc = pillCoordsState.value
+                            val b = lc?.let { l -> pc?.let { p -> l.localBoundingBoxOf(p) } }
                             if (b == null || !b.contains(offset)) {
                                 homeKeyboard?.hide()
                                 appFocusManager.clearFocus()
@@ -1795,7 +1873,7 @@ fun AnipullAppInner() {
                     loadingHome = liveSections == null && !homeFailed,
                     onFocusChange = { isSearchFocused = it },
                     isSearching = isSearchFocused || query.isNotBlank(),
-                    onPillPositioned = { pillCoords = it },
+                    onPillPositioned = { pillCoordsState.value = it },
                     onCloseSearch = { closeSearch() },
                     particlesOn = LocalContext.current.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("particles", true) && !listState.isScrollInProgress,
                 )
@@ -1831,7 +1909,7 @@ fun AnipullAppInner() {
                                 results.chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect })
+                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseDestRect = reverseDestRect)
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -1861,7 +1939,7 @@ fun AnipullAppInner() {
                                 cachedTitles.take(12).chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect })
+                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseDestRect = reverseDestRect)
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -1873,7 +1951,7 @@ fun AnipullAppInner() {
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
-                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { openTitle(it) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
+                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { openTitle(it) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseDestRect = reverseDestRect) }
                 }
                 featured?.let { pick ->
                     item(key = "home_carousel", contentType = "carousel") {
@@ -1890,7 +1968,7 @@ fun AnipullAppInner() {
                         Spacer(Modifier.height(12.dp))
                         val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
                             .distinctBy { it.id }.take(5)
-                        EditorsPickCarousel(picks, { openTitle(it, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress, onBounds = { t, rect -> posterBounds[t.id] = rect })
+                        EditorsPickCarousel(picks, { openTitle(it, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseDestRect = reverseDestRect)
                     }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
@@ -1906,7 +1984,7 @@ fun AnipullAppInner() {
                         "Top 10 Month" -> R.drawable.ic_trophy
                         else -> null
                     }
-                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
+                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseDestRect = reverseDestRect) }
                 }
             } else if (homeFailed) {
                 // 1.9-dev2: failed load = skeletons + retry, never demo
@@ -1938,7 +2016,7 @@ fun AnipullAppInner() {
             // They load progressively in the background, like home rows.
             if (!isSearchFocused && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
-                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
+                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseDestRect = reverseDestRect) }
                 }
             }
             // 1.9-dev4.8: Explore — after all catalogs, a grid (not a
@@ -1964,11 +2042,23 @@ fun AnipullAppInner() {
                         Text("Explore", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
                     }
                     Spacer(Modifier.height(12.dp))
+                    // 1.9-dev4.8.5: Explore columns are a setting
+                    // (2/3/4, default 3). The initial skeleton used
+                    // to be SearchSkeletonGrid (2 per row) while the
+                    // real grid is 3 per row — that was the jump JS
+                    // screenshotted on a fast scroll. Now the initial
+                    // skeleton uses the SAME column count as the grid.
+                    val exploreCols = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getInt("explore_columns", 3).coerceIn(2, 4)
                     if (exploreTitles.isEmpty() && exploreLoading) {
-                        SearchSkeletonGrid()
+                        androidx.compose.foundation.layout.BoxWithConstraints {
+                            val skelW = (maxWidth - 8.dp * (exploreCols - 1)) / exploreCols
+                            Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                                repeat(3) { ExploreSkeletonRow(skelW, exploreCols) }
+                            }
+                        }
                     } else {
                         androidx.compose.foundation.layout.BoxWithConstraints {
-                            val cardW = (maxWidth - 16.dp) / 3
+                            val cardW = (maxWidth - 8.dp * (exploreCols - 1)) / exploreCols
                             Column(
                                 verticalArrangement = Arrangement.spacedBy(14.dp),
                             ) {
@@ -1987,13 +2077,13 @@ fun AnipullAppInner() {
                                 // that trailing 1-2 cards are dropped
                                 // for good — the bottom line is always
                                 // a full 3-card row.
-                                val shownExplore = exploreTitles.dropLast(exploreTitles.size % 3)
-                                shownExplore.chunked(3).forEach { trio ->
+                                val shownExplore = exploreTitles.dropLast(exploreTitles.size % exploreCols)
+                                shownExplore.chunked(exploreCols).forEach { trio ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         trio.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect })
+                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseDestRect = reverseDestRect)
                                         }
-                                        repeat(3 - trio.size) { Spacer(Modifier.width(cardW)) }
+                                        repeat(exploreCols - trio.size) { Spacer(Modifier.width(cardW)) }
                                     }
                                 }
                                 // 1.9-dev4.8.2: while the next batch
@@ -2003,7 +2093,7 @@ fun AnipullAppInner() {
                                 // row coming instead of a bare
                                 // "Loading more…" line.
                                 if (exploreLoading && !exploreFinished) {
-                                    ExploreSkeletonRow(cardW)
+                                    ExploreSkeletonRow(cardW, exploreCols)
                                 }
                             }
                         }
@@ -2175,7 +2265,10 @@ fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit, translucen
             // Nuvio's large-blur trick: a fixed 0.5x input scale
             // halves the blur work for a dock-sized area, with no
             // visible difference at this size.
-            inputScale = dev.chrisbanes.haze.HazeInputScale.Fixed(0.5f)
+            // 1.9-dev4.8.5 scroll: 0.5f -> 0.33f halves blur work
+            // again (area scales with the square), translucency
+            // unchanged, blur just a touch softer at dock size.
+            inputScale = dev.chrisbanes.haze.HazeInputScale.Fixed(0.33f)
             style = dockStyle
         }
     }

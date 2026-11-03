@@ -100,7 +100,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("1.9-dev4.8.4 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("1.9-dev4.8.5 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -257,9 +257,13 @@ fun LayoutPage() {
     var carouselAuto by remember { mutableStateOf(prefs.getBoolean("carousel_auto", true)) }
     var particles by remember { mutableStateOf(prefs.getBoolean("particles", true)) }
     var showExplore by remember { mutableStateOf(prefs.getBoolean("show_explore", true)) }
+    var exploreCols by remember { mutableStateOf(prefs.getInt("explore_columns", 3)) }
+    var heroMotion by remember { mutableStateOf(prefs.getString("hero_motion", "normal") ?: "normal") }
+    var heroMotionMenuOpen by remember { mutableStateOf(false) }
     var dockMenuOpen by remember { mutableStateOf(false) }
+    var exploreColsMenuOpen by remember { mutableStateOf(false) }
     fun save() {
-        prefs.edit().putBoolean("translucent_dock", translucentDock).putString("dock_mode", dockMode).putBoolean("carousel_auto", carouselAuto).putBoolean("particles", particles).putBoolean("show_explore", showExplore).apply()
+        prefs.edit().putBoolean("translucent_dock", translucentDock).putString("dock_mode", dockMode).putBoolean("carousel_auto", carouselAuto).putBoolean("particles", particles).putBoolean("show_explore", showExplore).putInt("explore_columns", exploreCols).putString("hero_motion", heroMotion).apply()
     }
     SettingsSectionLabel("NAVIGATION")
     SettingsCard {
@@ -286,11 +290,48 @@ fun LayoutPage() {
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("HOME")
     SettingsCard {
-        SettingsToggle("Show Explore on Home", "The 3-per-row Explore grid after the catalogs. Off = footer shows straight after the genre rows.", showExplore) { showExplore = it; save() }
+        SettingsToggle("Show Explore on Home", "The Explore grid after the catalogs. Off = footer shows straight after the genre rows.", showExplore) { showExplore = it; save() }
+        SettingsDivider()
+        Column(modifier = Modifier.padding(vertical = 12.dp)) {
+            Text("Explore cards per row", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).clickable { exploreColsMenuOpen = true }.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text("$exploreCols per row", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("\u25BE", color = Muted, fontSize = 14.sp)
+                }
+                DropdownMenu(expanded = exploreColsMenuOpen, onDismissRequest = { exploreColsMenuOpen = false }) {
+                    DropdownMenuItem(text = { Text("2 per row") }, onClick = { exploreCols = 2; save(); exploreColsMenuOpen = false })
+                    DropdownMenuItem(text = { Text("3 per row") }, onClick = { exploreCols = 3; save(); exploreColsMenuOpen = false })
+                    DropdownMenuItem(text = { Text("4 per row") }, onClick = { exploreCols = 4; save(); exploreColsMenuOpen = false })
+                }
+            }
+            Text("Bigger cards at 2, more titles at a glance at 4. Skeletons match the chosen count, so rows never jump on load.", color = Faint, fontSize = 12.sp)
+        }
         SettingsDivider()
         SettingsToggle("Auto-scroll Editor's picks", "One poster every 5 seconds. Pauses off-screen and while you drag.", carouselAuto) { carouselAuto = it; save() }
         SettingsDivider()
         SettingsToggle("Home particles", "Drifting, glowing, twinkling dots on the home page.", particles) { particles = it; save() }
+        SettingsDivider()
+        Column(modifier = Modifier.padding(vertical = 12.dp)) {
+            Text("Poster transition motion", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            val heroLabel = when (heroMotion) { "easeout" -> "Ease out"; "overshoot" -> "Overshoot"; "bouncy" -> "Bouncy"; "cinematic" -> "Cinematic"; else -> "Normal" }
+            Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).clickable { heroMotionMenuOpen = true }.padding(horizontal = 16.dp, vertical = 12.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(heroLabel, color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("\u25BE", color = Muted, fontSize = 14.sp)
+                }
+                DropdownMenu(expanded = heroMotionMenuOpen, onDismissRequest = { heroMotionMenuOpen = false }) {
+                    DropdownMenuItem(text = { Text("Normal") }, onClick = { heroMotion = "normal"; save(); heroMotionMenuOpen = false })
+                    DropdownMenuItem(text = { Text("Ease out") }, onClick = { heroMotion = "easeout"; save(); heroMotionMenuOpen = false })
+                    DropdownMenuItem(text = { Text("Overshoot") }, onClick = { heroMotion = "overshoot"; save(); heroMotionMenuOpen = false })
+                    DropdownMenuItem(text = { Text("Bouncy") }, onClick = { heroMotion = "bouncy"; save(); heroMotionMenuOpen = false })
+                    DropdownMenuItem(text = { Text("Cinematic") }, onClick = { heroMotion = "cinematic"; save(); heroMotionMenuOpen = false })
+                }
+            }
+            Text("How the poster flies home to details (and back). Normal = current spring, no bounce. Ease out = fast start, then gradually sitting there. Overshoot / Bouncy = bounce past the target, then settle. Cinematic = slow, smooth in-out.", color = Faint, fontSize = 12.sp)
+        }
     }
 }
 
@@ -448,7 +489,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("1.9-dev4.8.4 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("1.9-dev4.8.5 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")
