@@ -1,3 +1,6 @@
+## 1.9-dev4.8.8-stablekey (2026-11-03, versionCode 30) — stable signing key, same code as 4.8.8
+
+Route A, JS-approved: a single stable release keystore (alias anipull, RSA 2048, valid 10000 days, generated on this VM with keytool) now signs every build. Wiring: build.gradle.kts reads the 4 signing values ONLY from signing.properties in the app folder on this VM; that file + release.keystore are NEVER pushed to GitHub (push-files uses an explicit file list, and neither file is on it). If signing.properties is missing, the build falls back to the debug key so a fresh checkout still builds. Backup files given to JS: anipull-release.keystore + anipull-release-key-backup.txt (passwords inside that txt only, never in chat, memory, or repo). One-time cost: this build will NOT install over debug-signed 4.8.8 — uninstall com.js.anipull first, then install this, then every future build updates in place.
 ## 1.9-dev4.8.8 (2026-11-03, versionCode 29) — reverse rework from AnymeX / shonenx
 
 JS: reverse still snaps halfway through — flies back, then skips and snaps to its place. And he pointed at AnymeX (RyanYuuki) and shonenx (roshancodespace) as the smooth reference, especially shonenx's info flying in from the right.

@@ -1,3 +1,4 @@
+import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,19 +13,50 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 29
-        versionName = "1.9-dev4.8.8"
+        versionCode = 30
+        versionName = "1.9-dev4.8.8-stablekey"
+    }
+
+    // 1.9-dev4.8.8-stablekey: STABLE release key, Route A.
+    // How the wiring works, in plain terms:
+    // - The build needs 4 things to sign: keystore file, alias,
+    //   keystore password, key password.
+    // - Those 4 things live ONLY in signing.properties, a small
+    //   text file in this app folder, on this VM only.
+    // - build.gradle.kts below does NOT contain any password.
+    //   It only says "if signing.properties exists, read it and
+    //   use it; if it doesn't exist, fall back to the debug key
+    //   so a fresh checkout still builds for testing".
+    // - Pushes to GitHub use an explicit file list (push-files
+    //   --paths-file), and signing.properties + release.keystore
+    //   are NEVER on that list, so they can never leak into the
+    //   repo. The APK itself contains only the signature, never
+    //   the passwords.
+    val signingProps = Properties()
+    val signingPropsFile = file("signing.properties")
+    if (signingPropsFile.exists()) {
+        signingPropsFile.inputStream().use { signingProps.load(it) }
+    }
+    val hasStableKey = signingProps.containsKey("storePassword")
+    if (hasStableKey) {
+        signingConfigs {
+            create("release") {
+                storeFile = file(signingProps.getProperty("storeFile"))
+                storePassword = signingProps.getProperty("storePassword")
+                keyAlias = signingProps.getProperty("keyAlias")
+                keyPassword = signingProps.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
             // Release variant = no debuggable flag, no debug overhead.
-            // Signed with the same debug key as the stage-1 APK on purpose,
-            // so `adb install -r` updates in place. A Play Store release
-            // key is a later step, not this phone-test build.
+            // Signed with the stable release key when present,
+            // otherwise the debug key (fresh checkout fallback).
             isMinifyEnabled = false
             isDebuggable = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasStableKey) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
     }
     compileOptions {
