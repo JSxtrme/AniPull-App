@@ -1,3 +1,12 @@
+## 1.9-dev4.8.6-hotfix (2026-11-03, versionCode 25) — reverse crash hotfix, NOT a 4.8.7
+
+JS, on 4.8.6: app force-closes when pressing back from a detail — animation starts, then the app closes before the overlay lands in the empty slot. Twice, not a one-off phone glitch. No stack trace was available from the phone, so this hotfix removes every risky reverse mechanism by construction instead of patching one line:
+- Slot-clear is now by ID, not by position: the destination card hides because its id matches reverseHiddenId, with no boundsInWindow(), no LaunchedEffect, and no state set from onPlaced. Prime crash suspect was exactly that — bounds read + state set during layout, for every visible card, on every back. Trade-off, stated plainly: every copy of that title hides for the 0.45s flight, not just the one slot. Position-matching can return once a logcat confirms the real culprit.
+- Reverse overlay is poster-only for grid AND carousel alike: no full PosterCard in the overlay (no interaction, press scale, title/meta, or its own onPlaced).
+- Clearing is now single-path: tab switches clear the reverse synchronously in goTab()'s tap handler, not in a separate LaunchedEffect(currentTab) that could fire mid-composition. Progress and timeout clearing remain, and all three clear reverseHiddenId too.
+- Guard: a reverse overlay with a zero, negative, or non-finite rect is skipped, not rendered.
+- Nothing else changed: same hero motions, same scroll code, same dock, same settings. Signing key 51f74e55, SAME as dev4.8.6, so it updates dev4.8.6 in place.
+
 ## 1.9-dev4.8.6
 
 - CRITICAL stuck-reverse fix: dev4.8.5 required two consecutive frames >=0.999 to clear the hero overlay, but if the animation jumps straight to 1.0 in one frame, that second frame never comes — the poster stays fixed over every tab until restart (JS's Downloads screenshot). Fixed: monotonic motions clear on first crossing again (as in 4.8.4, which never stuck); bouncy motions clear on a timeout (900/1100ms, after settle); a 1500ms timeout guard clears ANY stuck overlay; switching tabs mid-reverse clears it immediately (dest rect only makes sense on its own tab).
