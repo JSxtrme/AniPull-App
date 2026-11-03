@@ -12,8 +12,8 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 17
-        versionName = "1.9-dev4.7"
+        versionCode = 18
+        versionName = "1.9-dev4.8"
     }
 
     buildTypes {
@@ -56,5 +56,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.0")
+    // Haze 1.3.1, already in the local Gradle cache from the BitChord /
+    // ReChord build, so this resolves offline: real backdrop blur for
+    // the translucent dock, not a fake tint. Toggle in Settings.
+    implementation("dev.chrisbanes.haze:haze:1.3.1")
+    implementation("dev.chrisbanes.haze:haze-materials:1.3.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

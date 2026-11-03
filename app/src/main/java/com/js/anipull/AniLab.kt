@@ -284,6 +284,23 @@ suspend fun fetchCategory(id: Int, name: String): HomeSection? = withContext(Dis
     } catch (_: Exception) { null }
 }
 
+// Paged category, for the Explore grid (1.9-dev4.8): /api/category
+// takes ?page=, verified live 2026-11-02 for page=2 returning a
+// distinct 30 posts. Enrich the first 10, like the genre rows.
+suspend fun fetchCategoryPaged(id: Int, page: Int): HomeSection? = withContext(Dispatchers.IO) {
+    val text = getText("https://anilab2.amdapi.click/api/category?id=$id&page=$page") ?: return@withContext null
+    try {
+        val root = JSONObject(text)
+        val arr = root.optJSONArray("posts") ?: return@withContext null
+        val posts = (0 until arr.length()).mapNotNull { j ->
+            val pp = arr.optJSONObject(j) ?: return@mapNotNull null
+            pp.optLong("id", 0).takeIf { it != 0L }?.let { it to pp.optString("poster").takeIf { x -> x.isNotBlank() } }
+        }
+        val titles = enrich(posts, 10)
+        if (titles.isEmpty()) null else HomeSection("Explore", titles)
+    } catch (_: Exception) { null }
+}
+
 suspend fun searchAniLab(query: String): List<ApiTitle> = withContext(Dispatchers.IO) {
     val q = URLEncoder.encode(query, "UTF-8").replace("+", "%20")
     val text = getText("https://anilab2.amdapi.click/api/search?query=$q") ?: return@withContext emptyList()

@@ -24,6 +24,51 @@ All notable changes to the Anipull Android app are tracked here.
   Wordmark ("Ani" white + "pull" pink) unchanged. Themed-icon
   phone check still pending.
 
+### 1.9-dev4.8 (versionCode 18) — test build, not a release
+
+- SF font mixed into the app (JS): SF Pro Display Semibold is no
+  longer onboarding-only — it is now the heading font (hero
+  titles, section headings, detail title, Settings/Library
+  titles), with Outfit kept for body text.
+- Loading screen 1.75s (was 1.5s, JS's call), still a hard cap —
+  fetch continues in the background, skeletons swap in.
+- Explore catalog, after all home/genre catalogs: a 3-per-row
+  grid (not a horizontal row) that loads page by page as you
+  scroll — 12 AniLab category pages, 10 titles each, distinct —
+  and only when it finally stops does the footer appear. This
+  is what Downloads' "Browse anime" points at.
+- Editor's picks (plural): the single pick card is now a
+  5-item carousel (featured + Spotlight), descriptions removed
+  altogether, auto-scroll one poster every 5s, manually
+  swipeable, dots to jump, and auto-scroll pauses the moment
+  the carousel is fully off-screen (and while you drag), so it
+  never wastes battery on an unseen carousel.
+- Appearance in Settings: translucent dock toggle (real Haze
+  backdrop blur, not full liquid glass — off = solid dock),
+  dock behaviour dropdown (Always expanded / Always compact /
+  Adaptive, the current scroll morph), and an Editor's picks
+  auto-scroll toggle.
+- Detail hero animation, from BitChord's actual code
+  (kushagrasinghx/BitChord, PlayerSheetMotion.kt): BitChord
+  keeps one player sheet mounted and drives its artwork on a
+  critically damped spring (stiffness 195, no bounce, window
+  animations off so nothing double-animates). Anipull has no
+  persistent player, so the same spring drives a hero overlay
+  poster from the tapped grid card's bounds to the detail
+  poster's bounds, while detail text fades in. Without a hero
+  (no bounds), detail fades in over 300ms instead of appearing
+  instantly.
+- Search scroll fix (JS): scrolling the cached catalog below
+  the search pill no longer closes search — the old
+  scroll-clears-focus effect is gone. Only a true tap on empty
+  space (not a scroll, not a poster tap — posters consume their
+  own taps) closes it, plus the tap-above strip and back.
+  Back is unchanged: first back closes the keyboard (IME),
+  second back goes Home.
+- Extra smoothness, on my own: posters shrink to 96% on press
+  with a spring, Explore grid grows with animateContentSize
+  instead of jumping, and detail content fades in.
+
 ### 1.9-dev4.7 (versionCode 17) — test build, not a release
 
 - Loading screen HARD-CAPPED at 1.5s (JS, 2026-11-03): dev4.6 was

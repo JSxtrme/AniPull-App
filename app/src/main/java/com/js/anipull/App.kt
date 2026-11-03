@@ -20,6 +20,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -48,6 +49,21 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.layout.boundsInWindow
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import dev.chrisbanes.haze.ExperimentalHazeApi
+import dev.chrisbanes.haze.HazeState
+import dev.chrisbanes.haze.hazeEffect
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.materials.ExperimentalHazeMaterialsApi
+import dev.chrisbanes.haze.materials.HazeMaterials
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -60,6 +76,8 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -115,13 +133,23 @@ private val OutfitFont = FontFamily(
     Font(R.font.outfit_extrabold, FontWeight.ExtraBold),
 )
 
-// Onboarding only (JS, 2026-11-03): SF Pro Display Semibold, supplied
-// by JS as sf_pro_display_semibold.otf. The rest of the app stays on
-// Outfit. Note: this OTF uses CFF outlines — if it ever fails to
-// render on a phone, Compose falls back to the system font, and the
-// fix then is a TrueType conversion, not a different design.
+// SF Pro Display Semibold, supplied by JS as
+// sf_pro_display_semibold.otf. 1.9-dev4.8: no longer onboarding-only
+// — it is now the HEADING font across the app (hero titles, section
+// headings, detail title), mixed with Outfit for body text, so the
+// font JS supplied is not wasted on a screen shown once. The same
+// file is mapped to every weight, so a heading renders SF whatever
+// weight the Text asked for. Note: this OTF uses CFF outlines — if
+// it ever fails to render on a phone, Compose falls back to the
+// system font, and the fix then is a TrueType conversion.
 private val SFProDisplaySemibold = FontFamily(
     Font(R.font.sf_pro_display_semibold, FontWeight.SemiBold),
+)
+private val HeadingFont = FontFamily(
+    Font(R.font.sf_pro_display_semibold, FontWeight.Normal),
+    Font(R.font.sf_pro_display_semibold, FontWeight.SemiBold),
+    Font(R.font.sf_pro_display_semibold, FontWeight.Bold),
+    Font(R.font.sf_pro_display_semibold, FontWeight.ExtraBold),
 )
 
 val Bg = Color(0xFF07070C)
@@ -345,12 +373,25 @@ fun PosterImage(poster: String?, modifier: Modifier) {
 }
 
 @Composable
-fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp) {
+fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null) {
     val cardHeight = cardWidth * 3 / 2
+    // 1.9-dev4.8 extra smoothness, on my own: a poster shrinks to 96%
+    // on press with a spring, so every tap feels tactile instead of
+    // flat — and its window bounds are reported so the detail hero
+    // animation knows exactly where this poster flew from.
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = spring(stiffness = 400f, dampingRatio = 0.7f),
+        label = "posterPress",
+    )
     Column(
         modifier = Modifier
             .width(cardWidth)
-            .clickable(onClick = onClick),
+            .graphicsLayer(scaleX = pressScale, scaleY = pressScale)
+            .onGloballyPositioned { coords -> onBounds?.invoke(coords.boundsInWindow()) }
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick),
     ) {
         Box(
             modifier = Modifier
@@ -457,7 +498,7 @@ fun SearchSkeletonGrid() {
 }
 
 @Composable
-fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null) {
+fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (iconRes != null) {
@@ -469,7 +510,7 @@ fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpe
                 )
                 Spacer(Modifier.width(8.dp))
             }
-            Text(heading, color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+            Text(heading, color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
             tags.forEach { tag ->
                 Spacer(Modifier.width(8.dp))
                 Box(
@@ -483,85 +524,119 @@ fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpe
         }
         Spacer(Modifier.height(12.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(titles) { PosterCard(it, { onOpen(it) }, notWired) }
+            items(titles) { PosterCard(it, { onOpen(it) }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }) }
         }
     }
 }
 
 @Composable
-fun EditorsPick(pick: ApiTitle, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit) {
-    // Website pick: a wide card, image behind, content over a shade that
-    // gets darker toward the bottom so both buttons stay readable.
-    // matchParentSize (not fillMaxSize) is what makes the poster cover
-    // the whole card, including the Details button area — fillMaxSize
-    // in a scrolling column left that bottom strip poster-less.
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(20.dp))
-            .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp))
-            .background(Color(0xFF14141F))
-            .clickable { onOpen(pick) },
-    ) {
-        PosterImage(pick.poster, Modifier.matchParentSize())
-        // Website shade is horizontal (left dark .88 -> right .08); stack a
-        // vertical darkening underneath it so the bottom buttons stay readable.
-        Box(
-            Modifier.matchParentSize().background(
-                Brush.horizontalGradient(
-                    colors = listOf(
-                        Color(0xFF05050A).copy(alpha = 0.88f),
-                        Color(0xFF05050A).copy(alpha = 0.45f),
-                        Color(0xFF05050A).copy(alpha = 0.08f),
-                    )
-                )
-            )
-        )
-        Box(
-            Modifier.matchParentSize().background(
-                Brush.verticalGradient(
-                    colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f))
-                )
-            )
-        )
-        Column(modifier = Modifier.padding(18.dp)) {
+fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null) {
+    // 1.9-dev4.8: Editor's pick is now Editor's PICKS, a 5-item
+    // carousel, and the description lines are GONE altogether (JS's
+    // call) — title + type pill + buttons only, over the poster.
+    // Auto-scroll: one poster every 5s, manually swipeable too, and
+    // it stops the moment it is fully off-screen (bounds check, not
+    // a guess), so it never burns battery scrolling a carousel
+    // nobody can see. Manual drag also pauses it — the auto timer
+    // restarts from the page the user landed on.
+    if (picks.isEmpty()) return
+    val pagerState = rememberPagerState(pageCount = { picks.size })
+    val scope = rememberCoroutineScope()
+    var carouselVisible by remember { mutableStateOf(true) }
+    val density = LocalDensity.current
+    val config = LocalConfiguration.current
+    val screenHeightPx = with(density) { config.screenHeightDp.dp.toPx() }
+    LaunchedEffect(carouselVisible, autoScroll, pagerState.currentPage) {
+        if (!carouselVisible || !autoScroll) return@LaunchedEffect
+        kotlinx.coroutines.delay(5000)
+        if (pagerState.isScrollInProgress) return@LaunchedEffect
+        val next = (pagerState.currentPage + 1) % picks.size
+        pagerState.animateScrollToPage(next, animationSpec = tween(600, easing = FastOutSlowInEasing))
+    }
+    Column {
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier.fillMaxWidth()
+                .onGloballyPositioned { coords ->
+                    val r = coords.boundsInWindow()
+                    carouselVisible = r.bottom > 0f && r.top < screenHeightPx
+                },
+        ) { page ->
+            val pick = picks[page]
             Box(
                 modifier = Modifier
-                    .clip(RoundedCornerShape(999.dp))
-                    .border(1.dp, Pink.copy(alpha = 0.45f), RoundedCornerShape(999.dp))
-                    .background(Pink.copy(alpha = 0.22f))
-                    .padding(horizontal = 11.dp, vertical = 5.dp),
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(20.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp))
+                    .background(Color(0xFF14141F))
+                    .onGloballyPositioned { coords -> onBounds?.invoke(pick, coords.boundsInWindow()) }
+                    .clickable { onOpen(pick) },
             ) {
-                val typeLabel = (pick.type ?: "ANIME").uppercase()
-                // Website .pick-tag exactly: light pink #FFD7E7 text, not
-                // plain pink — that's why the app pill looked washed out
-                // over a bright poster.
-                Text("$typeLabel · 1080P READY", color = Color(0xFFFFD7E7), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp)
-            }
-            Spacer(Modifier.height(10.dp))
-            Text(pick.title, color = TextMain, fontSize = 25.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 28.sp)
-            Spacer(Modifier.height(6.dp))
-            val syn = pick.overview
-                ?: "Kyoto Animation's film about a boy seeking redemption from the deaf girl he bullied. One file, no episodes to chase — pull it and keep it forever."
-            Text(syn, color = Color.White.copy(alpha = 0.85f), fontSize = 13.5.sp, lineHeight = 19.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.height(15.dp))
-            Button(
-                onClick = notWired,
-                colors = ButtonDefaults.buttonColors(containerColor = Pink),
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                androidx.compose.foundation.Image(
-                    painter = painterResource(R.drawable.ic_download),
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp),
-                    colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+                PosterImage(pick.poster, Modifier.matchParentSize())
+                Box(
+                    Modifier.matchParentSize().background(
+                        Brush.horizontalGradient(
+                            colors = listOf(
+                                Color(0xFF05050A).copy(alpha = 0.88f),
+                                Color(0xFF05050A).copy(alpha = 0.45f),
+                                Color(0xFF05050A).copy(alpha = 0.08f),
+                            )
+                        )
+                    )
                 )
-                Spacer(Modifier.width(8.dp))
-                Text("Download · 1080p", color = Color.White, fontWeight = FontWeight.Bold)
+                Box(
+                    Modifier.matchParentSize().background(
+                        Brush.verticalGradient(
+                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f))
+                        )
+                    )
+                )
+                Column(modifier = Modifier.padding(18.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(999.dp))
+                            .border(1.dp, Pink.copy(alpha = 0.45f), RoundedCornerShape(999.dp))
+                            .background(Pink.copy(alpha = 0.22f))
+                            .padding(horizontal = 11.dp, vertical = 5.dp),
+                    ) {
+                        val typeLabel = (pick.type ?: "ANIME").uppercase()
+                        Text("$typeLabel · 1080P READY", color = Color(0xFFFFD7E7), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text(pick.title, color = TextMain, fontSize = 25.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 28.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(15.dp))
+                    Button(
+                        onClick = notWired,
+                        colors = ButtonDefaults.buttonColors(containerColor = Pink),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        androidx.compose.foundation.Image(
+                            painter = painterResource(R.drawable.ic_download),
+                            contentDescription = null,
+                            modifier = Modifier.size(18.dp),
+                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Download · 1080p", color = Color.White, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(onClick = { onOpen(pick) }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Details & other qualities", color = Color.White)
+                    }
+                }
             }
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = { onOpen(pick) }, modifier = Modifier.fillMaxWidth()) {
-                Text("Details & other qualities", color = Color.White)
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            picks.indices.forEach { i ->
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .size(if (i == pagerState.currentPage) 10.dp else 7.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(if (i == pagerState.currentPage) Pink else Color.White.copy(alpha = 0.3f))
+                        .clickable { scope.launch { pagerState.animateScrollToPage(i, animationSpec = tween(600, easing = FastOutSlowInEasing)) } },
+                )
             }
         }
     }
@@ -814,13 +889,13 @@ fun HeaderSection(
             Spacer(Modifier.height(16.dp))
             Text(
                 "Find it. Pull it.",
-                color = TextMain, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold,
+                color = TextMain, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont,
                 letterSpacing = (-1).sp, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(), lineHeight = 37.sp,
             )
             Text(
                 "Keep it offline.",
-                color = Pink, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold,
+                color = Pink, fontSize = 34.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont,
                 letterSpacing = (-1).sp, textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(), lineHeight = 37.sp,
             )
@@ -1010,14 +1085,64 @@ fun AnipullAppInner() {
     var dockAccumulatedDelta by remember { mutableStateOf(0f) }
     var isSearchFocused by remember { mutableStateOf(false) }
     var lastLiveQuery by remember { mutableStateOf("") }
+    // 1.9-dev4.8: Explore + hero transition + dock/appearance prefs.
+    var exploreTitles by remember { mutableStateOf<List<ApiTitle>>(emptyList()) }
+    var explorePage by remember { mutableStateOf(0) }
+    var exploreLoading by remember { mutableStateOf(false) }
+    var exploreFinished by remember { mutableStateOf(false) }
+    var exploreStarted by remember { mutableStateOf(false) }
+    val exploreSeq = listOf(1 to 1, 14 to 1, 5 to 1, 4 to 1, 3 to 1, 2 to 1, 1 to 2, 14 to 2, 5 to 2, 4 to 2, 3 to 2, 2 to 2)
+    // Poster window bounds by title id, updated by PosterCard layout
+    // (a plain map, not state, so scrolling never recomposes the app).
+    val posterBounds = remember { mutableMapOf<Long, Rect>() }
+    var heroSourceRect by remember { mutableStateOf<Rect?>(null) }
+    var heroDestRect by remember { mutableStateOf<Rect?>(null) }
+    var heroTitle by remember { mutableStateOf<ApiTitle?>(null) }
+    // BitChord-style hero, adapted: BitChord keeps ONE player sheet
+    // mounted and drives its artwork on a critically damped spring
+    // (stiffness 195, no bounce, window animations off so nothing
+    // double-animates). Anipull has no persistent player, so the
+    // same spring drives a hero overlay poster from the tapped
+    // grid card's bounds to the detail poster's bounds, while the
+    // detail text fades in — never an instant swap.
+    val heroProgress by animateFloatAsState(
+        targetValue = if (heroTitle != null && heroDestRect != null) 1f else 0f,
+        animationSpec = spring(stiffness = 195f, dampingRatio = 1f),
+        label = "heroProgress",
+    )
+    LaunchedEffect(heroProgress) {
+        if (heroProgress >= 0.999f && heroTitle != null) { heroTitle = null; heroDestRect = null }
+    }
+    fun openTitle(t: ApiTitle) {
+        val src = posterBounds[t.id]
+        if (src != null) { heroSourceRect = src; heroDestRect = null; heroTitle = t }
+        screen = t
+    }
+    val dockModeState = remember {
+        mutableStateOf(
+            context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+                .getString("dock_mode", "adaptive") ?: "adaptive"
+        )
+    }
+    val hazeState = remember { HazeState() }
+    // Same @Composable-modifier rule as the dock below: hazeSource
+    // cannot live inside a Modifier.then() argument, so build it
+    // here in the composable body and .then() the result.
+    val hazeSourceModifier: Modifier = if (context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("translucent_dock", false))
+        Modifier.hazeSource(hazeState) else Modifier
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val appFocusManager = LocalFocusManager.current
-    // Tapping out = scrolling away: the cursor stops blinking, and the
-    // header content comes back (unless a query is still typed).
-    LaunchedEffect(listState.isScrollInProgress) {
-        if (listState.isScrollInProgress) appFocusManager.clearFocus()
-    }
+    // 1.9-dev4.8 search fix (JS): scrolling must NOT close search.
+    // The old LaunchedEffect cleared focus on any scroll, so scrolling
+    // the cached catalog below the pill collapsed the whole search
+    // UI. Now only a true tap on empty space closes it: the
+    // LazyColumn tap detector below only fires on a tap (a drag /
+    // scroll cancels it), and a poster tap is consumed by the
+    // poster's own clickable, so tapping a poster opens its detail
+    // instead of closing search. Back still works in two steps
+    // exactly as before: the IME eats the first back (keyboard
+    // closes), the second back runs closeSearch() to Home.
     val notWired: () -> Unit = {
         Toast.makeText(context, "Not wired yet — downloads come after the AniLab stage", Toast.LENGTH_SHORT).show()
     }
@@ -1059,6 +1184,7 @@ fun AnipullAppInner() {
             ): androidx.compose.ui.geometry.Offset {
                 val deltaY = available.y
                 if (deltaY == 0f) return androidx.compose.ui.geometry.Offset.Zero
+                if (dockModeState.value != "adaptive") return androidx.compose.ui.geometry.Offset.Zero
                 dockAccumulatedDelta += deltaY
                 if (dockAccumulatedDelta < -60f && dockFractionState.value != 0f) {
                     dockFractionState.value = 0f
@@ -1095,6 +1221,30 @@ fun AnipullAppInner() {
         showSettings -> Tab.Settings
         else -> Tab.Home
     }
+    LaunchedEffect(currentTab) {
+        dockModeState.value = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+            .getString("dock_mode", "adaptive") ?: "adaptive"
+    }
+    fun loadExploreNext() {
+        if (exploreLoading || exploreFinished) return
+        if (explorePage >= exploreSeq.size) { exploreFinished = true; return }
+        exploreLoading = true
+        scope.launch {
+            val (cat, pg) = exploreSeq[explorePage]
+            val sec = fetchCategoryPaged(cat, pg)
+            if (sec == null) {
+                exploreFinished = true
+            } else {
+                exploreTitles = (exploreTitles + sec.titles).distinctBy { it.id }
+                explorePage += 1
+                if (explorePage >= exploreSeq.size) exploreFinished = true
+            }
+            exploreLoading = false
+        }
+    }
+    LaunchedEffect(liveSections) {
+        if (liveSections != null && !exploreStarted) { exploreStarted = true; loadExploreNext() }
+    }
 
     // Dynamic home: (1) cached live home is loaded into the rows
     // immediately if there is one, (2) a progressive refresh updates
@@ -1102,7 +1252,8 @@ fun AnipullAppInner() {
     // the fetch actually fails and there is no cache — never as a
     // loading placeholder. 1.9-dev2: keyed on fetchAttempt so the
     // Retry button on a failed load actually re-runs this.
-    // 1.9-dev4.7 loading rule (JS, 2026-11-03): HARD 1.5s cap.
+    // 1.9-dev4.7 loading rule (JS, 2026-11-03): HARD cap, now 1.75s
+    // (dev4.8, JS's call — was 1.5s).
     // The old dev4.6 rule was max(fetch time, 1500ms) — a slow
     // AniLab fetch (51 calls, slowest section wins) stretched it to
     // 4.5-5s. Now the loading screen ends at 1500ms NO MATTER WHAT,
@@ -1114,7 +1265,7 @@ fun AnipullAppInner() {
     // animation instead of it being eaten by onboarding time.
     LaunchedEffect(onboardingDone) {
         if (!onboardingDone) return@LaunchedEffect
-        kotlinx.coroutines.delay(1500)
+        kotlinx.coroutines.delay(1750)
         showLoading = false
     }
     LaunchedEffect(fetchAttempt) {
@@ -1228,14 +1379,46 @@ fun AnipullAppInner() {
     } else if (showLoading) {
         LoadingScreen()
     } else if (screen != null) {
-        DetailScreen(
-            title = screen!!,
-            onBack = { screen = null },
-            onPull = { sheetFor = it },
-            isSaved = savedTitles.any { it.id == screen!!.id },
-            onSaveToggle = { screen?.let { toggleSave(it) } },
-        )
+        val heroActive = heroTitle != null && heroTitle!!.id == screen!!.id
+        Box(modifier = Modifier.fillMaxSize().background(Bg)) {
+            DetailScreen(
+                title = screen!!,
+                onBack = { screen = null; heroTitle = null; heroDestRect = null },
+                onPull = { sheetFor = it },
+                isSaved = savedTitles.any { it.id == screen!!.id },
+                onSaveToggle = { screen?.let { toggleSave(it) } },
+                heroPosterHidden = heroActive,
+                detailFade = if (heroActive) 0.2f + 0.8f * heroProgress else 1f,
+                onPosterBounds = { rect -> if (heroTitle?.id == screen!!.id) heroDestRect = rect },
+            )
+            // Hero overlay: the tapped poster, lerped from its grid
+            // bounds to the detail poster's bounds on the BitChord
+            // spring. When progress hits 1 the overlay is dropped and
+            // the real detail poster (same rect, same image) shows.
+            if (heroActive && heroSourceRect != null && heroDestRect != null) {
+                val src = heroSourceRect!!
+                val dst = heroDestRect!!
+                val pr = heroProgress
+                val left = src.left + (dst.left - src.left) * pr
+                val top = src.top + (dst.top - src.top) * pr
+                val w = src.width + (dst.width - src.width) * pr
+                val h = src.height + (dst.height - src.height) * pr
+                val density = LocalDensity.current
+                Box(
+                    modifier = Modifier
+                        .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
+                        .size(with(density) { w.toDp() }, with(density) { h.toDp() })
+                        .clip(RoundedCornerShape(16.dp)),
+                ) {
+                    PosterImage(screen!!.poster, Modifier.fillMaxSize())
+                }
+            }
+        }
     } else Box(modifier = Modifier.fillMaxSize().background(Bg)) {
+    // Haze source: the whole tab content behind the dock, so the
+    // translucent dock (when enabled) blurs real posters, not a
+    // solid colour. The dock itself sits outside this inner Box.
+    Box(modifier = Modifier.fillMaxSize().then(hazeSourceModifier)) {
     if (showSettings) {
         SettingsScreen(onBack = { goTab(Tab.Home) })
     } else if (showDownloads) {
@@ -1243,7 +1426,7 @@ fun AnipullAppInner() {
     } else if (showLibrary) {
         LibraryScreen(
             saved = savedTitles,
-            onOpen = { screen = it },
+            onOpen = { openTitle(it) },
             onBrowseHome = { goTab(Tab.Home) },
             onRemove = { toggleSave(it) },
         )
@@ -1301,7 +1484,7 @@ fun AnipullAppInner() {
                 item {
                     Text(
                         if (searching) "Searching AniLab…" else "Search results",
-                        color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                        color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont,
                     )
                     Spacer(Modifier.height(10.dp))
                     // 1.9-dev2: live only. Chip queries filter live
@@ -1328,7 +1511,7 @@ fun AnipullAppInner() {
                                 results.chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { screen = t }, notWired = notWired, cardWidth = cardW)
+                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect })
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -1350,7 +1533,7 @@ fun AnipullAppInner() {
                         Spacer(Modifier.height(14.dp))
                         SearchSkeletonGrid()
                     } else {
-                        Text("From your catalog", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Text("From your catalog", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
                         Spacer(Modifier.height(10.dp))
                         androidx.compose.foundation.layout.BoxWithConstraints {
                             val cardW = (maxWidth - 12.dp) / 2
@@ -1358,7 +1541,7 @@ fun AnipullAppInner() {
                                 cachedTitles.take(12).chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { screen = t }, notWired = notWired, cardWidth = cardW)
+                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect })
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -1370,7 +1553,7 @@ fun AnipullAppInner() {
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
-                    item { PosterRow("Weekend marathon picks", listOf(RowTag("Sun", true), RowTag("Full seasons ready")), spotlight.titles.take(5), { screen = it }, notWired, R.drawable.ic_calendar) }
+                    item { PosterRow("Weekend marathon picks", listOf(RowTag("Sun", true), RowTag("Full seasons ready")), spotlight.titles.take(5), { openTitle(it) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
                 }
                 featured?.let { pick ->
                     item {
@@ -1382,10 +1565,12 @@ fun AnipullAppInner() {
                                 colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
                             )
                             Spacer(Modifier.width(8.dp))
-                            Text("Editor's pick", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                            Text("Editor's picks", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
                         }
                         Spacer(Modifier.height(12.dp))
-                        EditorsPick(pick, { screen = it }, notWired)
+                        val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
+                            .distinctBy { it.id }.take(5)
+                        EditorsPickCarousel(picks, { openTitle(it) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true), onBounds = { t, rect -> posterBounds[t.id] = rect })
                     }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
@@ -1397,7 +1582,7 @@ fun AnipullAppInner() {
                         "Most Watched" -> R.drawable.ic_eye
                         else -> null
                     }
-                    item { PosterRow(section.name, emptyList(), section.titles, { screen = it }, notWired, icon) }
+                    item { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
                 }
             } else if (homeFailed) {
                 // 1.9-dev2: failed load = skeletons + retry, never demo
@@ -1424,7 +1609,72 @@ fun AnipullAppInner() {
             // They load progressively in the background, like home rows.
             if (!isSearchFocused && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
-                    item { PosterRow(section.name, emptyList(), section.titles, { screen = it }, notWired, null) }
+                    item { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }) }
+                }
+            }
+            // 1.9-dev4.8: Explore — after all catalogs, a grid (not a
+            // horizontal row): 3 fixed posters per row, row after row.
+            // It loads page by page as the user scrolls (12 pages of
+            // AniLab categories, 10 titles each, distinct), and only
+            // when it finally stops does the footer below appear.
+            // This is what the Downloads "Browse anime" button points
+            // at: home no longer has only a handful of picks.
+            if (!isSearchFocused && query.isBlank() && liveSections != null) {
+                item {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        androidx.compose.foundation.Image(
+                            painter = painterResource(R.drawable.ic_explore),
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("Explore", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
+                    }
+                    Spacer(Modifier.height(4.dp))
+                    Text("Keep scrolling — new rows load as you go.", color = Muted, fontSize = 13.sp)
+                    Spacer(Modifier.height(12.dp))
+                    if (exploreTitles.isEmpty() && exploreLoading) {
+                        SearchSkeletonGrid()
+                    } else {
+                        androidx.compose.foundation.layout.BoxWithConstraints {
+                            val cardW = (maxWidth - 16.dp) / 3
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(14.dp),
+                                modifier = Modifier.animateContentSize(tween(300, easing = FastOutSlowInEasing)),
+                            ) {
+                                exploreTitles.chunked(3).forEach { trio ->
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        trio.forEach { t ->
+                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect })
+                                        }
+                                        repeat(3 - trio.size) { Spacer(Modifier.width(cardW)) }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!exploreFinished) {
+                    item {
+                        // Composed only when the user reaches the bottom:
+                        // that composition is the scroll trigger for the
+                        // next page. The footer stays hidden until the
+                        // last page, so it truly appears at the end.
+                        LaunchedEffect(explorePage) {
+                            kotlinx.coroutines.delay(300)
+                            loadExploreNext()
+                        }
+                        if (exploreLoading) {
+                            Text("Loading more…", color = Faint, fontSize = 13.sp)
+                        } else {
+                            Spacer(Modifier.height(8.dp))
+                        }
+                    }
+                } else {
+                    item {
+                        Text("That's the whole Explore catalog for now — back to the top for the picks above, or pull something below.", color = Faint, fontSize = 13.sp)
+                    }
                 }
             }
             // 1.9-dev4.7: footer (the Anipull about section) is
@@ -1432,7 +1682,7 @@ fun AnipullAppInner() {
             // it stayed visible when the search box was tapped
             // (short focused list) and while results were fetching
             // (short skeleton list) — both screenshots JS circled.
-            if (!isSearchFocused && query.isBlank() && !searching) item {
+            if (!isSearchFocused && query.isBlank() && !searching && (liveSections == null || exploreFinished)) item {
                 Column {
                     LogoRow()
                     Spacer(Modifier.height(8.dp))
@@ -1449,6 +1699,7 @@ fun AnipullAppInner() {
             }
         }
     }
+    } // close Haze source Box
     // Floating dock, tab screens only (Detail is handled above, with
     // no dock). Aligned to the bottom, above the navigation bar.
     if (screen == null) {
@@ -1460,10 +1711,17 @@ fun AnipullAppInner() {
             // never resets it. Mini stays mini on the new tab, and
             // the selected pill travels there (see FloatingDock).
             // Dev3's bug was forcing fraction = 1f off Home.
+            val dockFraction = when (dockModeState.value) {
+                "expanded" -> 1f
+                "compact" -> 0f
+                else -> dockFractionState.value
+            }
             FloatingDock(
                 current = currentTab,
-                fraction = dockFractionState.value,
+                fraction = dockFraction,
                 onTab = { goTab(it) },
+                translucent = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("translucent_dock", false),
+                hazeState = hazeState,
             )
         }
     }
@@ -1479,7 +1737,8 @@ fun AnipullAppInner() {
 enum class Tab { Home, Library, Downloads, Settings }
 
 @Composable
-fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit) {
+@OptIn(ExperimentalHazeApi::class, ExperimentalHazeMaterialsApi::class)
+fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit, translucent: Boolean = false, hazeState: HazeState? = null) {
     // 1.9-dev4: Nuvio's FloatingNavigationBar, adaptive style, glow
     // OFF — read in full from NuvioMobile (NavigationBar.kt +
     // FloatingNavigationBar.android.kt) and mirrored, not approximated:
@@ -1522,12 +1781,18 @@ fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit) {
             .padding(horizontal = horizontalPadding),
         contentAlignment = Alignment.BottomCenter,
     ) {
-        androidx.compose.foundation.layout.BoxWithConstraints(
+        // hazeEffect is itself a @Composable modifier, so it cannot be
+    // called inside a Modifier.then() argument — build the branch
+    // here, in the composable body, and .then() the result.
+    val dockBgModifier = if (translucent && hazeState != null)
+        Modifier.hazeEffect(hazeState, style = HazeMaterials.ultraThin(Color(0xFF1A1A24)))
+    else Modifier.background(Color(0xFF1A1A24))
+    androidx.compose.foundation.layout.BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(trackHeight)
                 .clip(RoundedCornerShape(999.dp))
-                .background(Color(0xFF1A1A24))
+                .then(dockBgModifier)
                 .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp)),
             contentAlignment = Alignment.Center,
         ) {
@@ -1631,7 +1896,7 @@ fun LibraryScreen(
             .padding(horizontal = 16.dp),
     ) {
         Spacer(Modifier.height(8.dp))
-        Text("Library", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+        Text("Library", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Spacer(Modifier.height(4.dp))
         Text("Your saved anime, and what is actually on your device.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
         Spacer(Modifier.height(16.dp))
@@ -2057,6 +2322,10 @@ fun SettingsScreen(onBack: () -> Unit) {
     var askSeason by remember { mutableStateOf(prefs.getBoolean("ask_season", true)) }
     var subs by remember { mutableStateOf(prefs.getBoolean("subs", true)) }
     var particles by remember { mutableStateOf(prefs.getBoolean("particles", true)) }
+    var translucentDock by remember { mutableStateOf(prefs.getBoolean("translucent_dock", false)) }
+    var dockMode by remember { mutableStateOf(prefs.getString("dock_mode", "adaptive") ?: "adaptive") }
+    var carouselAuto by remember { mutableStateOf(prefs.getBoolean("carousel_auto", true)) }
+    var dockMenuOpen by remember { mutableStateOf(false) }
     var cacheMsg by remember { mutableStateOf<String?>(null) }
     fun save() {
         prefs.edit()
@@ -2069,6 +2338,9 @@ fun SettingsScreen(onBack: () -> Unit) {
             .putBoolean("ask_season", askSeason)
             .putBoolean("subs", subs)
             .putBoolean("particles", particles)
+            .putBoolean("translucent_dock", translucentDock)
+            .putString("dock_mode", dockMode)
+            .putBoolean("carousel_auto", carouselAuto)
             .apply()
     }
     // System folder picker — no hand-typing a path. The picked tree Uri
@@ -2105,7 +2377,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             Text("← Back", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.clickable(onClick = onBack))
             Spacer(Modifier.height(16.dp))
-            Text("Settings", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold)
+            Text("Settings", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
             Spacer(Modifier.height(4.dp))
             Text(
                 "Saved on this phone. Download settings apply once the download engine lands — right now downloads are still demo-only.",
@@ -2221,6 +2493,38 @@ fun SettingsScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(24.dp))
         }
         item {
+            Text("APPEARANCE", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+            Spacer(Modifier.height(8.dp))
+        }
+        item { SettingsToggle("Translucent dock", "Real backdrop blur on the dock (Haze), not full liquid glass. Off = solid dock.", translucentDock) { translucentDock = it; save() } }
+        item {
+            Text("Dock behaviour", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            val dockLabel = when (dockMode) { "expanded" -> "Always expanded"; "compact" -> "Always compact"; else -> "Adaptive" }
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp))
+                    .background(Card)
+                    .clickable { dockMenuOpen = true }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                    Text(dockLabel, color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+                    Text("▾", color = Muted, fontSize = 14.sp)
+                }
+                DropdownMenu(expanded = dockMenuOpen, onDismissRequest = { dockMenuOpen = false }) {
+                    DropdownMenuItem(text = { Text("Always expanded") }, onClick = { dockMode = "expanded"; save(); dockMenuOpen = false })
+                    DropdownMenuItem(text = { Text("Always compact") }, onClick = { dockMode = "compact"; save(); dockMenuOpen = false })
+                    DropdownMenuItem(text = { Text("Adaptive") }, onClick = { dockMode = "adaptive"; save(); dockMenuOpen = false })
+                }
+            }
+            Text("Adaptive = the current scroll morph. Expanded / compact lock the dock in that size.", color = Faint, fontSize = 12.sp)
+            Spacer(Modifier.height(8.dp))
+        }
+        item { SettingsToggle("Auto-scroll Editor's picks", "One poster every 5 seconds. Pauses off-screen and while you drag.", carouselAuto) { carouselAuto = it; save() } }
+        item {
             Text("BEHAVIOUR", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
             Spacer(Modifier.height(8.dp))
         }
@@ -2251,7 +2555,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(24.dp))
             Text("ABOUT", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
             Spacer(Modifier.height(8.dp))
-            Text("Anipull 1.9-dev4.6 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Anipull 1.9-dev4.8 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
             // Extra bottom space so the floating dock never covers this.
             Spacer(Modifier.height(100.dp))
         }
@@ -2273,9 +2577,21 @@ fun SettingsToggle(title: String, sub: String, checked: Boolean, onChange: (Bool
 }
 
 @Composable
-fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}) {
+fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null) {
     var season by remember { mutableStateOf(1) }
     var synExpanded by remember { mutableStateOf(false) }
+    // 1.9-dev4.8 extra smoothness: without a hero, the detail fades
+    // in over 300ms instead of appearing instantly; with a hero, the
+    // parent drives the fade from the hero spring (text arrives as
+    // the poster lands, exactly as JS asked).
+    var detailAppeared by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { detailAppeared = true }
+    val detailAppearedFade by animateFloatAsState(
+        targetValue = if (detailAppeared) 1f else 0f,
+        animationSpec = tween(300, easing = FastOutSlowInEasing),
+        label = "detailFadeIn",
+    )
+    val detailAlpha = if (heroPosterHidden) detailFade else detailAppearedFade
     val isFrierenDemo = title.title.startsWith("Frieren") && title.episodes != null
     val episodes = if (isFrierenDemo && season == 2) emptyList()
         else title.episodes?.let { (1..it).toList() }
@@ -2288,7 +2604,8 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
             .background(Bg)
             .statusBarsPadding()
             .navigationBarsPadding()
-            .padding(horizontal = 16.dp),
+            .padding(horizontal = 16.dp)
+            .alpha(detailAlpha),
     ) {
         item {
             Spacer(Modifier.height(16.dp))
@@ -2296,10 +2613,12 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
                 modifier = Modifier.clickable(onClick = onBack))
             Spacer(Modifier.height(16.dp))
             Row {
-                PosterCard(title, onClick = {})
+                Box(modifier = Modifier.alpha(if (heroPosterHidden) 0f else 1f)) {
+                    PosterCard(title, onClick = {}, onBounds = onPosterBounds)
+                }
                 Spacer(Modifier.width(16.dp))
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(title.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp)
+                    Text(title.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont)
                     Spacer(Modifier.height(4.dp))
                     val meta = listOfNotNull(title.type, title.year).joinToString(" · ")
                     if (meta.isNotBlank()) Text(meta, color = Muted, fontSize = 13.sp)
