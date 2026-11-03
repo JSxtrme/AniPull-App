@@ -1,3 +1,20 @@
+## 1.9-dev4.8.4 (2026-11-03, versionCode 22) — skeletons that match, carousel rebuild, reverse hero, Nuvio dots/dock, scroll round 2
+
+JS, with screenshots: initial fast scroll still laggy; skeletons show wrong layout (real cards land in completely different positions); back animation should reverse out of Detail; Nuvio hero dots for Editor's Picks; Editor's Picks rebuilt like the reference (title above 2 compact buttons, Download instead of Watch, no glass, no spotlight text, not huge); back button too small/close to status bar; switch thumb dark purple -> white; Settings toggle descriptions touching the toggle; Explore must always end on a full 3-card row; dock icons get a subtle press enlarge like Nuvio.
+
+- Skeletons, pixel-identical: SkeletonRow now matches PosterRow exactly — heading 17dp icon + 20dp bar, Spacer 12, poster 118x177 corner 16 (was corner 12, no title/meta), Spacer 8, title 2 lines, Spacer 2, meta bar. SearchSkeletonGrid and ExploreSkeletonRow got the missing second title line + meta, same spacings. Home loading now also shows a CarouselSkeleton (275dp + dots) first, so the real carousel no longer pushes everything down 292dp when it appears.
+- Editor's Picks rebuilt: no top type pill, no dark horizontal gradient, only a bottom gradient. Title moved to the BOTTOM, just above the buttons, so the poster face/middle stay clear. Buttons are now one compact row: Download (white, black text, our download icon, no "1080p" direct label) + Details (solid dark #1A1A24, info icon, no glass blur). Card stays 275dp — not the reference's huge size.
+- Reverse hero: back from Detail (button or system back) now flies the same overlay backwards on the same 195-stiffness spring — full PosterCard for grid sources, poster-only for carousel sources — using persistently stored detail rects, so back always has a real source. Detail onBack and BackHandler both route through goBackFromDetail().
+- Dots, verified in NuvioMobile HomeHeroSection.kt: 8dp tall, width 8dp + 24dp * visibility, alpha 0.35 + 0.57 * visibility, monochrome onBackground colour, Row spacedBy 8dp, clickable to the nearest occurrence — morphing continuously with the pager offset, not just on page settle.
+- Dock press: icon scales 1.0 -> 1.12 on press (spring, graphicsLayer only, layout never shifts), label untouched. Nuvio's own dock press is part of its morphing pill track, not a separate icon scale — this is the subtle equivalent JS described.
+- Back button: new BackPill (40dp pill, Card bg, Pink border, 15sp bold) used in Detail, Downloads, and Settings — replaces the 14sp text.
+- Switch: checked thumb is now White (was dark purple), track Pink. SettingsToggle now has a fixed 16dp gap between text and switch, so long descriptions never run into the toggle.
+- Explore: trailing partial row is now dropped even when finished — bottom line is always a full 3-card row (was: partial row shown on finish, ending with a lone first card).
+- Scroll round 2: home section updates wait (on their IO job) until a scroll stops before applying (fetchHomeProgressive callbacks are now suspend so the wait is legal); genre batch also waits for scroll idle; poster loads capped at 4 concurrent decodes (semaphore); poster memory cache capped at ~50MB by bytes (was 200 bitmaps, ~150MB); PosterImage filterQuality Low.
+- Dock revert: dev4.8.3's haze-off-while-scrolling is REVERTED — JS spotted it as a bug (translucency disappearing mid-scroll, popping back on stop). Dock stays translucent always now.
+
+Posters also decode as hardware bitmaps (Coil's GPU-memory trick, API 26+ = our minSdk) with an ARGB fallback. NEW debug key in this build (66ebab6d, VM regenerated the debug keystore) — it will NOT update dev4.8.3 in place, uninstall first.
+
 ## 1.9-dev4.8.3 (2026-11-03, versionCode 21) — initial fast-scroll fix, Nuvio-informed
 
 JS: "scroll is still not smooth, initial fast scrolls right after app opening, it's cancer" — even at 90Hz. Checked NuvioMobile (cmp-rewrite) for how they keep lists smooth.

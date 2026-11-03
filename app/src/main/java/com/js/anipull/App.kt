@@ -431,6 +431,7 @@ fun PosterImage(poster: String?, modifier: Modifier, targetWidthPx: Int = 0) {
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                filterQuality = androidx.compose.ui.graphics.FilterQuality.Low,
             )
         }
     }
@@ -538,15 +539,53 @@ data class RowTag(val text: String, val solid: Boolean = false)
 
 @Composable
 fun SkeletonRow() {
-    // What loading looks like now: dark placeholder cards, NOT demo titles.
-    // Demo titles as a placeholder were the confusing part — they looked
-    // like real data, then swapped. Skeletons say "still loading" honestly.
+    // 1.9-dev4.8.4: skeleton = the real card, in grey. The old one
+    // was poster-only (118x177, corner 12, no title/meta), so when
+    // real cards landed, every row grew ~56dp and everything below
+    // jumped — JS: "actual positioning is completely different
+    // from what the skeletons predicted". Now it matches PosterRow
+    // exactly: heading (17dp icon + 17sp text, ~20dp tall), Spacer
+    // 12, poster 118x177 corner 16, Spacer 8, title 2 lines
+    // (12dp bars, Spacer 4), Spacer 2, meta bar 10dp. Same widths,
+    // heights, spacings and corners, so a real row swaps in with
+    // zero layout shift.
     Column {
-        Box(Modifier.width(140.dp).height(18.dp).clip(RoundedCornerShape(8.dp)).background(Card))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(17.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+            Spacer(Modifier.width(8.dp))
+            Box(Modifier.width(150.dp).height(20.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+        }
         Spacer(Modifier.height(12.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             repeat(3) {
-                Box(Modifier.width(118.dp).height(177.dp).clip(RoundedCornerShape(12.dp)).background(Card))
+                Column(modifier = Modifier.width(118.dp)) {
+                    Box(Modifier.size(width = 118.dp, height = 177.dp).clip(RoundedCornerShape(16.dp)).background(Card))
+                    Spacer(Modifier.height(8.dp))
+                    Box(Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+                    Spacer(Modifier.height(4.dp))
+                    Box(Modifier.fillMaxWidth(0.65f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+                    Spacer(Modifier.height(2.dp))
+                    Box(Modifier.fillMaxWidth(0.5f).height(10.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun CarouselSkeleton() {
+    // Home loading, first viewport: the carousel is the first big
+    // item after the header, so a loading home without it jumps
+    // 275dp + dots when it appears. Skeleton it too, same size.
+    Column {
+        Box(Modifier.fillMaxWidth().height(275.dp).clip(RoundedCornerShape(20.dp)).background(Card))
+        Spacer(Modifier.height(10.dp))
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+            Box(Modifier.size(width = 22.dp, height = 7.dp).clip(RoundedCornerShape(999.dp)).background(Card))
+            Spacer(Modifier.width(8.dp))
+            repeat(4) {
+                Box(Modifier.size(7.dp).clip(RoundedCornerShape(999.dp)).background(Card))
+                Spacer(Modifier.width(8.dp))
             }
         }
     }
@@ -564,8 +603,10 @@ fun ExploreSkeletonRow(cardW: Dp) {
             Column(modifier = Modifier.width(cardW)) {
                 Box(modifier = Modifier.size(width = cardW, height = cardW * 3 / 2).clip(RoundedCornerShape(16.dp)).background(Card))
                 Spacer(Modifier.height(8.dp))
-                Box(modifier = Modifier.fillMaxWidth(0.8f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+                Box(modifier = Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(6.dp)).background(Card))
                 Spacer(Modifier.height(4.dp))
+                Box(modifier = Modifier.fillMaxWidth(0.65f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+                Spacer(Modifier.height(2.dp))
                 Box(modifier = Modifier.fillMaxWidth(0.5f).height(10.dp).clip(RoundedCornerShape(6.dp)).background(Card))
             }
         }
@@ -585,10 +626,14 @@ fun SearchSkeletonGrid() {
             repeat(3) {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     repeat(2) {
-                        Column {
-                            Box(Modifier.width(cardW).height(cardH).clip(RoundedCornerShape(16.dp)).background(Card))
+                        Column(modifier = Modifier.width(cardW)) {
+                            Box(Modifier.size(width = cardW, height = cardH).clip(RoundedCornerShape(16.dp)).background(Card))
                             Spacer(Modifier.height(8.dp))
-                            Box(Modifier.width(cardW * 0.8f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+                            Box(Modifier.fillMaxWidth().height(12.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+                            Spacer(Modifier.height(4.dp))
+                            Box(Modifier.fillMaxWidth(0.65f).height(12.dp).clip(RoundedCornerShape(6.dp)).background(Card))
+                            Spacer(Modifier.height(2.dp))
+                            Box(Modifier.fillMaxWidth(0.5f).height(10.dp).clip(RoundedCornerShape(6.dp)).background(Card))
                         }
                     }
                 }
@@ -733,70 +778,88 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                     },
             ) {
                 PosterImage(pick.poster, Modifier.matchParentSize(), with(LocalDensity.current) { config.screenWidthDp.dp.toPx().toInt() })
-                Box(
-                    Modifier.matchParentSize().background(
-                        Brush.horizontalGradient(
-                            colors = listOf(
-                                Color(0xFF05050A).copy(alpha = 0.88f),
-                                Color(0xFF05050A).copy(alpha = 0.45f),
-                                Color(0xFF05050A).copy(alpha = 0.08f),
-                            )
-                        )
-                    )
-                )
+                // 1.9-dev4.8.4: reference-style card. No top pill
+                // (no spotlight text in our data), no dark horizontal
+                // gradient hiding the poster, no full-width buttons.
+                // Only a bottom gradient for legibility, title at the
+                // BOTTOM just above the buttons (so the poster's face
+                // and middle stay unobstructed), and two compact
+                // buttons in one row: Download (white, like the
+                // reference Watch button, with our download icon, no
+                // direct 1080p label) + Details (solid dark, info
+                // icon, no glass blur).
                 Box(
                     Modifier.matchParentSize().background(
                         Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, Color.Black.copy(alpha = 0.55f))
+                            colors = listOf(Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.65f))
                         )
                     )
                 )
                 Column(modifier = Modifier.fillMaxSize().padding(18.dp)) {
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .border(1.dp, Pink.copy(alpha = 0.45f), RoundedCornerShape(999.dp))
-                            .background(Pink.copy(alpha = 0.22f))
-                            .padding(horizontal = 11.dp, vertical = 5.dp),
-                    ) {
-                        val typeLabel = (pick.type ?: "ANIME").uppercase()
-                        Text("$typeLabel · 1080P READY", color = Color(0xFFFFD7E7), fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.4.sp)
-                    }
-                    Spacer(Modifier.height(10.dp))
-                    Text(pick.title, color = TextMain, fontSize = 25.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 28.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.weight(1f))
-                    Button(
-                        onClick = notWired,
-                        colors = ButtonDefaults.buttonColors(containerColor = Pink),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        androidx.compose.foundation.Image(
-                            painter = painterResource(R.drawable.ic_download),
-                            contentDescription = null,
-                            modifier = Modifier.size(18.dp),
-                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(OnAccent),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text("Download · 1080p", color = OnAccent, fontWeight = FontWeight.Bold)
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = { onOpen(pick) }, modifier = Modifier.fillMaxWidth()) {
-                        Text("Details & other qualities", color = Color.White)
+                    Text(pick.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Button(
+                            onClick = notWired,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color.White),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 11.dp),
+                        ) {
+                            androidx.compose.foundation.Image(
+                                painter = painterResource(R.drawable.ic_download),
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.Black),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Download", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        }
+                        Button(
+                            onClick = { onOpen(pick) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A1A24)),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 11.dp),
+                        ) {
+                            androidx.compose.foundation.Image(
+                                painter = painterResource(R.drawable.ic_info),
+                                contentDescription = null,
+                                modifier = Modifier.size(18.dp),
+                                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("Details", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                        }
                     }
                 }
             }
         }
         Spacer(Modifier.height(10.dp))
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally)) {
+            // 1.9-dev4.8.4, verified in NuvioMobile HomeHeroSection:
+            // dots are 8dp tall, width = 8dp + 24dp * visibility,
+            // alpha = 0.35 + 0.57 * visibility, colour = onBackground
+            // (monochrome, not accent), Row spacedBy 8dp, clickable
+            // to the nearest occurrence of that pick. Visibility =
+            // 1 - distance from the pager position (currentPage +
+            // offset fraction), wrapped for our infinite pager.
+            val pagerPos = pagerState.currentPage + pagerState.currentPageOffsetFraction
             picks.indices.forEach { i ->
-                val selected = i == pagerState.currentPage % picks.size
-                CarouselDot(selected = selected) {
-                    scope.launch {
-                        var target = pagerState.currentPage - pagerState.currentPage % picks.size + i
-                        if (target <= pagerState.currentPage) target += picks.size
-                        pagerState.animateScrollToPage(target, animationSpec = tween(600, easing = FastOutSlowInEasing))
-                    }
-                }
+                val dist = kotlin.math.abs(pagerPos % picks.size - i).let { if (it > picks.size / 2f) picks.size - it else it }
+                val weight = (1f - dist.coerceIn(0f, 1f))
+                val dotW = 8.dp + (24.dp * weight)
+                Box(
+                    modifier = Modifier
+                        .size(width = dotW, height = 8.dp)
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(TextMain)
+                        .alpha(0.35f + 0.57f * weight)
+                        .clickable {
+                            scope.launch {
+                                var target = pagerState.currentPage - pagerState.currentPage % picks.size + i
+                                if (target <= pagerState.currentPage) target += picks.size
+                                pagerState.animateScrollToPage(target, animationSpec = tween(600, easing = FastOutSlowInEasing))
+                            }
+                        },
+                )
             }
         }
     }
@@ -1271,6 +1334,25 @@ fun AnipullAppInner() {
     var heroDestPosterRect by remember { mutableStateOf<Rect?>(null) }
     var heroSourceIsCarousel by remember { mutableStateOf(false) }
     var heroTitle by remember { mutableStateOf<ApiTitle?>(null) }
+    // 1.9-dev4.8.4 reverse hero: back from Detail animates the
+    // SAME overlay backwards, detail -> home card, on the same
+    // spring. detailCardRect/detailPosterRect are stored
+    // persistently (not cleared when the forward hero ends), so
+    // back always has a real source rect to fly from.
+    var detailCardRect by remember { mutableStateOf<Rect?>(null) }
+    var detailPosterRect by remember { mutableStateOf<Rect?>(null) }
+    var reverseTitle by remember { mutableStateOf<ApiTitle?>(null) }
+    var reverseSourceRect by remember { mutableStateOf<Rect?>(null) }
+    var reverseDestRect by remember { mutableStateOf<Rect?>(null) }
+    var reverseIsCarousel by remember { mutableStateOf(false) }
+    val reverseProgress by animateFloatAsState(
+        targetValue = if (reverseTitle != null) 1f else 0f,
+        animationSpec = spring(stiffness = 195f, dampingRatio = 1f),
+        label = "reverseHeroProgress",
+    )
+    LaunchedEffect(reverseProgress) {
+        if (reverseProgress >= 0.999f && reverseTitle != null) { reverseTitle = null; reverseSourceRect = null; reverseDestRect = null }
+    }
     // BitChord-style hero, adapted: BitChord keeps ONE player sheet
     // mounted and drives its artwork on a critically damped spring
     // (stiffness 195, no bounce, window animations off so nothing
@@ -1291,6 +1373,16 @@ fun AnipullAppInner() {
         if (src != null) { heroSourceRect = src; heroDestRect = null; heroDestPosterRect = null; heroSourceIsCarousel = isCarousel; heroTitle = t }
         screen = t
     }
+    fun goBackFromDetail() {
+        val t = screen
+        if (t != null && detailCardRect != null && posterBounds[t.id] != null) {
+            reverseTitle = t
+            reverseIsCarousel = heroSourceIsCarousel
+            reverseSourceRect = if (heroSourceIsCarousel) detailPosterRect ?: detailCardRect else detailCardRect
+            reverseDestRect = posterBounds[t.id]
+        }
+        screen = null; heroTitle = null; heroDestRect = null; heroDestPosterRect = null
+    }
     val dockModeState = remember {
         mutableStateOf(
             context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
@@ -1301,16 +1393,15 @@ fun AnipullAppInner() {
     // Same @Composable-modifier rule as the dock below: hazeSource
     // cannot live inside a Modifier.then() argument, so build it
     // here in the composable body and .then() the result.
-    // 1.9-dev4.8.3: haze is OFF while the home list is actually
-    // scrolling (solid dock instead), and back on when it stops.
-    // Translucent-on-by-default in dev4.8.2 meant every fast scroll
-    // paid a full blur re-render at 90Hz — that was the biggest
-    // single cost in the initial scroll. listState.isScrollInProgress
-    // only flips at scroll start/end, so this costs one
-    // recomposition per fling, not one per frame.
+    // 1.9-dev4.8.4 REVERT: dev4.8.3 turned haze OFF while
+    // scrolling to save blur cost, but JS spotted it as a bug —
+    // translucency visibly disappeared mid-scroll and popped back
+    // when scrolling stopped. Dock stays translucent always now;
+    // smoothness comes from hardware bitmaps / scroll-wait updates,
+    // not from dropping the blur.
     val listState = rememberLazyListState()
     val translucentPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("translucent_dock", true)
-    val dockTranslucent = translucentPref && !listState.isScrollInProgress
+    val dockTranslucent = translucentPref
     val hazeSourceModifier: Modifier = if (dockTranslucent)
         Modifier.hazeSource(hazeState) else Modifier
     // 1.9-dev4.8.1: Show Explore toggle, re-read on every composition
@@ -1361,7 +1452,7 @@ fun AnipullAppInner() {
         else if (showSettings) showSettings = false
         else if (showDownloads) showDownloads = false
         else if (showLibrary) showLibrary = false
-        else if (screen != null) screen = null
+        else if (screen != null) goBackFromDetail()
         else if (isSearchFocused || query.isNotBlank()) closeSearch()
     }
 
@@ -1478,9 +1569,16 @@ fun AnipullAppInner() {
         // Child of this effect (not scope.launch): it keeps running
         // after this block returns, but a Retry cancels the old fetch
         // instead of letting two fetches race on liveSections.
+        // 1.9-dev4.8.4: sections landing mid-scroll were a real
+        // initial-scroll jank source (20 updates in the first
+        // seconds, each recomposing the list while it moves).
+        // A landing section now waits (on its IO job, not the
+        // main thread) until the scroll stops, then applies —
+        // so updates never recompose the list mid-fling.
         launch {
             fetchHomeProgressive(
                 onSection = { _, sec ->
+                    while (listState.isScrollInProgress) kotlinx.coroutines.delay(100)
                     val existing = localSections.indexOfFirst { it.name == sec.name }
                     if (existing >= 0) localSections[existing] = sec else localSections += sec
                     liveSections = localSections.sortedBy { wanted.indexOf(it.name) }
@@ -1523,6 +1621,7 @@ fun AnipullAppInner() {
                 val results = genres.map { (id, name) ->
                     async { fetchCategory(id, name) }
                 }.mapNotNull { runCatching { it.await() }.getOrNull() }
+                while (listState.isScrollInProgress) kotlinx.coroutines.delay(100)
                 if (results.isNotEmpty()) extraSections = results
             }
         }
@@ -1580,14 +1679,14 @@ fun AnipullAppInner() {
         Box(modifier = Modifier.fillMaxSize().background(Bg)) {
             DetailScreen(
                 title = screen!!,
-                onBack = { screen = null; heroTitle = null; heroDestRect = null; heroDestPosterRect = null },
+                onBack = { goBackFromDetail() },
                 onPull = { sheetFor = it },
                 isSaved = savedTitles.any { it.id == screen!!.id },
                 onSaveToggle = { screen?.let { toggleSave(it) } },
                 heroPosterHidden = heroActive,
                 detailFade = if (heroActive) 0.2f + 0.8f * heroProgress else 1f,
-                onPosterBounds = { rect -> if (heroTitle?.id == screen!!.id) heroDestRect = rect },
-                onPosterImageBounds = { rect -> if (heroTitle?.id == screen!!.id) heroDestPosterRect = rect },
+                onPosterBounds = { rect -> detailCardRect = rect; if (heroTitle?.id == screen!!.id) heroDestRect = rect },
+                onPosterImageBounds = { rect -> detailPosterRect = rect; if (heroTitle?.id == screen!!.id) heroDestPosterRect = rect },
             )
             // 1.9-dev4.8.2 full-card hero: the overlay is no longer
             // just the poster image — it is the whole PosterCard
@@ -1826,8 +1925,13 @@ fun AnipullAppInner() {
                 item(key = "home_skeleton_1", contentType = "skeleton") { SkeletonRow() }
             } else {
                 // First load, no cache, fetch still running: skeletons, not demo.
+                // 1.9-dev4.8.4: include the carousel skeleton first —
+                // without it, the real carousel appearing pushed every
+                // row below it down 292dp.
+                item(key = "home_carousel_skeleton", contentType = "skeleton") { CarouselSkeleton() }
                 item(key = "home_skeleton_0", contentType = "skeleton") { SkeletonRow() }
                 item(key = "home_skeleton_1", contentType = "skeleton") { SkeletonRow() }
+                item(key = "home_skeleton_2", contentType = "skeleton") { SkeletonRow() }
             }
             // Extra catalogs, below the AniLab home rows: genre rows from
             // /api/category (Action 1, Romance 14, Comedy 5, Fantasy 4).
@@ -1876,7 +1980,14 @@ fun AnipullAppInner() {
                                 // completes it, or until Explore
                                 // finishes, when the last partial row
                                 // is finally shown.
-                                val shownExplore = if (exploreFinished) exploreTitles else exploreTitles.dropLast(exploreTitles.size % 3)
+                                // 1.9-dev4.8.4: ALWAYS full rows, even when
+                                // finished. The old code showed the last
+                                // partial row once Explore finished, so
+                                // it ended with a lone first card. Now
+                                // that trailing 1-2 cards are dropped
+                                // for good — the bottom line is always
+                                // a full 3-card row.
+                                val shownExplore = exploreTitles.dropLast(exploreTitles.size % 3)
                                 shownExplore.chunked(3).forEach { trio ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         trio.forEach { t ->
@@ -1943,6 +2054,37 @@ fun AnipullAppInner() {
         }
     }
     } // close Haze source Box
+    // 1.9-dev4.8.4 reverse hero overlay, on top of Home (dock
+    // stays above it, as it should). Same spring, same card:
+    // grid sources fly back as a full PosterCard, carousel
+    // sources as poster-only, exactly mirroring the forward path.
+    if (reverseTitle != null && reverseSourceRect != null && reverseDestRect != null) {
+        val rSrc = reverseSourceRect!!; val rDst = reverseDestRect!!; val pr = reverseProgress
+        val rLeft = rSrc.left + (rDst.left - rSrc.left) * pr
+        val rTop = rSrc.top + (rDst.top - rSrc.top) * pr
+        val rW = rSrc.width + (rDst.width - rSrc.width) * pr
+        val rH = rSrc.height + (rDst.height - rSrc.height) * pr
+        val rDensity = LocalDensity.current
+        if (reverseIsCarousel) {
+            Box(
+                modifier = Modifier
+                    .offset { androidx.compose.ui.unit.IntOffset(rLeft.toInt(), rTop.toInt()) }
+                    .size(with(rDensity) { rW.toDp() }, with(rDensity) { rH.toDp() })
+                    .clip(RoundedCornerShape(16.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp)),
+            ) {
+                PosterImage(reverseTitle!!.poster, Modifier.fillMaxSize())
+            }
+        } else {
+            Box(
+                modifier = Modifier
+                    .offset { androidx.compose.ui.unit.IntOffset(rLeft.toInt(), rTop.toInt()) }
+                    .size(with(rDensity) { rW.toDp() }, with(rDensity) { rH.toDp() }),
+            ) {
+                PosterCard(reverseTitle!!, onClick = {}, cardWidth = with(rDensity) { rW.toDp() })
+            }
+        }
+    }
     // Floating dock, tab screens only (Detail is handled above, with
     // no dock). Aligned to the bottom, above the navigation bar.
     if (screen == null) {
@@ -2081,19 +2223,29 @@ fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit, translucen
             ) {
                 items.forEach { (tab, icon, label) ->
                     val selected = tab == current
+                    // 1.9-dev4.8.4: very subtle press enlarge on the
+                    // icon itself (Nuvio-style): 1.0 -> 1.12 spring
+                    // while pressed, graphicsLayer only, so the dock
+                    // layout never shifts. Icon only, not the label.
+                    val dockInteraction = remember { MutableInteractionSource() }
+                    val dockPressed by dockInteraction.collectIsPressedAsState()
+                    val dockIconScale by animateFloatAsState(
+                        targetValue = if (dockPressed && !ThemeState.reduceMotion) 1.12f else 1f,
+                        animationSpec = spring(stiffness = 400f, dampingRatio = 0.7f), label = "dockPress",
+                    )
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()
                             .clip(RoundedCornerShape(999.dp))
-                            .clickable { onTab(tab) },
+                            .clickable(interactionSource = dockInteraction, indication = null) { onTab(tab) },
                         contentAlignment = Alignment.Center,
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             androidx.compose.foundation.Image(
                                 painter = painterResource(icon),
                                 contentDescription = label,
-                                modifier = Modifier.size(22.dp),
+                                modifier = Modifier.size(22.dp).graphicsLayer(scaleX = dockIconScale, scaleY = dockIconScale),
                                 colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(
                                     if (selected) OnAccent else Muted
                                 ),
@@ -2519,8 +2671,7 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(modifier = Modifier.fillMaxWidth()) {
-            Text("← Back", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                modifier = Modifier.clickable(onClick = onBack))
+            BackPill(onBack = onBack)
         }
         Spacer(Modifier.height(80.dp))
         Box(
@@ -2618,7 +2769,34 @@ fun SettingsToggle(title: String, sub: String, checked: Boolean, onChange: (Bool
             Text(title, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Text(sub, color = Muted, fontSize = 12.5.sp, lineHeight = 17.sp)
         }
-        androidx.compose.material3.Switch(checked = checked, onCheckedChange = onChange)
+        Spacer(Modifier.width(16.dp))
+        androidx.compose.material3.Switch(
+            checked = checked, onCheckedChange = onChange,
+            colors = androidx.compose.material3.SwitchDefaults.colors(
+                checkedThumbColor = Color.White,
+                checkedTrackColor = Pink,
+                checkedBorderColor = Pink,
+                uncheckedThumbColor = Color.White.copy(alpha = 0.9f),
+            ),
+        )
+    }
+}
+
+@Composable
+fun BackPill(onBack: () -> Unit) {
+    // 1.9-dev4.8.4: the old 14sp "← Back" text was small, easy to
+    // miss, and sat close to the status bar. Now a proper pill:
+    // 40dp tall, Card background, Pink border, 15sp bold text.
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(999.dp))
+            .background(Card)
+            .border(1.dp, Pink.copy(alpha = 0.4f), RoundedCornerShape(999.dp))
+            .clickable(onClick = onBack)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text("←  Back", color = Pink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
     }
 }
 
@@ -2654,9 +2832,8 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
             .alpha(detailAlpha),
     ) {
         item {
-            Spacer(Modifier.height(16.dp))
-            Text("← Back", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                modifier = Modifier.clickable(onClick = onBack))
+            Spacer(Modifier.height(20.dp))
+            BackPill(onBack = onBack)
             Spacer(Modifier.height(16.dp))
             Row {
                 Box(modifier = Modifier.alpha(if (heroPosterHidden) 0f else 1f)) {

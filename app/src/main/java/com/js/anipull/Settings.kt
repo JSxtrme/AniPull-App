@@ -24,7 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-// 1.9-dev4.8.3 Settings redesign, Nuvio-style: the old single long
+// 1.9-dev4.8.4 Settings redesign, Nuvio-style: the old single long
 // page was messy, so Settings is now a hub with large headings and
 // grouped cards, and each group opens its own sub-page with the
 // same large heading (like Nuvio's "Appearance" page). Hub rows:
@@ -36,7 +36,7 @@ import androidx.compose.ui.unit.sp
 fun SettingsScreen(onBack: () -> Unit) {
     var subPage by remember { mutableStateOf<String?>(null) }
     BackHandler(enabled = subPage != null) { subPage = null }
-    // 1.9-dev4.8.3: sub-pages slide in from the right, hub slides
+    // 1.9-dev4.8.4: sub-pages slide in from the right, hub slides
     // back in from the left — same attached-pages feel as onboarding.
     androidx.compose.animation.AnimatedContent(
         targetState = subPage,
@@ -71,7 +71,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
         modifier = Modifier.fillMaxSize().background(Bg).statusBarsPadding().navigationBarsPadding().padding(horizontal = 16.dp),
     ) {
         item {
-            Text("← Back", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable(onClick = onBack))
+            BackPill(onBack = onBack)
             Spacer(Modifier.height(16.dp))
             Text("Settings", color = TextMain, fontSize = 36.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
             Spacer(Modifier.height(20.dp))
@@ -100,7 +100,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("1.9-dev4.8.3 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("1.9-dev4.8.4 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -448,7 +448,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("1.9-dev4.8.3 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("1.9-dev4.8.4 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")

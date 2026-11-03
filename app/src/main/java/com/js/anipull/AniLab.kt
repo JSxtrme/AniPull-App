@@ -7,6 +7,7 @@ import android.content.Context
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -228,8 +229,8 @@ suspend fun fetchHome(): HomeData? {
 // details land — the first row appears in ~1s instead of waiting for all
 // 50 detail calls to finish, which was the old sequential bottleneck.
 suspend fun fetchHomeProgressive(
-    onSection: (Int, HomeSection) -> Unit,
-    onFeatured: (ApiTitle) -> Unit,
+    onSection: suspend (Int, HomeSection) -> Unit,
+    onFeatured: suspend (ApiTitle) -> Unit,
 ) = withContext(Dispatchers.IO) {
     val text = getText("https://anilab2.amdapi.click/api/home") ?: return@withContext
     try {
@@ -325,13 +326,28 @@ suspend fun searchAniLab(query: String): List<ApiTitle> = withContext(Dispatcher
 // sharing one bitmap would either upscale the row or waste a
 // full-size texture on every grid card during a fast scroll.
 object PosterCache {
+    // 1.9-dev4.8.4: byte-capped, not count-capped. 200 bitmaps at
+    // ~350x525 ARGB was ~150MB, and that memory pressure during
+    // a fast scroll (dozens of new posters at once) GC-stuttered.
+    // Cap ~50MB, evict oldest first.
     private val map = LinkedHashMap<String, Bitmap>()
+    private var totalBytes = 0L
     fun get(url: String, targetWidthPx: Int = 0): Bitmap? = synchronized(map) { map["$url@$targetWidthPx"] }
     fun put(url: String, bmp: Bitmap, targetWidthPx: Int = 0) = synchronized(map) {
-        if (map.size > 200) map.remove(map.keys.first())
-        map["$url@$targetWidthPx"] = bmp
+        val key = "$url@$targetWidthPx"
+        val bytes = (bmp.width * bmp.height * 4).toLong()
+        map[key]?.let { totalBytes -= (it.width * it.height * 4).toLong() }
+        map[key] = bmp; totalBytes += bytes
+        while (totalBytes > 50L * 1024 * 1024 && map.size > 1) {
+            val first = map.keys.first(); val old = map.remove(first)!!; totalBytes -= (old.width * old.height * 4).toLong()
+        }
     }
 }
+
+// 1.9-dev4.8.4: at most 4 poster decodes at once. Unbounded IO
+// meant a fast scroll launched dozens of decodes simultaneously,
+// all competing for CPU + GPU upload in the same frames.
+private val posterLoadSemaphore = kotlinx.coroutines.sync.Semaphore(4)
 
 private fun sampleSizeFor(width: Int, targetWidthPx: Int): Int {
     if (targetWidthPx <= 0 || width <= targetWidthPx) return 1
@@ -342,7 +358,8 @@ private fun sampleSizeFor(width: Int, targetWidthPx: Int): Int {
 
 suspend fun loadPoster(url: String, context: Context? = null, targetWidthPx: Int = 0): Bitmap? {
     PosterCache.get(url, targetWidthPx)?.let { return it }
-    return withContext(Dispatchers.IO) {
+    return posterLoadSemaphore.withPermit {
+    withContext(Dispatchers.IO) {
         try {
             if (context != null) {
                 val dir = java.io.File(context.cacheDir, "posters").apply { mkdirs() }
@@ -350,8 +367,9 @@ suspend fun loadPoster(url: String, context: Context? = null, targetWidthPx: Int
                 if (file.exists()) {
                     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
                     BitmapFactory.decodeFile(file.absolutePath, bounds)
-                    val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx) }
-                    BitmapFactory.decodeFile(file.absolutePath, opts)?.let {
+                    val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx); inPreferredConfig = Bitmap.Config.HARDWARE }
+                    (BitmapFactory.decodeFile(file.absolutePath, opts)
+                        ?: BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx) }))?.let {
                         PosterCache.put(url, it, targetWidthPx); return@withContext it
                     }
                 }
@@ -365,8 +383,10 @@ suspend fun loadPoster(url: String, context: Context? = null, targetWidthPx: Int
             val bytes = conn.inputStream.use { it.readBytes() }
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx) }
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts) ?: return@withContext null
+            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx); inPreferredConfig = Bitmap.Config.HARDWARE }
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                ?: BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx) })
+                ?: return@withContext null
             if (context != null) {
                 try {
                     val dir = java.io.File(context.cacheDir, "posters").apply { mkdirs() }
@@ -378,5 +398,6 @@ suspend fun loadPoster(url: String, context: Context? = null, targetWidthPx: Int
         } catch (_: Exception) {
             null
         }
+    }
     }
 }
