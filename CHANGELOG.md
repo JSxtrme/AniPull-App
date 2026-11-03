@@ -1,3 +1,13 @@
+## 1.9-dev4.8.11 (2026-11-04, versionCode 33) — Editor's Picks: fixed snap + stacked manual swipe + Nuvio-style meta
+
+JS on 4.8.10: normal cards are nailed, Editor's Picks were left out — tap in and back out snapped after showing a huge poster (screenshots: detail sliding right, title cut off, a full-width tall Violet poster filling the screen, then snap to the 275dp card).
+Root causes found in code:
+- Carousel Details button never set tap bounds (card tap did, the button didn't, nested clickable wins), so a Details tap flew with a stale / missing src, and openTitle only set the carousel flag when src != null, so the flag could stay false from a previous grid tap. Flight then took the grid PosterCard path with a carousel-sized src, and PosterCard height = width*1.5, so a full-width src became a huge tall poster overflowing its box, then snapped to the real card at landing. Fixes: Details button now sets bounds exactly like card tap; openTitle always sets the carousel flag for a new title; grid overlay is now clipped to its lerped box, so a PosterCard can never overflow to huge again even if a src is wrong.
+- Editor's Picks rework, as JS asked: manual swipe only — the card underneath sits slightly to the side (+24dp), slightly down (+16dp), slightly smaller (0.92) and faded (0.65), easing to full size / full alpha / centred as it becomes current, current card on top (zIndex). Auto-scroll is untouched (autoScrolling flag distinguishes it from a manual drag), so auto still slides normally, no stacking.
+- Title shadow: centred drop shadow (black 0.85, offset 0,2, blur 10) on Editor's Picks titles, and same in the reverse overlay, so titles stay legible over any poster.
+- Under the title, left-aligned (NOT centred like Nuvio): rating + type line (★ score in pink, • type in muted) and up to two genre chips (translucent white, white border, 12sp) — Nuvio-style info from its VisionQuest card, in our left-aligned layout. Hidden gracefully when score/type/genres are missing.
+- Signed stable key, in-place over 4.8.10.
+
 ## 1.9-dev4.8.10 (2026-11-04, versionCode 32) — shonenx EXACT transition + scroll-during-loading fix
 
 JS, on 4.8.9, rightly frustrated: details appeared out of nowhere, poster tried to go to the previous spot, details arrived from the right then magically snapped after going black. And separately: scroll is still laggy while loading, stable once everything finishes, and still day-and-night vs Nuvio.

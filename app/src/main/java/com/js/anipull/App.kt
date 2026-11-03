@@ -99,6 +99,8 @@ import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -821,6 +823,11 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
     // cancels the 5s timer and closing it restarts it fresh — the
     // pager never jumps, it resumes from the same pick.
     val autoOn = autoScroll && !ThemeState.reduceMotion
+    // 4.8.11: autoScrolling distinguishes an auto tick from a
+    // manual drag — both set isScrollInProgress, only manual
+    // gets the stacked-cards transform below. Auto must look
+    // exactly like it does now, no stacking.
+    var autoScrolling by remember { mutableStateOf(false) }
     LaunchedEffect(carouselVisible, autoOn) {
         if (!carouselVisible || !autoOn) return@LaunchedEffect
         while (true) {
@@ -830,7 +837,8 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                 // Invisible re-centre: same pick, middle of the pager.
                 pagerState.scrollToPage(picks.size * 100 + pagerState.currentPage % picks.size)
             }
-            pagerState.animateScrollToPage(pagerState.currentPage + 1, animationSpec = tween(600, easing = FastOutSlowInEasing))
+            autoScrolling = true
+            try { pagerState.animateScrollToPage(pagerState.currentPage + 1, animationSpec = tween(600, easing = FastOutSlowInEasing)) } finally { autoScrolling = false }
         }
     }
     Column {
@@ -866,11 +874,27 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
             // 1.9-dev4.8.7: same fade-in rule as PosterCard —
             // no empty slot, no pop, tap registers throughout.
             val cardAlpha = if (reverseHiddenId != null && pick.id == reverseHiddenId) reverseFade else 1f
+            // 4.8.11 manual stacked cards: only while the user
+            // is dragging by hand (isScrollInProgress, NOT an
+            // auto tick). The card underneath the one being
+            // swiped away sits slightly to the side, slightly
+            // down, slightly smaller and faded — a deck, not a
+            // flat strip. As it becomes current, it eases to
+            // full size, full alpha, centred. Auto-scroll skips
+            // all of this, so it still slides normally.
+            val pageOffset = (pagerState.currentPage - page) + pagerState.currentPageOffsetFraction
+            val absOff = kotlin.math.abs(pageOffset).coerceIn(0f, 1f)
+            val isManual = pagerState.isScrollInProgress && !autoScrolling && !ThemeState.reduceMotion
+            val stackScale = if (isManual) 0.92f + 0.08f * (1f - absOff) else 1f
+            val stackAlpha = if (isManual) 0.65f + 0.35f * (1f - absOff) else 1f
+            val stackTransX = if (isManual) pageOffset * with(density) { 24.dp.toPx() } else 0f
+            val stackTransY = if (isManual) absOff * with(density) { 16.dp.toPx() } else 0f
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(275.dp)
-                    .graphicsLayer(scaleX = cScale, scaleY = cScale)
+                    .zIndex(if (isManual && absOff < 0.5f) 1f else 0f)
+                    .graphicsLayer(scaleX = cScale * stackScale, scaleY = cScale * stackScale, alpha = stackAlpha, translationX = stackTransX, translationY = stackTransY)
                     .clip(RoundedCornerShape(20.dp))
                     .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp))
                     .background(Color(0xFF14141F))
@@ -902,7 +926,37 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                 )
                 Column(modifier = Modifier.fillMaxSize().padding(18.dp)) {
                     Spacer(Modifier.weight(1f))
-                    Text(pick.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    // 4.8.11: centre shadow on the title so it
+                    // stays legible over any poster, plus, under
+                    // it, rating + type and up to two genre tags
+                    // — Nuvio-style info (see its VisionQuest
+                    // card), but LEFT-aligned like ours, not
+                    // centred like Nuvio's. Hidden gracefully
+                    // when a field is missing (pre-enrich picks).
+                    Text(pick.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis, style = TextStyle(shadow = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset(0f, 2f), blurRadius = 10f)))
+                    val metaParts = buildList {
+                        if (pick.score != null) add("★ ${pick.score}")
+                        if (pick.type != null) add(pick.type!!)
+                    }
+                    if (metaParts.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (pick.score != null) Text("★ ${pick.score}", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                            if (pick.score != null && pick.type != null) Text("  •  ", color = Muted, fontSize = 13.sp)
+                            if (pick.type != null) Text(pick.type!!, color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        }
+                    }
+                    val genreTags = pick.genres?.split(",", "/")?.map { it.trim() }?.filter { it.isNotBlank() }?.take(2) ?: emptyList()
+                    if (genreTags.isNotEmpty()) {
+                        Spacer(Modifier.height(6.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            genreTags.forEach { g ->
+                                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.14f)).border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) {
+                                    Text(g, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                }
+                            }
+                        }
+                    }
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Button(
@@ -920,7 +974,15 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                             Text("Download", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 14.sp)
                         }
                         Button(
-                            onClick = { onOpen(pick) },
+                            onClick = {
+                                // 4.8.11: Details used to open with
+                                // NO bounds set (card tap sets them,
+                                // this button didn't), so the flight
+                                // fell back to a stale rect. Set them
+                                // exactly like the card tap does.
+                                cardCoords[0]?.let { c -> safeBounds(c)?.let { onBounds?.invoke(pick, it) } }
+                                onOpen(pick)
+                            },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A1A24)),
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 11.dp),
                         ) {
@@ -1550,12 +1612,22 @@ fun AnipullAppInner() {
         val src = posterBounds[t.id]
         // First ever tap: dest not yet cached -> pre-measure
         // (see above), do not start slide with a null dest.
+        // 4.8.11 carousel bug: flag used to be set ONLY when
+        // src != null. A carousel Details-button tap never set
+        // bounds (see below), so src was null, flag stayed at
+        // the previous tap's value, and the flight fell back to
+        // the grid PosterCard path with a carousel-sized src —
+        // a full-width PosterCard overflowing its box to a huge
+        // tall poster, then snapping to the 275dp card at
+        // landing. That is exactly the screenshots. Now the
+        // flag is always set for a new title, bounds or not.
+        heroSourceIsCarousel = isCarousel
         if (detailCardFinal == null && detailPosterFinal == null && pendingTitle == null) {
             if (src != null) heroSourceRect = src
             pendingTitle = t; pendingIsCarousel = isCarousel
             return
         }
-        if (src != null) { heroSourceRect = src; heroSourceIsCarousel = isCarousel }
+        if (src != null) { heroSourceRect = src }
         pageClosing = false
         screen = t
     }
@@ -2307,7 +2379,26 @@ fun AnipullAppInner() {
                                 Box(Modifier.matchParentSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(colors = listOf(Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.65f)))))
                                 Column(modifier = Modifier.fillMaxSize().padding(18.dp).graphicsLayer { alpha = 1f - pr; translationX = pr * 80f }) {
                                     Spacer(Modifier.weight(1f))
-                                    Text(screen!!.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                    Text(screen!!.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis, style = TextStyle(shadow = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset(0f, 2f), blurRadius = 10f)))
+                                    if (screen!!.score != null || screen!!.type != null) {
+                                        Spacer(Modifier.height(6.dp))
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            if (screen!!.score != null) Text("★ ${screen!!.score}", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                                            if (screen!!.score != null && screen!!.type != null) Text("  •  ", color = Muted, fontSize = 13.sp)
+                                            if (screen!!.type != null) Text(screen!!.type!!, color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                        }
+                                    }
+                                    val oGenreTags = screen!!.genres?.split(",", "/")?.map { it.trim() }?.filter { it.isNotBlank() }?.take(2) ?: emptyList()
+                                    if (oGenreTags.isNotEmpty()) {
+                                        Spacer(Modifier.height(6.dp))
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            oGenreTags.forEach { g ->
+                                                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.14f)).border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) {
+                                                    Text(g, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                                }
+                                            }
+                                        }
+                                    }
                                     Spacer(Modifier.height(12.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                                         Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White).padding(horizontal = 20.dp, vertical = 11.dp)) {
@@ -2332,7 +2423,8 @@ fun AnipullAppInner() {
                         Box(
                             modifier = Modifier
                                 .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
-                                .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() }),
+                                .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() })
+                                .clip(RoundedCornerShape(16.dp)),
                         ) {
                             PosterCard(screen!!, onClick = { screen?.let { openTitle(it, isCarousel = heroSourceIsCarousel) } }, cardWidth = with(oDensity) { w.toDp() })
                         }

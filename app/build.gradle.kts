@@ -13,8 +13,8 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 32
-        versionName = "1.9-dev4.8.10"
+        versionCode = 33
+        versionName = "1.9-dev4.8.11"
     }
 
     // 1.9-dev4.8.8-stablekey: STABLE release key, Route A.
