@@ -323,7 +323,7 @@ object PosterCache {
     private val map = LinkedHashMap<String, Bitmap>()
     fun get(url: String): Bitmap? = synchronized(map) { map[url] }
     fun put(url: String, bmp: Bitmap) = synchronized(map) {
-        if (map.size > 120) map.remove(map.keys.first())
+        if (map.size > 200) map.remove(map.keys.first())
         map[url] = bmp
     }
 }

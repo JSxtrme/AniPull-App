@@ -24,6 +24,86 @@ All notable changes to the Anipull Android app are tracked here.
   Wordmark ("Ani" white + "pull" pink) unchanged. Themed-icon
   phone check still pending.
 
+### 1.9-dev4.8.2 (versionCode 20) — test build, not a release
+
+- Weekend marathon picks: the "Sun" and "Full seasons ready"
+  pills are gone — title only, as JS asked.
+- Full-card hero (JS): the detail transition no longer flies
+  just the poster. The overlay is now the whole PosterCard
+  (poster + rating pill + 1080p tag + download button +
+  title + type/year), so those elements travel with it to
+  the detail position instead of popping in there. The
+  math holds because a PosterCard's height is exactly
+  cardWidth*1.5 + a constant title/meta height, so a card
+  rendered at the lerped width is exactly the lerped height
+  — no stretch, no snap. Carousel sources keep a
+  poster-only overlay (a carousel card is not a PosterCard).
+- Home scroll optimisation (JS: fast scroll jerked/stuck
+  for instants): (1) particle ticker moved out of
+  HeaderSection into its own ParticleLayer, so it no longer
+  recomposes the whole header 20x/sec; (2) PosterCard and
+  carousel bounds are no longer reported by
+  onGloballyPositioned on every scroll frame — they are
+  captured at tap time from stored LayoutCoordinates, and
+  the detail card reports on place only; (3) Explore grid
+  no longer runs animateContentSize over 120 posters on
+  every new page; (4) PosterRows are keyed by title id;
+  (5) poster memory cache 120 → 200, so scrolling back up
+  from Explore no longer reloads home posters.
+- Carousel infinite (JS): after the 5th card it no longer
+  scrolls left back to the 1st. The pager is now 5000
+  pages (5 picks x 1000, starting in the middle) and every
+  page maps to picks[page % 5], so auto-scroll always moves
+  right and the picks just repeat. Dots show currentPage
+  % 5, and a dot tap jumps to that pick's next occurrence
+  to the right, never left. Dots also stretch wide with a
+  spring when selected, and carousel cards now press-scale
+  to 98% like posters.
+- Explore multiples of 3 (JS): each batch is now 9 titles
+  (exactly 3 rows), and while loading only complete rows
+  are shown — a row never appears with 1 card while the
+  other 2 fetch; the remainder stays buffered until the
+  next batch completes it, or until Explore finishes. While
+  the next row loads, 3 shimmering skeleton cards + title
+  text show in its place, not a "Loading more…" line.
+- Explore icon: the compass is replaced by a 2x2 grid
+  square icon, and the "Keep scrolling…" sub-heading under
+  "Explore" is removed.
+- White accent fix (JS: white killed the app): solid
+  accent backgrounds (dock pill, pink buttons, 1080p pill,
+  Download buttons, Start/Allow/Search/Retry/Browse) now
+  use OnAccent — black text/icons when the accent is
+  light (luminance > 0.6), white otherwise. Pink text on a
+  dark background was already readable, so only solid
+  backgrounds changed. White stays pickable, and it no
+  longer makes the dock unreadable.
+- Accent: one more fixed colour, Sunset (#FF6B35), plus a
+  last custom cell — a real HSV picker (saturation/value
+  square + rainbow hue slider, preview + hex, Apply) that
+  saves any colour as the accent, surviving restarts.
+- Light mode (JS, default off): Appearance → Light mode
+  toggle, mutually exclusive with AMOLED Black. Light
+  surfaces (Bg #F2F2F7, Card white, search pill white,
+  poster placeholder light grey), dark text (TextMain
+  #11111A, Muted, Faint), light dock with dark unselected
+  icons, light Settings icon boxes, and grey-lavender
+  particles instead of invisible white ones. Featured
+  carousel cards deliberately stay dark (white text on
+  them is readable and looks intentional), as does the
+  loading splash and onboarding wallpapers.
+- Translucent dock is now default ON (prefs default true
+  in the app, Settings, and dock wiring).
+- Search keyboard (JS): scrolling the "From your
+  catalog" section, or any search results, now auto-hides
+  the keyboard on scroll — hide only, never clearFocus
+  or closeSearch, so the list stays exactly where it was.
+- More animations, on my own: Settings sub-pages slide
+  in from the right (hub back in from the left), carousel
+  dots stretch, carousel press scale, explore skeleton
+  shimmer. All of them are cheap (one transition, one
+  dot row, one loading row) so they don't cost the scroll
+  smoothness above.
+
 ### 1.9-dev4.8.1 (versionCode 19) — test build, not a release
 
 - Carousel auto-scroll fix (JS, screenshots): the old effect was

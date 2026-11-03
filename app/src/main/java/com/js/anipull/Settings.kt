@@ -3,6 +3,11 @@ package com.js.anipull
 import android.content.Context
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.*
+import androidx.compose.animation.togetherWith
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,7 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-// 1.9-dev4.8.1 Settings redesign, Nuvio-style: the old single long
+// 1.9-dev4.8.2 Settings redesign, Nuvio-style: the old single long
 // page was messy, so Settings is now a hub with large headings and
 // grouped cards, and each group opens its own sub-page with the
 // same large heading (like Nuvio's "Appearance" page). Hub rows:
@@ -30,21 +35,31 @@ import androidx.compose.ui.unit.sp
 @Composable
 fun SettingsScreen(onBack: () -> Unit) {
     var subPage by remember { mutableStateOf<String?>(null) }
-    // System back on a sub-page goes back to the hub, not out of
-    // Settings — this inner BackHandler outranks the outer one in
-    // AnipullAppInner while a sub-page is open.
     BackHandler(enabled = subPage != null) { subPage = null }
-    if (subPage == null) {
-        SettingsHub(onBack = onBack, onOpen = { subPage = it })
-    } else {
-        SettingsSubPage(title = subPage!!, onBack = { subPage = null }) {
-            when (subPage) {
-                "Appearance" -> AppearancePage()
-                "Layout" -> LayoutPage()
-                "Downloads" -> DownloadsSettingsPage()
-                "Notifications" -> NotificationsPage()
-                "Storage" -> StoragePage()
-                "About" -> AboutPage()
+    // 1.9-dev4.8.2: sub-pages slide in from the right, hub slides
+    // back in from the left — same attached-pages feel as onboarding.
+    androidx.compose.animation.AnimatedContent(
+        targetState = subPage,
+        transitionSpec = {
+            if (targetState == null)
+                androidx.compose.animation.slideInHorizontally { -it } + androidx.compose.animation.fadeIn() togetherWith androidx.compose.animation.slideOutHorizontally { it } + androidx.compose.animation.fadeOut()
+            else
+                androidx.compose.animation.slideInHorizontally { it } + androidx.compose.animation.fadeIn() togetherWith androidx.compose.animation.slideOutHorizontally { -it } + androidx.compose.animation.fadeOut()
+        },
+        label = "settingsPage",
+    ) { page ->
+        if (page == null) {
+            SettingsHub(onBack = onBack, onOpen = { subPage = it })
+        } else {
+            SettingsSubPage(title = page, onBack = { subPage = null }) {
+                when (page) {
+                    "Appearance" -> AppearancePage()
+                    "Layout" -> LayoutPage()
+                    "Downloads" -> DownloadsSettingsPage()
+                    "Notifications" -> NotificationsPage()
+                    "Storage" -> StoragePage()
+                    "About" -> AboutPage()
+                }
             }
         }
     }
@@ -85,7 +100,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("1.9-dev4.8.1 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("1.9-dev4.8.2 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -119,7 +134,7 @@ fun SettingsSectionLabel(text: String) {
 @Composable
 fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
     Column(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp)).background(Card).padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).border(1.dp, Line, RoundedCornerShape(20.dp)).background(Card).padding(horizontal = 16.dp, vertical = 8.dp),
         content = content,
     )
 }
@@ -127,15 +142,15 @@ fun SettingsCard(content: @Composable ColumnScope.() -> Unit) {
 @Composable
 fun SettingsDivider() {
     Spacer(Modifier.height(4.dp))
-    Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.06f)))
+    Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Line))
     Spacer(Modifier.height(4.dp))
 }
 
 @Composable
 fun SettingsRow(icon: Int, title: String, sub: String, onClick: () -> Unit) {
     Row(modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-        Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(Color.White.copy(alpha = 0.07f)), contentAlignment = Alignment.Center) {
-            androidx.compose.foundation.Image(painter = painterResource(icon), contentDescription = null, modifier = Modifier.size(20.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White))
+        Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(if (ThemeState.lightMode) Color.Black.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.07f)), contentAlignment = Alignment.Center) {
+            androidx.compose.foundation.Image(painter = painterResource(icon), contentDescription = null, modifier = Modifier.size(20.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(if (ThemeState.lightMode) TextMain else Color.White))
         }
         Spacer(Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
@@ -157,7 +172,11 @@ val AccentOptions = listOf(
     "Anipull Pink" to "FF4D8D", "White" to "FFFFFF", "Crimson" to "FF3B30",
     "Ocean" to "0A84FF", "Violet" to "BF5AF2", "Emerald" to "30D158",
     "Amber" to "FF9F0A", "Rose" to "FF375F", "Teal" to "2DD4BF", "Lavender" to "A78BFA",
+    "Sunset" to "FF6B35",
 )
+// White stays in the list now that OnAccent fixes white-on-white
+// (black text/icons on a white pill/button). Sunset is the new
+// fixed colour JS asked for; the last cell is a custom picker. 
 
 @Composable
 fun AppearancePage() {
@@ -166,30 +185,47 @@ fun AppearancePage() {
     var amoled by remember { mutableStateOf(prefs.getBoolean("amoled", false)) }
     var sfHeadings by remember { mutableStateOf(prefs.getBoolean("sf_headings", true)) }
     var reduceMotion by remember { mutableStateOf(prefs.getBoolean("reduce_motion", false)) }
+    var lightMode by remember { mutableStateOf(prefs.getBoolean("light_mode", false)) }
+    var showPicker by remember { mutableStateOf(false) }
     fun save() {
-        prefs.edit().putString("accent_hex", accentHex).putBoolean("amoled", amoled).putBoolean("sf_headings", sfHeadings).putBoolean("reduce_motion", reduceMotion).apply()
+        prefs.edit().putString("accent_hex", accentHex).putBoolean("amoled", amoled).putBoolean("sf_headings", sfHeadings).putBoolean("reduce_motion", reduceMotion).putBoolean("light_mode", lightMode).apply()
+    }
+    if (showPicker) {
+        ColorPickerDialog(initialHex = accentHex, onDismiss = { showPicker = false }, onApply = { hex ->
+            accentHex = hex
+            try { AccentState.color = Color(("FF" + hex).toLong(16)) } catch (_: Exception) { }
+            save(); showPicker = false
+        })
     }
     SettingsSectionLabel("THEME")
     SettingsCard {
         Column(modifier = Modifier.padding(vertical = 8.dp)) {
-            AccentOptions.chunked(3).forEach { trio ->
+            val accentItems = AccentOptions + listOf("Custom" to "CUSTOM")
+            accentItems.chunked(3).forEach { trio ->
                 Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
                     trio.forEach { (name, hex) ->
-                        val color = try { Color(("FF" + hex).toLong(16)) } catch (_: Exception) { Pink }
-                        val selected = accentHex.equals(hex, ignoreCase = true)
+                        val isCustom = hex == "CUSTOM"
+                        val color = if (isCustom) {
+                            try { Color(("FF" + accentHex).toLong(16)) } catch (_: Exception) { Pink }
+                        } else {
+                            try { Color(("FF" + hex).toLong(16)) } catch (_: Exception) { Pink }
+                        }
+                        val selected = if (isCustom) AccentOptions.none { it.second.equals(accentHex, ignoreCase = true) } else accentHex.equals(hex, ignoreCase = true)
                         Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.weight(1f)) {
                             Box(
                                 modifier = Modifier.size(56.dp).clip(RoundedCornerShape(999.dp))
                                     .border(if (selected) 2.dp else 0.dp, if (selected) Color.White else Color.Transparent, RoundedCornerShape(999.dp))
-                                    .background(color).clickable {
-                                        accentHex = hex; AccentState.color = color; save()
+                                    .background(if (isCustom) androidx.compose.ui.graphics.Brush.sweepGradient(listOf(Color.Red, Color.Yellow, Color.Green, Color.Cyan, Color.Blue, Color.Magenta, Color.Red)) else androidx.compose.ui.graphics.Brush.linearGradient(listOf(color, color)))
+                                    .clickable {
+                                        if (isCustom) showPicker = true else { accentHex = hex; AccentState.color = color; save() }
                                     },
                                 contentAlignment = Alignment.Center,
                             ) {
-                                if (selected) Text("✓", color = if (hex == "FFFFFF") Color.Black else Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                if (isCustom) Text("+", color = Color.White, fontSize = 26.sp, fontWeight = FontWeight.Bold)
+                                else if (selected) Text("✓", color = if (color.luminance() > 0.6f) Color.Black else Color.White, fontSize = 22.sp, fontWeight = FontWeight.Bold)
                             }
                             Spacer(Modifier.height(6.dp))
-                            Text(name, color = if (selected) Color.White else Muted, fontSize = 12.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
+                            Text(name, color = if (selected) TextMain else Muted, fontSize = 12.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal)
                         }
                     }
                     repeat(3 - trio.size) { Spacer(Modifier.weight(1f)) }
@@ -202,7 +238,9 @@ fun AppearancePage() {
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("DISPLAY")
     SettingsCard {
-        SettingsToggle("AMOLED Black", "Use pure black backgrounds for OLED screens.", amoled) { amoled = it; ThemeState.amoled = it; save() }
+        SettingsToggle("Light mode", "Light surfaces, dark text. Default off. Turning it on turns AMOLED off, and vice versa.", lightMode) { lightMode = it; ThemeState.lightMode = it; if (it) { amoled = false; ThemeState.amoled = false }; save() }
+        SettingsDivider()
+        SettingsToggle("AMOLED Black", "Use pure black backgrounds for OLED screens.", amoled) { amoled = it; ThemeState.amoled = it; if (it) { lightMode = false; ThemeState.lightMode = false }; save() }
         SettingsDivider()
         SettingsToggle("SF headings", "Headings in SF Pro Display Semibold, body in Outfit. Off = Outfit everywhere.", sfHeadings) { sfHeadings = it; ThemeState.sfHeadings = it; save() }
         SettingsDivider()
@@ -214,7 +252,7 @@ fun AppearancePage() {
 @Composable
 fun LayoutPage() {
     val prefs = SettingsPrefs()
-    var translucentDock by remember { mutableStateOf(prefs.getBoolean("translucent_dock", false)) }
+    var translucentDock by remember { mutableStateOf(prefs.getBoolean("translucent_dock", true)) }
     var dockMode by remember { mutableStateOf(prefs.getString("dock_mode", "adaptive") ?: "adaptive") }
     var carouselAuto by remember { mutableStateOf(prefs.getBoolean("carousel_auto", true)) }
     var particles by remember { mutableStateOf(prefs.getBoolean("particles", true)) }
@@ -410,7 +448,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("1.9-dev4.8.1 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("1.9-dev4.8.2 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")
@@ -432,4 +470,81 @@ fun AboutPage() {
             Text("Downloads are demo-only until 2.0, when the real engine, queue, pause/resume and foreground service land.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
         }
     }
+}
+
+// ---- Custom colour picker ------------------------------------------------
+// Easiest real picker: an HSV square (saturation left→right, value
+// top→bottom) plus a rainbow hue slider. Drag anywhere on the square,
+// slide the hue, see the preview + hex, tap Apply. No preset list,
+// any colour the user wants, including white — which no longer
+// breaks the app because solid accent backgrounds use OnAccent.
+@Composable
+fun ColorPickerDialog(initialHex: String, onDismiss: () -> Unit, onApply: (String) -> Unit) {
+    val startHsv = remember {
+        val hsv = FloatArray(3)
+        try {
+            val c = android.graphics.Color.parseColor("#" + initialHex)
+            android.graphics.Color.colorToHSV(c, hsv)
+        } catch (_: Exception) { hsv[0] = 330f; hsv[1] = 1f; hsv[2] = 1f }
+        hsv
+    }
+    var hue by remember { mutableStateOf(startHsv[0]) }
+    var sat by remember { mutableStateOf(startHsv[1]) }
+    var value by remember { mutableStateOf(startHsv[2]) }
+    val current = Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, sat, value)))
+    val hex = String.format("%02X%02X%02X", (current.red * 255).toInt(), (current.green * 255).toInt(), (current.blue * 255).toInt())
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Pick an accent", color = TextMain, fontWeight = FontWeight.Bold, fontFamily = HeadingFont) },
+        text = {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(modifier = Modifier.size(48.dp).clip(RoundedCornerShape(999.dp)).background(current).border(1.dp, Color.White.copy(alpha = 0.2f), RoundedCornerShape(999.dp)))
+                    Spacer(Modifier.width(12.dp))
+                    Text("#$hex", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+                Spacer(Modifier.height(16.dp))
+                val hueColor = Color(android.graphics.Color.HSVToColor(floatArrayOf(hue, 1f, 1f)))
+                androidx.compose.foundation.layout.BoxWithConstraints(
+                    modifier = Modifier.fillMaxWidth().height(200.dp).clip(RoundedCornerShape(16.dp))
+                        .background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color.White, hueColor)))
+                        .pointerInput(Unit) {
+                            detectTapGestures { offset ->
+                                sat = (offset.x / size.width).coerceIn(0f, 1f)
+                                value = 1f - (offset.y / size.height).coerceIn(0f, 1f)
+                            }
+                        }
+                        .pointerInput(Unit) {
+                            detectDragGestures { change, _ ->
+                                sat = (change.position.x / size.width).coerceIn(0f, 1f)
+                                value = 1f - (change.position.y / size.height).coerceIn(0f, 1f)
+                            }
+                        },
+                ) {
+                    Box(modifier = Modifier.matchParentSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(Color.Transparent, Color.Black))))
+                    Box(
+                        modifier = Modifier
+                            .offset(maxWidth * sat - 12.dp, maxHeight * (1f - value) - 12.dp)
+                            .size(24.dp).clip(RoundedCornerShape(999.dp)).border(2.dp, Color.White, RoundedCornerShape(999.dp)),
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Box(modifier = Modifier.fillMaxWidth().height(24.dp).clip(RoundedCornerShape(999.dp)).background(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(Color.Red, Color.Yellow, Color.Green, Color.Cyan, Color.Blue, Color.Magenta, Color.Red)))) {
+                    Slider(
+                        value = hue, onValueChange = { hue = it }, valueRange = 0f..360f,
+                        colors = SliderDefaults.colors(thumbColor = Color.White, activeTrackColor = Color.Transparent, inactiveTrackColor = Color.Transparent),
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                }
+            }
+        },
+        confirmButton = {
+            Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(current).clickable { onApply(hex) }.padding(horizontal = 20.dp, vertical = 10.dp)) {
+                Text("Apply", color = if (current.luminance() > 0.6f) Color.Black else Color.White, fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            Text("Cancel", color = Muted, modifier = Modifier.clickable(onClick = onDismiss).padding(horizontal = 12.dp, vertical = 10.dp))
+        },
+    )
 }
