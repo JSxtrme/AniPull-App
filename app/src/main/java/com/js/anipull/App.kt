@@ -894,7 +894,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                     .fillMaxWidth()
                     .height(275.dp)
                     .zIndex(if (isManual && absOff < 0.5f) 1f else 0f)
-                    .graphicsLayer(scaleX = cScale * stackScale, scaleY = cScale * stackScale, alpha = stackAlpha, translationX = stackTransX, translationY = stackTransY)
+                    .graphicsLayer(scaleX = cScale * stackScale, scaleY = cScale * stackScale, alpha = stackAlpha * cardAlpha, translationX = stackTransX, translationY = stackTransY)
                     .clip(RoundedCornerShape(20.dp))
                     .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp))
                     .background(Color(0xFF14141F))
@@ -906,7 +906,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                         onOpen(pick)
                     },
             ) {
-                PosterImage(pick.poster, Modifier.matchParentSize().alpha(cardAlpha), with(LocalDensity.current) { config.screenWidthDp.dp.toPx().toInt() })
+                PosterImage(pick.poster, Modifier.matchParentSize(), with(LocalDensity.current) { config.screenWidthDp.dp.toPx().toInt() })
                 // 1.9-dev4.8.4: reference-style card. No top pill
                 // (no spotlight text in our data), no dark horizontal
                 // gradient hiding the poster, no full-width buttons.
@@ -920,7 +920,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                 Box(
                     Modifier.matchParentSize().background(
                         Brush.verticalGradient(
-                            colors = listOf(Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.65f))
+                            colors = listOf(Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.78f))
                         )
                     )
                 )
@@ -938,12 +938,18 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                         if (pick.score != null) add("★ ${pick.score}")
                         if (pick.type != null) add(pick.type!!)
                     }
+                    // 4.8.12 readability: format/genre/rating were
+                    // gray or pink text straight over a bright
+                    // poster — hard to read. Now every meta item
+                    // sits in a dock-like translucent pill: dark
+                    // translucent (Black 0.60) + white border +
+                    // white text, legible over any poster, left-
+                    // aligned like ours, not centred like Nuvio.
                     if (metaParts.isNotEmpty()) {
                         Spacer(Modifier.height(6.dp))
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (pick.score != null) Text("★ ${pick.score}", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                            if (pick.score != null && pick.type != null) Text("  •  ", color = Muted, fontSize = 13.sp)
-                            if (pick.type != null) Text(pick.type!!, color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                            if (pick.score != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text("★ ${pick.score}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                            if (pick.type != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text(pick.type!!, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
                         }
                     }
                     val genreTags = pick.genres?.split(",", "/")?.map { it.trim() }?.filter { it.isNotBlank() }?.take(2) ?: emptyList()
@@ -951,7 +957,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                         Spacer(Modifier.height(6.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             genreTags.forEach { g ->
-                                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.14f)).border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) {
+                                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) {
                                     Text(g, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                                 }
                             }
@@ -1944,7 +1950,7 @@ fun AnipullAppInner() {
         })
     } else if (showLoading) {
         LoadingScreen()
-    } else Box(modifier = Modifier.fillMaxSize().background(Bg).graphicsLayer { translationX = if (screen != null) -pageProgress * screenWidthPx0 else 0f }) {
+    } else Box(modifier = Modifier.fillMaxSize().background(Bg).offset { androidx.compose.ui.unit.IntOffset(if (screen != null) (-pageProgress * screenWidthPx0).toInt() else 0, 0) }) {
     // Haze source: the whole tab content behind the dock, so the
     // translucent dock (when enabled) blurs real posters, not a
     // solid colour. The dock itself sits outside this inner Box.
@@ -2356,7 +2362,13 @@ fun AnipullAppInner() {
         // poster, flying into an empty slot on both sides.
         if (pageProgress > 0f && pageProgress < 1f && heroSourceRect != null) {
             val src = heroSourceRect!!
-            val dst = if (heroSourceIsCarousel) detailPosterFinal else detailCardFinal
+            // 4.8.12: derive carousel from src width too, not
+            // flag alone. A carousel src is full-width (>200dp),
+            // a grid src is ~118dp. If the flag is ever stale,
+            // a wide src can no longer fall into the grid
+            // PosterCard path and balloon to a huge tall poster.
+            val isCarouselFlight = heroSourceIsCarousel || src.width > with(LocalDensity.current) { 200.dp.toPx() }
+            val dst = if (isCarouselFlight) detailPosterFinal else detailCardFinal
             if (dst != null) {
                 val pr = pageProgress
                 val left = src.left + (dst.left - src.left) * pr
@@ -2365,27 +2377,31 @@ fun AnipullAppInner() {
                 val h = src.height + (dst.height - src.height) * pr
                 if (w > 1f && h > 1f && w.isFinite() && h.isFinite() && left.isFinite() && top.isFinite()) {
                     val oDensity = LocalDensity.current
-                    if (heroSourceIsCarousel) {
+                    if (isCarouselFlight) {
                         Box(
                             modifier = Modifier
                                 .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
                                 .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() })
                                 .clip(RoundedCornerShape(16.dp))
                                 .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
-                                .clickable { screen?.let { openTitle(it, isCarousel = heroSourceIsCarousel) } },
+                                .clickable { screen?.let { openTitle(it, isCarousel = isCarouselFlight) } },
                         ) {
                             PosterImage(screen!!.poster, Modifier.fillMaxSize())
-                            if (pageClosing) {
-                                Box(Modifier.matchParentSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(colors = listOf(Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.65f)))))
+                            // 4.8.12: meta shows on BOTH directions,
+                            // fading with 1-pr: forward it fades out
+                            // inside the shrinking poster as detail
+                            // info takes over, reverse it fades back
+                            // in as the poster grows to carousel size.
+                            if (true) {
+                                Box(Modifier.matchParentSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(colors = listOf(Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.78f)))))
                                 Column(modifier = Modifier.fillMaxSize().padding(18.dp).graphicsLayer { alpha = 1f - pr; translationX = pr * 80f }) {
                                     Spacer(Modifier.weight(1f))
                                     Text(screen!!.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis, style = TextStyle(shadow = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset(0f, 2f), blurRadius = 10f)))
                                     if (screen!!.score != null || screen!!.type != null) {
                                         Spacer(Modifier.height(6.dp))
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            if (screen!!.score != null) Text("★ ${screen!!.score}", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                                            if (screen!!.score != null && screen!!.type != null) Text("  •  ", color = Muted, fontSize = 13.sp)
-                                            if (screen!!.type != null) Text(screen!!.type!!, color = Muted, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            if (screen!!.score != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text("★ ${screen!!.score}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                                            if (screen!!.type != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text(screen!!.type!!, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
                                         }
                                     }
                                     val oGenreTags = screen!!.genres?.split(",", "/")?.map { it.trim() }?.filter { it.isNotBlank() }?.take(2) ?: emptyList()
@@ -2393,7 +2409,7 @@ fun AnipullAppInner() {
                                         Spacer(Modifier.height(6.dp))
                                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                                             oGenreTags.forEach { g ->
-                                                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.14f)).border(1.dp, Color.White.copy(alpha = 0.25f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) {
+                                                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) {
                                                     Text(g, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
                                                 }
                                             }
@@ -2426,7 +2442,7 @@ fun AnipullAppInner() {
                                 .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() })
                                 .clip(RoundedCornerShape(16.dp)),
                         ) {
-                            PosterCard(screen!!, onClick = { screen?.let { openTitle(it, isCarousel = heroSourceIsCarousel) } }, cardWidth = with(oDensity) { w.toDp() })
+                            PosterCard(screen!!, onClick = { screen?.let { openTitle(it, isCarousel = isCarouselFlight) } }, cardWidth = with(oDensity) { w.toDp() })
                         }
                     }
                 }
@@ -3199,10 +3215,10 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
                     Text(title.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont)
                     Spacer(Modifier.height(4.dp))
                     val meta = listOfNotNull(title.type, title.year).joinToString(" · ")
-                    if (meta.isNotBlank()) Text(meta, color = Muted, fontSize = 13.sp)
+                    if (meta.isNotBlank()) Text(meta, color = TextMain, fontSize = 13.sp)
                     Spacer(Modifier.height(4.dp))
                     if (title.score != null) Text("★ ${title.score}", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                    if (title.genres != null) Text(title.genres, color = Muted, fontSize = 13.sp)
+                    if (title.genres != null) Text(title.genres, color = TextMain, fontSize = 13.sp)
                     if (title.status != null) Text(title.status, color = Teal, fontSize = 13.sp)
                     if (isFrierenDemo) Text("You are currently in Season $season", color = Lavender, fontSize = 13.sp)
                 }
