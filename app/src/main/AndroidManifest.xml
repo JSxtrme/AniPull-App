@@ -12,6 +12,15 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="Anipull"
         android:theme="@android:style/Theme.Material.NoActionBar">
+        <receiver
+            android:name=".DownloadActionReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.js.anipull.PAUSE" />
+                <action android:name="com.js.anipull.RESUME" />
+                <action android:name="com.js.anipull.CANCEL" />
+            </intent-filter>
+        </receiver>
         <activity
             android:name=".MainActivity"
             android:exported="true">

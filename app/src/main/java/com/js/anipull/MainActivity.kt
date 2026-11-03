@@ -15,6 +15,9 @@ class MainActivity : ComponentActivity() {
         // bar instead of under it (the bug in the last debug build).
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        // Load saved accent/theme before first composition, so the
+        // app never flashes default pink on launch.
+        loadThemePrefs(this)
         setContent {
             AnipullTheme {
                 Surface(modifier = Modifier.fillMaxSize()) {

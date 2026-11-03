@@ -145,22 +145,46 @@ private val OutfitFont = FontFamily(
 private val SFProDisplaySemibold = FontFamily(
     Font(R.font.sf_pro_display_semibold, FontWeight.SemiBold),
 )
-private val HeadingFont = FontFamily(
+private val SFHeadingFamily = FontFamily(
     Font(R.font.sf_pro_display_semibold, FontWeight.Normal),
     Font(R.font.sf_pro_display_semibold, FontWeight.SemiBold),
     Font(R.font.sf_pro_display_semibold, FontWeight.Bold),
     Font(R.font.sf_pro_display_semibold, FontWeight.ExtraBold),
 )
+// 1.9-dev4.8.1: accent, AMOLED and heading font are now LIVE state,
+// not fixed vals, so Settings can change them and the whole app
+// recomposes. Pink/Bg/Card/HeadingFont are getters over that state —
+// every existing usage keeps working, and AnipullTheme (which reads
+// Pink) subscribes the whole tree to accent changes. Saved in
+// SharedPreferences "anipull_settings" (accent_hex, amoled,
+// sf_headings, reduce_motion); MainActivity loads them before
+// setContent so there is no pink flash on launch.
+object AccentState { var color by mutableStateOf(Color(0xFFFF4D8D)) }
+object ThemeState {
+    var amoled by mutableStateOf(false)
+    var sfHeadings by mutableStateOf(true)
+    var reduceMotion by mutableStateOf(false)
+}
+val Pink: Color get() = AccentState.color
+val HeadingFont: FontFamily get() = if (ThemeState.sfHeadings) SFHeadingFamily else OutfitFont
 
-val Bg = Color(0xFF07070C)
-private val Bg2 = Color(0xFF0B0B13)
-private val Card = Color(0xFF16161F)
-private val TextMain = Color(0xFFF5F5FA)
-private val Muted = Color(0xFFA2A2B5)
-private val Faint = Color(0xFF6D6D82)
-private val Pink = Color(0xFFFF4D8D)
+val Bg: Color get() = if (ThemeState.amoled) Color.Black else Color(0xFF07070C)
+val Bg2: Color get() = if (ThemeState.amoled) Color.Black else Color(0xFF0B0B13)
+val Card: Color get() = if (ThemeState.amoled) Color(0xFF111114) else Color(0xFF16161F)
+
+fun loadThemePrefs(context: android.content.Context) {
+    val pr = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+    val hex = pr.getString("accent_hex", "FF4D8D") ?: "FF4D8D"
+    try { AccentState.color = Color(("FF" + hex).toLong(16)) } catch (_: Exception) { }
+    ThemeState.amoled = pr.getBoolean("amoled", false)
+    ThemeState.sfHeadings = pr.getBoolean("sf_headings", true)
+    ThemeState.reduceMotion = pr.getBoolean("reduce_motion", false)
+}
+val TextMain = Color(0xFFF5F5FA)
+val Muted = Color(0xFFA2A2B5)
+val Faint = Color(0xFF6D6D82)
 private val Lavender = Color(0xFFA78BFA)
-private val Teal = Color(0xFF2DD4BF)
+val Teal = Color(0xFF2DD4BF)
 
 @Composable
 fun AnipullTheme(content: @Composable () -> Unit) {
@@ -382,7 +406,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val pressScale by animateFloatAsState(
-        targetValue = if (pressed) 0.96f else 1f,
+        targetValue = if (pressed && !ThemeState.reduceMotion) 0.96f else 1f,
         animationSpec = spring(stiffness = 400f, dampingRatio = 0.7f),
         label = "posterPress",
     )
@@ -390,14 +414,22 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
         modifier = Modifier
             .width(cardWidth)
             .graphicsLayer(scaleX = pressScale, scaleY = pressScale)
-            .onGloballyPositioned { coords -> onBounds?.invoke(coords.boundsInWindow()) }
             .clickable(interactionSource = interaction, indication = null, onClick = onClick),
     ) {
         Box(
             modifier = Modifier
                 .size(width = cardWidth, height = cardHeight)
                 .clip(RoundedCornerShape(16.dp))
-                .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp)),
+                .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
+                // 1.9-dev4.8.1 hero fix: bounds used to be the WHOLE
+                // card (poster + title + meta, ~237dp tall), so the
+                // hero overlay poster filled that tall rect and then
+                // snapped/croped back to the 177dp poster once the
+                // hero ended — the vertical stretch JS saw. Now it
+                // reports the poster image only (118x177, 2:3), so
+                // source, overlay and detail poster are the same
+                // rect and there is nothing to snap back from.
+                .onGloballyPositioned { coords -> onBounds?.invoke(coords.boundsInWindow()) },
         ) {
             PosterImage(title.poster, Modifier.fillMaxSize())
             val topLabel = when {
@@ -546,12 +578,23 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
     val density = LocalDensity.current
     val config = LocalConfiguration.current
     val screenHeightPx = with(density) { config.screenHeightDp.dp.toPx() }
-    LaunchedEffect(carouselVisible, autoScroll, pagerState.currentPage) {
-        if (!carouselVisible || !autoScroll) return@LaunchedEffect
-        kotlinx.coroutines.delay(5000)
-        if (pagerState.isScrollInProgress) return@LaunchedEffect
-        val next = (pagerState.currentPage + 1) % picks.size
-        pagerState.animateScrollToPage(next, animationSpec = tween(600, easing = FastOutSlowInEasing))
+    // 1.9-dev4.8.1 carousel fix: the old effect was keyed on
+    // currentPage, and currentPage changes MID-animation (as soon as
+    // the pager crosses halfway), which cancelled the effect and
+    // therefore cancelled animateScrollToPage — so auto-scroll kept
+    // stopping in the middle of two cards. Now it is a loop: delay,
+    // animate fully, repeat. A manual drag just delays the next tick
+    // (isScrollInProgress check), it never cancels an animation.
+    // Reduce-motion also forces auto-scroll off.
+    val autoOn = autoScroll && !ThemeState.reduceMotion
+    LaunchedEffect(carouselVisible, autoOn) {
+        if (!carouselVisible || !autoOn) return@LaunchedEffect
+        while (true) {
+            kotlinx.coroutines.delay(5000)
+            if (pagerState.isScrollInProgress) continue
+            val next = (pagerState.currentPage + 1) % picks.size
+            pagerState.animateScrollToPage(next, animationSpec = tween(600, easing = FastOutSlowInEasing))
+        }
     }
     Column {
         HorizontalPager(
@@ -563,9 +606,17 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                 },
         ) { page ->
             val pick = picks[page]
+            // 1.9-dev4.8.1: uniform, bigger cards. The old card height
+            // was whatever its title wrapped to, so during a pager
+            // transition one card looked much bigger than its neighbour
+            // — JS liked that bigger one, so ALL cards are now that
+            // size and a touch larger: a fixed 275dp, poster filling
+            // the whole card, buttons pinned to the bottom. No more
+            // tall/short cards side by side.
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .height(275.dp)
                     .clip(RoundedCornerShape(20.dp))
                     .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp))
                     .background(Color(0xFF14141F))
@@ -591,7 +642,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                         )
                     )
                 )
-                Column(modifier = Modifier.padding(18.dp)) {
+                Column(modifier = Modifier.fillMaxSize().padding(18.dp)) {
                     Box(
                         modifier = Modifier
                             .clip(RoundedCornerShape(999.dp))
@@ -604,7 +655,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                     }
                     Spacer(Modifier.height(10.dp))
                     Text(pick.title, color = TextMain, fontSize = 25.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 28.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                    Spacer(Modifier.height(15.dp))
+                    Spacer(Modifier.weight(1f))
                     Button(
                         onClick = notWired,
                         colors = ButtonDefaults.buttonColors(containerColor = Pink),
@@ -1130,6 +1181,10 @@ fun AnipullAppInner() {
     // here in the composable body and .then() the result.
     val hazeSourceModifier: Modifier = if (context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("translucent_dock", false))
         Modifier.hazeSource(hazeState) else Modifier
+    // 1.9-dev4.8.1: Show Explore toggle, re-read on every composition
+    // (tab switches recompose this), so turning it off in Settings
+    // hides Explore and un-gates the footer immediately.
+    val showExplore = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("show_explore", true)
     val scope = rememberCoroutineScope()
     val listState = rememberLazyListState()
     val appFocusManager = LocalFocusManager.current
@@ -1408,7 +1463,8 @@ fun AnipullAppInner() {
                     modifier = Modifier
                         .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
                         .size(with(density) { w.toDp() }, with(density) { h.toDp() })
-                        .clip(RoundedCornerShape(16.dp)),
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp)),
                 ) {
                     PosterImage(screen!!.poster, Modifier.fillMaxSize())
                 }
@@ -1619,7 +1675,7 @@ fun AnipullAppInner() {
             // when it finally stops does the footer below appear.
             // This is what the Downloads "Browse anime" button points
             // at: home no longer has only a handful of picks.
-            if (!isSearchFocused && query.isBlank() && liveSections != null) {
+            if (!isSearchFocused && query.isBlank() && liveSections != null && showExplore) {
                 item {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         androidx.compose.foundation.Image(
@@ -1682,7 +1738,7 @@ fun AnipullAppInner() {
             // it stayed visible when the search box was tapped
             // (short focused list) and while results were fetching
             // (short skeleton list) — both screenshots JS circled.
-            if (!isSearchFocused && query.isBlank() && !searching && (liveSections == null || exploreFinished)) item {
+            if (!isSearchFocused && query.isBlank() && !searching && (liveSections == null || exploreFinished || !showExplore)) item {
                 Column {
                     LogoRow()
                     Spacer(Modifier.height(8.dp))
@@ -2303,262 +2359,57 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
                 .padding(horizontal = 20.dp, vertical = 11.dp),
             contentAlignment = Alignment.Center,
         ) { Text("Browse anime", color = Color.White, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
-    }
-}
-
-@Composable
-fun SettingsScreen(onBack: () -> Unit) {
-    val ctx = LocalContext.current
-    val prefs = remember { ctx.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE) }
-    // Saved now, applied when the resolver lands — downloads are still
-    // demo-only, so these do not download anything yet. Saying so here
-    // beats silently pretending they work.
-    var parallel by remember { mutableStateOf(prefs.getInt("parallel", 2)) }
-    var speedLimit by remember { mutableStateOf(prefs.getInt("speed_mbps", 0)) }
-    var folder by remember { mutableStateOf(prefs.getString("folder", "Downloads/Anipull") ?: "Downloads/Anipull") }
-    var quality by remember { mutableStateOf(prefs.getString("quality", "1080p") ?: "1080p") }
-    var language by remember { mutableStateOf(prefs.getString("language", "Sub") ?: "Sub") }
-    var wifiOnly by remember { mutableStateOf(prefs.getBoolean("wifi_only", true)) }
-    var askSeason by remember { mutableStateOf(prefs.getBoolean("ask_season", true)) }
-    var subs by remember { mutableStateOf(prefs.getBoolean("subs", true)) }
-    var particles by remember { mutableStateOf(prefs.getBoolean("particles", true)) }
-    var translucentDock by remember { mutableStateOf(prefs.getBoolean("translucent_dock", false)) }
-    var dockMode by remember { mutableStateOf(prefs.getString("dock_mode", "adaptive") ?: "adaptive") }
-    var carouselAuto by remember { mutableStateOf(prefs.getBoolean("carousel_auto", true)) }
-    var dockMenuOpen by remember { mutableStateOf(false) }
-    var cacheMsg by remember { mutableStateOf<String?>(null) }
-    fun save() {
-        prefs.edit()
-            .putInt("parallel", parallel)
-            .putInt("speed_mbps", speedLimit)
-            .putString("folder", folder)
-            .putString("quality", quality)
-            .putString("language", language)
-            .putBoolean("wifi_only", wifiOnly)
-            .putBoolean("ask_season", askSeason)
-            .putBoolean("subs", subs)
-            .putBoolean("particles", particles)
-            .putBoolean("translucent_dock", translucentDock)
-            .putString("dock_mode", dockMode)
-            .putBoolean("carousel_auto", carouselAuto)
-            .apply()
-    }
-    // System folder picker — no hand-typing a path. The picked tree Uri
-    // is stored too (folder_uri) so the download engine can later write
-    // via DocumentFile; the human-readable path is what shows in the field.
-    val folderPicker = androidx.activity.compose.rememberLauncherForActivityResult(
-        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree(),
-    ) { uri ->
-        if (uri != null) {
-            try {
-                ctx.contentResolver.takePersistableUriPermission(
-                    uri,
-                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-                )
-            } catch (_: Exception) { }
-            val raw = java.net.URLDecoder.decode(uri.toString(), "UTF-8")
-            val afterColon = raw.substringAfter(":", raw)
-            val display = afterColon.removePrefix("/tree/").replace("primary:", "").trim()
-            if (display.isNotBlank()) {
-                folder = display
-                prefs.edit().putString("folder", display).putString("folder_uri", uri.toString()).apply()
+        // 1.9-dev4.8.1: download notification DESIGN, previewable now.
+        // Real downloads land in 2.0, but this posts the exact
+        // notification that design specifies (see Notifications.kt):
+        // low-importance Downloads channel, per-episode progress +
+        // MB/s + Pause/Cancel, then a completion ping to Downloads.
+        // Pause/Cancel in the shade really pause/cancel this preview
+        // via DownloadActionReceiver, they are not dead buttons.
+        Spacer(Modifier.height(16.dp))
+        val dlCtx = LocalContext.current
+        val dlScope = rememberCoroutineScope()
+        var previewMsg by remember { mutableStateOf<String?>(null) }
+        fun startPreview() {
+            val pr = dlCtx.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+            if (!pr.getBoolean("notif_enabled", true)) { previewMsg = "Download notifications are off in Settings → Notifications."; return }
+            DownloadNotifications.isPaused = false
+            DownloadNotifications.isCancelled = false
+            dlScope.launch {
+                var progress = 0
+                while (progress <= 100) {
+                    if (DownloadNotifications.isCancelled) { previewMsg = "Preview cancelled from the notification."; return@launch }
+                    if (DownloadNotifications.isPaused) { kotlinx.coroutines.delay(500); continue }
+                    DownloadNotifications.showProgress(dlCtx, "Frieren — Episode 1", progress, 8.4, paused = false)
+                    previewMsg = "Preview running: $progress% — check your notification shade."
+                    kotlinx.coroutines.delay(1200)
+                    progress += 10
+                }
+                if (pr.getBoolean("completion_enabled", true)) DownloadNotifications.showComplete(dlCtx, "Frieren — Episode 1")
+                else DownloadNotifications.cancelProgress(dlCtx)
+                previewMsg = "Preview complete — completion ping sent (if enabled in Settings)."
             }
         }
-    }
-    LazyColumn(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Bg)
-            .statusBarsPadding()
-            .navigationBarsPadding()
-            .padding(horizontal = 16.dp),
-    ) {
-        item {
-            Text("← Back", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                modifier = Modifier.clickable(onClick = onBack))
-            Spacer(Modifier.height(16.dp))
-            Text("Settings", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "Saved on this phone. Download settings apply once the download engine lands — right now downloads are still demo-only.",
-                color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
-            )
-            Spacer(Modifier.height(24.dp))
+        val notifLauncher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { granted ->
+            if (granted) startPreview() else previewMsg = "Notification permission denied — the preview can't show."
         }
-        item {
-            Text("DOWNLOADS", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+        Box(
+            modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, Pink, RoundedCornerShape(999.dp))
+                .clickable {
+                    val granted = if (android.os.Build.VERSION.SDK_INT >= 33)
+                        androidx.core.content.ContextCompat.checkSelfPermission(dlCtx, android.Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                    else true
+                    if (granted) startPreview() else notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+                }
+                .padding(horizontal = 20.dp, vertical = 11.dp),
+            contentAlignment = Alignment.Center,
+        ) { Text("Preview download notification", color = Pink, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
+        if (previewMsg != null) {
             Spacer(Modifier.height(12.dp))
-            Text("Parallel downloads", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(
-                if (parallel <= 1) "1 episode at a time" else "$parallel episodes at once",
-                color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-            )
-            androidx.compose.material3.Slider(
-                value = parallel.toFloat(), onValueChange = { parallel = it.toInt(); save() },
-                valueRange = 1f..5f, steps = 3,
-            )
-            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                Text("1", color = Faint, fontSize = 11.sp)
-                Text("5", color = Faint, fontSize = 11.sp)
-            }
-            Spacer(Modifier.height(20.dp))
-            Text("Download speed limit", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(
-                if (speedLimit == 0) "Unlimited" else "$speedLimit MB/s",
-                color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-            )
-            androidx.compose.material3.Slider(
-                value = speedLimit.toFloat(), onValueChange = { speedLimit = it.toInt(); save() },
-                valueRange = 0f..10f, steps = 9,
-            )
-            Row(horizontalArrangement = Arrangement.SpaceBetween, modifier = Modifier.fillMaxWidth()) {
-                Text("Unlimited", color = Faint, fontSize = 11.sp)
-                Text("10 MB/s", color = Faint, fontSize = 11.sp)
-            }
-            Spacer(Modifier.height(20.dp))
-            Text("Download folder", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(
-                    modifier = Modifier
-                        .weight(1f)
-                        .clip(RoundedCornerShape(12.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp))
-                        .background(Color(0xFF10101A))
-                        .padding(horizontal = 12.dp, vertical = 11.dp),
-                ) {
-                    BasicTextField(
-                        value = folder,
-                        onValueChange = { folder = it; save() },
-                        singleLine = true,
-                        textStyle = TextStyle(color = TextMain, fontSize = 14.sp),
-                        cursorBrush = SolidColor(Pink),
-                    )
-                }
-                Spacer(Modifier.width(8.dp))
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(999.dp))
-                        .background(Pink)
-                        .clickable { folderPicker.launch(null) }
-                        .padding(horizontal = 14.dp, vertical = 11.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        androidx.compose.foundation.Image(
-                            painter = painterResource(R.drawable.ic_folder),
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp),
-                            colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White),
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text("Browse", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                    }
-                }
-            }
-            Text("Tap Browse to pick a folder from your phone — no need to type a path by hand.", color = Faint, fontSize = 12.sp)
-            Spacer(Modifier.height(20.dp))
-            Text("Preferred quality", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("360p", "480p", "720p", "1080p").forEach { q ->
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .border(1.dp, if (quality == q) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
-                            .background(if (quality == q) Pink.copy(alpha = 0.2f) else Card)
-                            .clickable { quality = q; save() }
-                            .padding(horizontal = 14.dp, vertical = 8.dp),
-                        contentAlignment = Alignment.Center,
-                    ) { Text(q, color = if (quality == q) Color.White else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
-                }
-            }
-            Spacer(Modifier.height(20.dp))
-            Text("Preferred language", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("Sub", "Dub").forEach { lang ->
-                    Box(
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(999.dp))
-                            .border(1.dp, if (language == lang) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
-                            .background(if (language == lang) Pink.copy(alpha = 0.2f) else Card)
-                            .clickable { language = lang; save() }
-                            .padding(horizontal = 18.dp, vertical = 8.dp),
-                        contentAlignment = Alignment.Center,
-                    ) { Text(lang, color = if (language == lang) Color.White else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
-                }
-            }
-            Text("Sub = Japanese audio with subtitles. Dub = English audio.", color = Faint, fontSize = 12.sp)
-            Spacer(Modifier.height(24.dp))
+            Text(previewMsg!!, color = Muted, fontSize = 13.sp, textAlign = TextAlign.Center)
         }
-        item {
-            Text("APPEARANCE", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
-            Spacer(Modifier.height(8.dp))
-        }
-        item { SettingsToggle("Translucent dock", "Real backdrop blur on the dock (Haze), not full liquid glass. Off = solid dock.", translucentDock) { translucentDock = it; save() } }
-        item {
-            Text("Dock behaviour", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            val dockLabel = when (dockMode) { "expanded" -> "Always expanded"; "compact" -> "Always compact"; else -> "Adaptive" }
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp))
-                    .background(Card)
-                    .clickable { dockMenuOpen = true }
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-            ) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(dockLabel, color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("▾", color = Muted, fontSize = 14.sp)
-                }
-                DropdownMenu(expanded = dockMenuOpen, onDismissRequest = { dockMenuOpen = false }) {
-                    DropdownMenuItem(text = { Text("Always expanded") }, onClick = { dockMode = "expanded"; save(); dockMenuOpen = false })
-                    DropdownMenuItem(text = { Text("Always compact") }, onClick = { dockMode = "compact"; save(); dockMenuOpen = false })
-                    DropdownMenuItem(text = { Text("Adaptive") }, onClick = { dockMode = "adaptive"; save(); dockMenuOpen = false })
-                }
-            }
-            Text("Adaptive = the current scroll morph. Expanded / compact lock the dock in that size.", color = Faint, fontSize = 12.sp)
-            Spacer(Modifier.height(8.dp))
-        }
-        item { SettingsToggle("Auto-scroll Editor's picks", "One poster every 5 seconds. Pauses off-screen and while you drag.", carouselAuto) { carouselAuto = it; save() } }
-        item {
-            Text("BEHAVIOUR", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
-            Spacer(Modifier.height(8.dp))
-        }
-        item { SettingsToggle("Download only on Wi-Fi", "Pause downloads on mobile data.", wifiOnly) { wifiOnly = it; save() } }
-        item { SettingsToggle("Ask before a whole season", "Confirm before pulling every episode at once.", askSeason) { askSeason = it; save() } }
-        item { SettingsToggle("Include subtitles when available", "Soft subs are fine — hard subs are not required.", subs) { subs = it; save() } }
-        item { SettingsToggle("Home particles", "Drifting, glowing, twinkling dots on the home page.", particles) { particles = it; save() } }
-        item {
-            Spacer(Modifier.height(24.dp))
-            Text("STORAGE", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
-            Spacer(Modifier.height(12.dp))
-            Box(
-                modifier = Modifier
-                    .clip(RoundedCornerShape(12.dp))
-                    .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp))
-                    .background(Card)
-                    .clickable {
-                        ctx.cacheDir.resolve("posters").deleteRecursively()
-                        ctx.getSharedPreferences("anipull_cache", android.content.Context.MODE_PRIVATE).edit().clear().apply()
-                        cacheMsg = "Home cache cleared — next open reloads live."
-                    }
-                    .padding(horizontal = 16.dp, vertical = 12.dp),
-            ) { Text("Clear home cache", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
-            if (cacheMsg != null) {
-                Spacer(Modifier.height(8.dp))
-                Text(cacheMsg!!, color = Teal, fontSize = 12.5.sp)
-            }
-            Spacer(Modifier.height(24.dp))
-            Text("ABOUT", color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
-            Spacer(Modifier.height(8.dp))
-            Text("Anipull 1.9-dev4.8 · com.js.anipull · Download-only, no streaming, no tracking.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
-            // Extra bottom space so the floating dock never covers this.
-            Spacer(Modifier.height(100.dp))
-        }
+        Spacer(Modifier.height(8.dp))
+        Text("Sample only — real downloads land in 2.0.", color = Faint, fontSize = 12.sp, textAlign = TextAlign.Center)
     }
 }
 

@@ -24,6 +24,60 @@ All notable changes to the Anipull Android app are tracked here.
   Wordmark ("Ani" white + "pull" pink) unchanged. Themed-icon
   phone check still pending.
 
+### 1.9-dev4.8.1 (versionCode 19) — test build, not a release
+
+- Carousel auto-scroll fix (JS, screenshots): the old effect was
+  keyed on currentPage, and currentPage changes mid-animation
+  (as soon as the pager crosses halfway), cancelling
+  animateScrollToPage — so auto-scroll kept stopping in the
+  middle of two cards. Now a loop: delay 5s, animate fully,
+  repeat; a manual drag only delays the next tick. Cards are
+  also uniform and bigger now: a fixed 275dp, poster filling
+  the whole card, buttons pinned to the bottom — the bigger
+  card JS liked, for every card, plus a touch more.
+- Detail hero stretch fix (JS, screenshots): PosterCard used
+  to report its whole column (poster + title + meta, ~237dp)
+  as the hero bounds, so the overlay poster filled that tall
+  rect and then snapped/croped back to the 177dp poster.
+  Now it reports the poster image only (118x177, 2:3), so
+  source, overlay and detail poster are the same rect, plus
+  a matching border on the overlay so nothing pops at the end.
+- Settings redesign, Nuvio-style (JS, screenshots): the old
+  single long page is now a hub with a large "Settings"
+  heading and grouped cards (Appearance + Layout, Downloads
+  + Notifications, Storage + About), each opening its own
+  sub-page with the same large heading, icon rows and
+  dividers, and a logo + version footer. System back on a
+  sub-page returns to the hub, not out of Settings.
+- Appearance, Nuvio-style: accent colour grid (Anipull Pink,
+  White, Crimson, Ocean, Violet, Emerald, Amber, Rose, Teal,
+  Lavender) that recolours buttons, pills, dock highlight
+  and wordmark instantly and survives restarts (accent is
+  live state loaded in MainActivity before first
+  composition, so no pink flash); AMOLED Black toggle
+  (pure black backgrounds); SF headings toggle; Reduce
+  motion toggle (kills auto-scroll and press scale).
+- More real settings, on my own: Layout page (translucent
+  dock, dock behaviour dropdown, Show Explore on Home,
+  carousel auto-scroll, home particles); Downloads page
+  (parallel, speed, folder + Browse, quality, language,
+  Wi-Fi only, ask season, subs, plus Auto-retry and Keep
+  screen on, both saved for the 2.0 engine); Notifications
+  page (progress notifications on/off, completion ping
+  on/off); Storage page (clear home cache, download
+  folder); About page (version, GitHub app + website repo
+  links that actually open, website demo link, AniLab +
+  sources note).
+- Download progress notification, designed and previewable:
+  low-importance Downloads channel, per-episode progress +
+  MB/s + Pause/Cancel, completion ping tapping to
+  Downloads (Notifications.kt + DownloadActionReceiver).
+  Downloads tab has a "Preview download notification"
+  button that posts a sample (Frieren Episode 1, 0–100%
+  at 8.4 MB/s) — Pause/Cancel in the shade really pause
+  and cancel that preview. Real downloads in 2.0 will
+  plug into this same helper.
+
 ### 1.9-dev4.8 (versionCode 18) — test build, not a release
 
 - SF font mixed into the app (JS): SF Pro Display Semibold is no
