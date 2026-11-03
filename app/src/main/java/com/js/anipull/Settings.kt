@@ -100,7 +100,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("1.9-dev4.8.5 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("1.9-dev4.8.6 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -489,7 +489,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("1.9-dev4.8.5 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("1.9-dev4.8.6 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")

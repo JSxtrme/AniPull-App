@@ -469,12 +469,25 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     // row stays visible, only the destination slot clears. When
     // reverse ends, reverseDestRect becomes null and the card
     // reappears exactly as the overlay lands.
-    var cardBoundsState by remember { mutableStateOf<Rect?>(null) }
-    val isReverseHidden = reverseDestRect != null && cardBoundsState != null &&
-        kotlin.math.abs(cardBoundsState!!.left - reverseDestRect.left) < 20f &&
-        kotlin.math.abs(cardBoundsState!!.top - reverseDestRect.top) < 20f &&
-        kotlin.math.abs(cardBoundsState!!.width - reverseDestRect.width) < 20f &&
-        kotlin.math.abs(cardBoundsState!!.height - reverseDestRect.height) < 20f
+    // 1.9-dev4.8.6 scroll fix: the 4.8.5 version stored the card's
+    // bounds in a STATE set from onPlaced, and onPlaced fires on
+    // EVERY scroll frame as the card moves — so every visible
+    // card recomposed on every scroll frame, during a fling.
+    // Nuvio's poster card has no onPlaced state at all. Now the
+    // hidden flag is set ONCE, when reverseDestRect changes
+    // (reverse starts / ends), from the plain coords holder
+    // (not state), and onPlaced never sets state. During normal
+    // scrolling reverseDestRect is null and unchanged, so this
+    // LaunchedEffect never runs and onPlaced costs nothing.
+    var isReverseHidden by remember { mutableStateOf(false) }
+    LaunchedEffect(reverseDestRect) {
+        val b = coordsHolder[0]?.boundsInWindow()
+        isReverseHidden = reverseDestRect != null && b != null &&
+            kotlin.math.abs(b.left - reverseDestRect.left) < 20f &&
+            kotlin.math.abs(b.top - reverseDestRect.top) < 20f &&
+            kotlin.math.abs(b.width - reverseDestRect.width) < 20f &&
+            kotlin.math.abs(b.height - reverseDestRect.height) < 20f
+    }
     if (isReverseHidden) {
         Column(modifier = Modifier.width(cardWidth)) {
             Box(modifier = Modifier.size(width = cardWidth, height = cardWidth * 3 / 2).background(Bg))
@@ -488,10 +501,24 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     Column(
         modifier = Modifier
             .width(cardWidth)
-            .graphicsLayer(scaleX = pressScale, scaleY = pressScale)
+            .then(if (pressScale != 1f) Modifier.graphicsLayer(scaleX = pressScale, scaleY = pressScale) else Modifier)
             .onPlaced { coords ->
                 coordsHolder[0] = coords
-                cardBoundsState = coords.boundsInWindow()
+                // Reverse-only placement check: when home is freshly
+                // composed on back, LaunchedEffect above runs before
+                // placement (holder still null), so this is the
+                // one-time check that actually catches the slot.
+                // Guarded by reverseDestRect != null, so during
+                // NORMAL scrolling this sets nothing and costs
+                // nothing — the per-frame recomposition bug is gone.
+                if (reverseDestRect != null) {
+                    val b = coords.boundsInWindow()
+                    isReverseHidden =
+                        kotlin.math.abs(b.left - reverseDestRect.left) < 20f &&
+                        kotlin.math.abs(b.top - reverseDestRect.top) < 20f &&
+                        kotlin.math.abs(b.width - reverseDestRect.width) < 20f &&
+                        kotlin.math.abs(b.height - reverseDestRect.height) < 20f
+                }
                 if (reportBoundsOnPlace) onBounds?.invoke(coords.boundsInWindow())
             }
             .clickable(interactionSource = interaction, indication = null, onClick = {
@@ -801,12 +828,19 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
             // same position-match as PosterCard — if this carousel
             // card's bounds match the reverse destination, render
             // an empty 275dp slot instead of a duplicate poster.
-            var carouselBoundsState by remember { mutableStateOf<Rect?>(null) }
-            val carouselHidden = reverseDestRect != null && carouselBoundsState != null &&
-                kotlin.math.abs(carouselBoundsState!!.left - reverseDestRect.left) < 20f &&
-                kotlin.math.abs(carouselBoundsState!!.top - reverseDestRect.top) < 20f &&
-                kotlin.math.abs(carouselBoundsState!!.width - reverseDestRect.width) < 20f &&
-                kotlin.math.abs(carouselBoundsState!!.height - reverseDestRect.height) < 20f
+            // 1.9-dev4.8.6 scroll fix, same as PosterCard: hidden
+            // flag set once on reverseDestRect change, never from
+            // onPlaced, so the big carousel card does not
+            // recompose on every scroll frame.
+            var carouselHidden by remember { mutableStateOf(false) }
+            LaunchedEffect(reverseDestRect) {
+                val b = cardCoords[0]?.boundsInWindow()
+                carouselHidden = reverseDestRect != null && b != null &&
+                    kotlin.math.abs(b.left - reverseDestRect.left) < 20f &&
+                    kotlin.math.abs(b.top - reverseDestRect.top) < 20f &&
+                    kotlin.math.abs(b.width - reverseDestRect.width) < 20f &&
+                    kotlin.math.abs(b.height - reverseDestRect.height) < 20f
+            }
             if (carouselHidden) {
                 Box(modifier = Modifier.fillMaxWidth().height(275.dp).background(Bg))
             } else Box(
@@ -817,7 +851,17 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                     .clip(RoundedCornerShape(20.dp))
                     .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(20.dp))
                     .background(Color(0xFF14141F))
-                    .onPlaced { cardCoords[0] = it; carouselBoundsState = it.boundsInWindow() }
+                    .onPlaced { coords ->
+                        cardCoords[0] = coords
+                        if (reverseDestRect != null) {
+                            val b = coords.boundsInWindow()
+                            carouselHidden =
+                                kotlin.math.abs(b.left - reverseDestRect.left) < 20f &&
+                                kotlin.math.abs(b.top - reverseDestRect.top) < 20f &&
+                                kotlin.math.abs(b.width - reverseDestRect.width) < 20f &&
+                                kotlin.math.abs(b.height - reverseDestRect.height) < 20f
+                        }
+                    }
                     .clickable(interactionSource = cInteraction, indication = null) {
                         cardCoords[0]?.let { onBounds?.invoke(pick, it.boundsInWindow()) }
                         onOpen(pick)
@@ -1333,8 +1377,14 @@ fun AnipullAppInner() {
     var extraStarted by remember { mutableStateOf(false) }
     var isChipQuery by remember { mutableStateOf(false) }
     var liveSearchDone by remember { mutableStateOf(false) }
-    val pillCoordsState = remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
-    val lazyColumnCoordsState = remember { mutableStateOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    // 1.9-dev4.8.6 scroll: these were MutableStates set from
+    // onPlaced/onGloballyPositioned, i.e. on every scroll frame.
+    // Nuvio's list has no placement state at all. Now they are
+    // plain holders (not state) — the tap handler reads the
+    // CURRENT holder value at tap time, so placement during
+    // scroll costs zero recomposition and zero snapshot work.
+    val pillCoordsHolder = remember { arrayOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
+    val lazyColumnCoordsHolder = remember { arrayOf<androidx.compose.ui.layout.LayoutCoordinates?>(null) }
     val homeKeyboard = androidx.compose.ui.platform.LocalSoftwareKeyboardController.current
     var liveResults by remember { mutableStateOf<List<ApiTitle>?>(null) }
     var searching by remember { mutableStateOf(false) }
@@ -1408,19 +1458,33 @@ fun AnipullAppInner() {
         "cinematic" -> tween(700, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))
         else -> spring(stiffness = 195f, dampingRatio = 1f)
     }
-    // Settle-aware clearing: with overshoot/bouncy the progress
-    // crosses 0.999 several times before settling — clearing on
-    // the first crossing would cut the bounce short. Only clear
-    // when TWO consecutive frames are near 1, i.e. it has settled.
-    val lastReverseProgress = remember { floatArrayOf(0f) }
+    // 1.9-dev4.8.6 STUCK-REVERSE FIX: dev4.8.5 required TWO
+    // consecutive frames >=0.999 to clear, but if the animation
+    // jumps straight to 1.0 in one frame (frame drop, fast
+    // spring), that second frame never comes — the overlay stays
+    // forever, over every tab, until restart. That is exactly
+    // the bug JS screenshotted on Downloads. Fix, belt and
+    // braces: (a) monotonic motions clear on FIRST crossing
+    // again (as in 4.8.4, which never stuck); (b) bouncy
+    // motions clear on a TIMEOUT (900/1100ms, after settle),
+    // not on crossing; (c) a 1500ms timeout guard clears ANY
+    // stuck overlay, no matter what; (d) switching tabs
+    // during a reverse clears it immediately (dest rect only
+    // makes sense on the tab it came from).
+    val isBouncyMotion = heroMotion == "overshoot" || heroMotion == "bouncy"
     val reverseProgress by animateFloatAsState(
         targetValue = if (reverseTitle != null) 1f else 0f,
         animationSpec = heroSpec,
         label = "reverseHeroProgress",
     )
     LaunchedEffect(reverseProgress) {
-        if (reverseProgress >= 0.999f && lastReverseProgress[0] >= 0.999f && reverseTitle != null) { reverseTitle = null; reverseSourceRect = null; reverseDestRect = null }
-        lastReverseProgress[0] = reverseProgress
+        if (!isBouncyMotion && reverseProgress >= 0.999f && reverseTitle != null) { reverseTitle = null; reverseSourceRect = null; reverseDestRect = null }
+    }
+    LaunchedEffect(reverseTitle) {
+        if (reverseTitle != null) {
+            kotlinx.coroutines.delay(if (heroMotion == "bouncy") 1100 else if (heroMotion == "overshoot") 900 else 1500)
+            if (reverseTitle != null) { reverseTitle = null; reverseSourceRect = null; reverseDestRect = null }
+        }
     }
     // BitChord-style hero, adapted: BitChord keeps ONE player sheet
     // mounted and drives its artwork on a critically damped spring
@@ -1429,15 +1493,19 @@ fun AnipullAppInner() {
     // same spring drives a hero overlay poster from the tapped
     // grid card's bounds to the detail poster's bounds, while the
     // detail text fades in — never an instant swap.
-    val lastHeroProgress = remember { floatArrayOf(0f) }
     val heroProgress by animateFloatAsState(
         targetValue = if (heroTitle != null && heroDestRect != null) 1f else 0f,
         animationSpec = heroSpec,
         label = "heroProgress",
     )
     LaunchedEffect(heroProgress) {
-        if (heroProgress >= 0.999f && lastHeroProgress[0] >= 0.999f && heroTitle != null) { heroTitle = null; heroDestRect = null; heroDestPosterRect = null }
-        lastHeroProgress[0] = heroProgress
+        if (!isBouncyMotion && heroProgress >= 0.999f && heroTitle != null) { heroTitle = null; heroDestRect = null; heroDestPosterRect = null }
+    }
+    LaunchedEffect(heroTitle) {
+        if (heroTitle != null) {
+            kotlinx.coroutines.delay(if (heroMotion == "bouncy") 1100 else if (heroMotion == "overshoot") 900 else 1500)
+            if (heroTitle != null) { heroTitle = null; heroDestRect = null; heroDestPosterRect = null }
+        }
     }
     fun openTitle(t: ApiTitle, isCarousel: Boolean = false) {
         val src = posterBounds[t.id]
@@ -1581,6 +1649,11 @@ fun AnipullAppInner() {
     LaunchedEffect(currentTab) {
         dockModeState.value = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
             .getString("dock_mode", "adaptive") ?: "adaptive"
+        // 1.9-dev4.8.6: a reverse overlay belongs to the tab it
+        // came from. If the user switches tabs mid-reverse, drop
+        // it immediately instead of letting it follow them to
+        // Downloads/Settings/Library and sit there forever.
+        if (reverseTitle != null) { reverseTitle = null; reverseSourceRect = null; reverseDestRect = null }
     }
     fun loadExploreNext() {
         if (exploreLoading || exploreFinished) return
@@ -1831,19 +1904,20 @@ fun AnipullAppInner() {
                 .navigationBarsPadding()
                 .padding(horizontal = 16.dp)
                 .nestedScroll(dockScrollConnection)
-                .onGloballyPositioned { lazyColumnCoordsState.value = it }
+                .onGloballyPositioned { lazyColumnCoordsHolder[0] = it }
                 .pointerInput(isSearchFocused) {
-                    // 1.9-dev4.8.5 scroll fix: this handler used to be
+                    // 1.9-dev4.8.6 scroll fix: this handler used to be
                     // keyed on pillCoords + lazyColumnCoords, both of
                     // which change every frame while the header scrolls
                     // — so the tap detector RESTARTED on every scroll
                     // frame during a fling. Now it reads coords from
-                    // State objects (stable identity, current value),
-                    // so it only restarts when search focus changes.
+                    // plain holders (stable identity, current value),
+                    // so it only restarts when search focus changes,
+                    // and placement during scroll sets no state at all.
                     detectTapGestures(onTap = { offset ->
                         if (isSearchFocused) {
-                            val lc = lazyColumnCoordsState.value
-                            val pc = pillCoordsState.value
+                            val lc = lazyColumnCoordsHolder[0]
+                            val pc = pillCoordsHolder[0]
                             val b = lc?.let { l -> pc?.let { p -> l.localBoundingBoxOf(p) } }
                             if (b == null || !b.contains(offset)) {
                                 homeKeyboard?.hide()
@@ -1873,7 +1947,7 @@ fun AnipullAppInner() {
                     loadingHome = liveSections == null && !homeFailed,
                     onFocusChange = { isSearchFocused = it },
                     isSearching = isSearchFocused || query.isNotBlank(),
-                    onPillPositioned = { pillCoordsState.value = it },
+                    onPillPositioned = { pillCoordsHolder[0] = it },
                     onCloseSearch = { closeSearch() },
                     particlesOn = LocalContext.current.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("particles", true) && !listState.isScrollInProgress,
                 )
