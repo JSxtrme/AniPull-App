@@ -12,8 +12,8 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 28
-        versionName = "1.9-dev4.8.7-hotfix"
+        versionCode = 29
+        versionName = "1.9-dev4.8.8"
     }
 
     buildTypes {
