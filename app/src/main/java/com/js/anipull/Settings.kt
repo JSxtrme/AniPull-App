@@ -23,6 +23,9 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.graphicsLayer
 
 // 1.9-dev4.8.4 Settings redesign, Nuvio-style: the old single long
 // page was messy, so Settings is now a hub with large headings and
@@ -100,7 +103,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("1.9-dev4.8.6 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("1.9-dev4.8.7 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -248,6 +251,56 @@ fun AppearancePage() {
     }
 }
 
+// ---- Beautified dropdown (4.8.7) --------------------------------------
+// The old dropdown was the raw Material3 menu: default surface,
+// no selected state, no descriptions — that is why it looked bad.
+// This one matches the app: Card field, Pink border when open,
+// chevron that rotates, menu in Card with 16dp corners, selected
+// row tinted Pink with a check, and a subtitle under each option
+// so the choice actually explains itself.
+@Composable
+fun SettingsDropdown(
+    selectedLabel: String,
+    options: List<Triple<String, String, String>>,
+    currentValue: String,
+    onSelect: (String) -> Unit,
+) {
+    var menuOpen by remember { mutableStateOf(false) }
+    val chevronRotation by animateFloatAsState(targetValue = if (menuOpen) 180f else 0f, animationSpec = tween(250), label = "dropdownChevron")
+    Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).border(1.dp, if (menuOpen) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(16.dp)).background(Card).clickable { menuOpen = true }.padding(horizontal = 16.dp, vertical = 13.dp)) {
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Text(selectedLabel, color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
+            Text("▾", color = Pink, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.graphicsLayer { rotationZ = chevronRotation })
+        }
+        DropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false },
+            shape = RoundedCornerShape(16.dp),
+            containerColor = Card,
+            tonalElevation = 0.dp,
+            shadowElevation = 12.dp,
+        ) {
+            options.forEach { (value, title, subtitle) ->
+                val selected = value == currentValue
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(title, color = if (selected) TextMain else Muted, fontSize = 14.sp, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal, modifier = Modifier.weight(1f))
+                                if (selected) Text("✓", color = Pink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                            }
+                            if (subtitle.isNotBlank()) Text(subtitle, color = Faint, fontSize = 12.sp)
+                        }
+                    },
+                    onClick = { onSelect(value); menuOpen = false },
+                    modifier = Modifier.fillMaxWidth().background(if (selected) Pink.copy(alpha = 0.12f) else Color.Transparent),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                )
+            }
+        }
+    }
+}
+
 // ---- Layout -----------------------------------------------------------
 @Composable
 fun LayoutPage() {
@@ -259,9 +312,6 @@ fun LayoutPage() {
     var showExplore by remember { mutableStateOf(prefs.getBoolean("show_explore", true)) }
     var exploreCols by remember { mutableStateOf(prefs.getInt("explore_columns", 3)) }
     var heroMotion by remember { mutableStateOf(prefs.getString("hero_motion", "normal") ?: "normal") }
-    var heroMotionMenuOpen by remember { mutableStateOf(false) }
-    var dockMenuOpen by remember { mutableStateOf(false) }
-    var exploreColsMenuOpen by remember { mutableStateOf(false) }
     fun save() {
         prefs.edit().putBoolean("translucent_dock", translucentDock).putString("dock_mode", dockMode).putBoolean("carousel_auto", carouselAuto).putBoolean("particles", particles).putBoolean("show_explore", showExplore).putInt("explore_columns", exploreCols).putString("hero_motion", heroMotion).apply()
     }
@@ -273,17 +323,16 @@ fun LayoutPage() {
             Text("Dock behaviour", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
             val dockLabel = when (dockMode) { "expanded" -> "Always expanded"; "compact" -> "Always compact"; else -> "Adaptive" }
-            Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).clickable { dockMenuOpen = true }.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(dockLabel, color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("▾", color = Muted, fontSize = 14.sp)
-                }
-                DropdownMenu(expanded = dockMenuOpen, onDismissRequest = { dockMenuOpen = false }) {
-                    DropdownMenuItem(text = { Text("Always expanded") }, onClick = { dockMode = "expanded"; save(); dockMenuOpen = false })
-                    DropdownMenuItem(text = { Text("Always compact") }, onClick = { dockMode = "compact"; save(); dockMenuOpen = false })
-                    DropdownMenuItem(text = { Text("Adaptive") }, onClick = { dockMode = "adaptive"; save(); dockMenuOpen = false })
-                }
-            }
+            SettingsDropdown(
+                selectedLabel = dockLabel,
+                options = listOf(
+                    Triple("expanded", "Always expanded", "Dock stays large"),
+                    Triple("compact", "Always compact", "Dock stays small"),
+                    Triple("adaptive", "Adaptive", "Morphs with scroll"),
+                ),
+                currentValue = dockMode,
+                onSelect = { dockMode = it; save() },
+            )
             Text("Adaptive = the current scroll morph. Expanded / compact lock the dock in that size.", color = Faint, fontSize = 12.sp)
         }
     }
@@ -295,17 +344,16 @@ fun LayoutPage() {
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
             Text("Explore cards per row", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
-            Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).clickable { exploreColsMenuOpen = true }.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text("$exploreCols per row", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("\u25BE", color = Muted, fontSize = 14.sp)
-                }
-                DropdownMenu(expanded = exploreColsMenuOpen, onDismissRequest = { exploreColsMenuOpen = false }) {
-                    DropdownMenuItem(text = { Text("2 per row") }, onClick = { exploreCols = 2; save(); exploreColsMenuOpen = false })
-                    DropdownMenuItem(text = { Text("3 per row") }, onClick = { exploreCols = 3; save(); exploreColsMenuOpen = false })
-                    DropdownMenuItem(text = { Text("4 per row") }, onClick = { exploreCols = 4; save(); exploreColsMenuOpen = false })
-                }
-            }
+            SettingsDropdown(
+                selectedLabel = "$exploreCols per row",
+                options = listOf(
+                    Triple("2", "2 per row", "Bigger cards"),
+                    Triple("3", "3 per row", "Balanced"),
+                    Triple("4", "4 per row", "More titles at a glance"),
+                ),
+                currentValue = exploreCols.toString(),
+                onSelect = { exploreCols = it.toInt(); save() },
+            )
             Text("Bigger cards at 2, more titles at a glance at 4. Skeletons match the chosen count, so rows never jump on load.", color = Faint, fontSize = 12.sp)
         }
         SettingsDivider()
@@ -316,21 +364,21 @@ fun LayoutPage() {
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
             Text("Poster transition motion", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
-            val heroLabel = when (heroMotion) { "easeout" -> "Ease out"; "overshoot" -> "Overshoot"; "bouncy" -> "Bouncy"; "cinematic" -> "Cinematic"; else -> "Normal" }
-            Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).clickable { heroMotionMenuOpen = true }.padding(horizontal = 16.dp, vertical = 12.dp)) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    Text(heroLabel, color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold)
-                    Text("\u25BE", color = Muted, fontSize = 14.sp)
-                }
-                DropdownMenu(expanded = heroMotionMenuOpen, onDismissRequest = { heroMotionMenuOpen = false }) {
-                    DropdownMenuItem(text = { Text("Normal") }, onClick = { heroMotion = "normal"; save(); heroMotionMenuOpen = false })
-                    DropdownMenuItem(text = { Text("Ease out") }, onClick = { heroMotion = "easeout"; save(); heroMotionMenuOpen = false })
-                    DropdownMenuItem(text = { Text("Overshoot") }, onClick = { heroMotion = "overshoot"; save(); heroMotionMenuOpen = false })
-                    DropdownMenuItem(text = { Text("Bouncy") }, onClick = { heroMotion = "bouncy"; save(); heroMotionMenuOpen = false })
-                    DropdownMenuItem(text = { Text("Cinematic") }, onClick = { heroMotion = "cinematic"; save(); heroMotionMenuOpen = false })
-                }
-            }
-            Text("How the poster flies home to details (and back). Normal = current spring, no bounce. Ease out = fast start, then gradually sitting there. Overshoot / Bouncy = bounce past the target, then settle. Cinematic = slow, smooth in-out.", color = Faint, fontSize = 12.sp)
+            val heroLabel = when (heroMotion) { "easein" -> "Ease in"; "easeout" -> "Ease out"; "overshoot" -> "Overshoot"; "bouncy" -> "Bouncy"; "cinematic" -> "Cinematic"; else -> "Normal" }
+            SettingsDropdown(
+                selectedLabel = heroLabel,
+                options = listOf(
+                    Triple("normal", "Normal", "Current spring, no bounce"),
+                    Triple("easein", "Ease in", "Slow start, then speeds up"),
+                    Triple("easeout", "Ease out", "Fast start, then gradually settles"),
+                    Triple("overshoot", "Overshoot", "Bounces slightly past, then settles"),
+                    Triple("bouncy", "Bouncy", "More bounce, then settles"),
+                    Triple("cinematic", "Cinematic", "Slow, smooth in-out"),
+                ),
+                currentValue = heroMotion,
+                onSelect = { heroMotion = it; save() },
+            )
+            Text("How the poster flies home to details (and back). Try Ease in if you want the opposite of Ease out — it starts gentle and accelerates into place.", color = Faint, fontSize = 12.sp)
         }
     }
 }
@@ -489,7 +537,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("1.9-dev4.8.6 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("1.9-dev4.8.7 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")

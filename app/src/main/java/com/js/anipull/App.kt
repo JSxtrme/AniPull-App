@@ -6,6 +6,7 @@ import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.FastOutLinearInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
@@ -420,7 +421,20 @@ fun PosterImage(poster: String?, modifier: Modifier, targetWidthPx: Int = 0) {
     val ctx = androidx.compose.ui.platform.LocalContext.current
     if (poster != null) {
         LaunchedEffect(poster, targetWidthPx) {
-            bitmap = PosterCache.get(poster, targetWidthPx) ?: loadPoster(poster, ctx, targetWidthPx)
+            // 1.9-dev4.8.7 Nuvio-inspired: memory/disk hits load at
+            // once (fast, no cost to scroll). A NETWORK fetch waits
+            // 120ms first — delay() is cancellable, so a card that
+            // flashes past in a fling is disposed before the fetch
+            // ever starts, instead of queueing a decode for a card
+            // that is already gone. After the fling settles, 120ms
+            // is imperceptible; during a fling it is the whole win.
+            val cached = PosterCache.get(poster, targetWidthPx)
+            if (cached != null) {
+                bitmap = cached
+            } else {
+                if (!isPosterOnDisk(poster, ctx)) kotlinx.coroutines.delay(120)
+                bitmap = loadPoster(poster, ctx, targetWidthPx)
+            }
         }
     }
     Box(modifier = modifier.background(PosterBg)) {
@@ -453,7 +467,7 @@ private fun safeBounds(coords: androidx.compose.ui.layout.LayoutCoordinates?): a
 }
 
 @Composable
-fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseHiddenId: Long? = null) {
+fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseHiddenId: Long? = null, reverseFade: Float = 1f) {
     val cardHeight = cardWidth * 3 / 2
     // 1.9-dev4.8.2 scroll optimisation + full-card hero: bounds are
     // NO LONGER reported by onGloballyPositioned, which fires on
@@ -488,18 +502,20 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     // the one slot — safety first, position-match can return later
     // once the crash log confirms the root cause.
     val isReverseHidden = reverseHiddenId != null && title.id == reverseHiddenId
-    if (isReverseHidden) {
-        Column(modifier = Modifier.width(cardWidth)) {
-            Box(modifier = Modifier.size(width = cardWidth, height = cardWidth * 3 / 2).background(Bg))
-            Spacer(Modifier.height(8.dp))
-            Spacer(Modifier.height(32.dp))
-            Spacer(Modifier.height(2.dp))
-            Spacer(Modifier.height(14.dp))
-        }
-        return
-    }
+    // 1.9-dev4.8.7: destination card is NOT an empty slot any
+    // more. An empty slot has no clickable, so a tap during reverse
+    // (or in the frame it flips back to full) was lost — JS's
+    // "tap again, it won't transition again" dead zone, worst on
+    // Editor's picks. Now the destination card stays a full,
+    // clickable card throughout reverse, fading in with
+    // reverseProgress (0 -> 1) underneath the flying overlay.
+    // At progress 1 it is already fully visible, so when the
+    // overlay clears there is no pop, and a tap at any moment
+    // registers (openTitle cancels reverse and reopens, see below).
+    val cardAlpha = if (isReverseHidden) reverseFade else 1f
     Column(
         modifier = Modifier
+            .alpha(cardAlpha)
             .width(cardWidth)
             .then(if (pressScale != 1f) Modifier.graphicsLayer(scaleX = pressScale, scaleY = pressScale) else Modifier)
             .onPlaced { coords ->
@@ -684,7 +700,7 @@ fun SearchSkeletonGrid() {
 }
 
 @Composable
-fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null) {
+fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (iconRes != null) {
@@ -710,7 +726,7 @@ fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpe
         }
         Spacer(Modifier.height(12.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it) }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseHiddenId = reverseHiddenId) }
+            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it) }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade) }
         }
     }
 }
@@ -734,7 +750,7 @@ fun CarouselDot(selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null) {
+fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f) {
     // 1.9-dev4.8: Editor's pick is now Editor's PICKS, a 5-item
     // carousel, and the description lines are GONE altogether (JS's
     // call) — title + type pill + buttons only, over the poster.
@@ -816,11 +832,12 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
             // the old position-match is gone, not just disabled.
             // 1.9-dev4.8.6-hotfix: same ID rule as PosterCard —
             // no bounds, no LaunchedEffect, no onPlaced state.
-            val carouselHidden = reverseHiddenId != null && pick.id == reverseHiddenId
-            if (carouselHidden) {
-                Box(modifier = Modifier.fillMaxWidth().height(275.dp).background(Bg))
-            } else Box(
+            // 1.9-dev4.8.7: same fade-in rule as PosterCard —
+            // no empty slot, no pop, tap registers throughout.
+            val cardAlpha = if (reverseHiddenId != null && pick.id == reverseHiddenId) reverseFade else 1f
+            Box(
                 modifier = Modifier
+                    .alpha(cardAlpha)
                     .fillMaxWidth()
                     .height(275.dp)
                     .graphicsLayer(scaleX = cScale, scaleY = cScale)
@@ -1412,6 +1429,8 @@ fun AnipullAppInner() {
     var reverseHiddenId by remember { mutableStateOf<Long?>(null) }
     // 1.9-dev4.8.5 hero motion options (Settings > Layout):
     // Normal = the BitChord spring (195, damping 1, no bounce).
+    // Ease in (4.8.7) = slow start, then speeds up to the target
+    // (FastOutLinearIn, 550ms) — the mirror of Ease out.
     // Ease out = the graph JS described: fast start, then
     // gradually sitting there (FastOutSlowIn, 500ms).
     // Overshoot = spring 300 / 0.75, slight bounce past target.
@@ -1421,6 +1440,7 @@ fun AnipullAppInner() {
     // the same motion in reverse, not a different animation.
     val heroMotion = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getString("hero_motion", "normal") ?: "normal"
     val heroSpec: androidx.compose.animation.core.AnimationSpec<Float> = when (heroMotion) {
+        "easein" -> tween(550, easing = FastOutLinearInEasing)
         "easeout" -> tween(500, easing = FastOutSlowInEasing)
         "overshoot" -> spring(stiffness = 300f, dampingRatio = 0.75f)
         "bouncy" -> spring(stiffness = 400f, dampingRatio = 0.5f)
@@ -1476,7 +1496,22 @@ fun AnipullAppInner() {
             if (heroTitle != null) { heroTitle = null; heroDestRect = null; heroDestPosterRect = null }
         }
     }
+    // 1.9-dev4.8.7: fade-in value for the reverse destination
+    // card (0 at reverse start, 1 at landing). When no reverse
+    // is running it is 1, so normal cards are fully opaque.
+    val reverseFade = if (reverseTitle != null) reverseProgress else 1f
     fun openTitle(t: ApiTitle, isCarousel: Boolean = false) {
+        // 1.9-dev4.8.7 re-tap fix: if a reverse is already flying
+        // to this exact card, tapping it reopens the detail
+        // instantly (no hero, no lost tap) instead of starting a
+        // second flight from a card that is still fading in.
+        // Tapping a DIFFERENT card during reverse cancels the
+        // reverse first, then runs the normal hero for that card.
+        val reversingTo = reverseTitle?.id
+        if (reversingTo != null) {
+            reverseTitle = null; reverseSourceRect = null; reverseDestRect = null; reverseHiddenId = null
+            if (reversingTo == t.id) { screen = t; return }
+        }
         val src = posterBounds[t.id]
         if (src != null) { heroSourceRect = src; heroDestRect = null; heroDestPosterRect = null; heroSourceIsCarousel = isCarousel; heroTitle = t }
         screen = t
@@ -1954,7 +1989,7 @@ fun AnipullAppInner() {
                                 results.chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId)
+                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade)
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -1984,7 +2019,7 @@ fun AnipullAppInner() {
                                 cachedTitles.take(12).chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId)
+                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade)
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -1996,7 +2031,7 @@ fun AnipullAppInner() {
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
-                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { openTitle(it) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId) }
+                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { openTitle(it) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade) }
                 }
                 featured?.let { pick ->
                     item(key = "home_carousel", contentType = "carousel") {
@@ -2013,7 +2048,7 @@ fun AnipullAppInner() {
                         Spacer(Modifier.height(12.dp))
                         val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
                             .distinctBy { it.id }.take(5)
-                        EditorsPickCarousel(picks, { openTitle(it, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId)
+                        EditorsPickCarousel(picks, { openTitle(it, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade)
                     }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
@@ -2029,7 +2064,7 @@ fun AnipullAppInner() {
                         "Top 10 Month" -> R.drawable.ic_trophy
                         else -> null
                     }
-                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId) }
+                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade) }
                 }
             } else if (homeFailed) {
                 // 1.9-dev2: failed load = skeletons + retry, never demo
@@ -2061,7 +2096,7 @@ fun AnipullAppInner() {
             // They load progressively in the background, like home rows.
             if (!isSearchFocused && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
-                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId) }
+                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade) }
                 }
             }
             // 1.9-dev4.8: Explore — after all catalogs, a grid (not a
@@ -2126,7 +2161,7 @@ fun AnipullAppInner() {
                                 shownExplore.chunked(exploreCols).forEach { trio ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         trio.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId)
+                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade)
                                         }
                                         repeat(exploreCols - trio.size) { Spacer(Modifier.width(cardW)) }
                                     }
@@ -2224,7 +2259,8 @@ fun AnipullAppInner() {
                         .offset { androidx.compose.ui.unit.IntOffset(rLeft.toInt(), rTop.toInt()) }
                         .size(with(rDensity) { rW.toDp() }, with(rDensity) { rH.toDp() })
                         .clip(RoundedCornerShape(16.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp)),
+                        .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
+                        .clickable { reverseTitle?.let { openTitle(it, isCarousel = reverseIsCarousel) } },
                 ) {
                     PosterImage(reverseTitle!!.poster, Modifier.fillMaxSize())
                 }
@@ -2234,7 +2270,7 @@ fun AnipullAppInner() {
                         .offset { androidx.compose.ui.unit.IntOffset(rLeft.toInt(), rTop.toInt()) }
                         .size(with(rDensity) { rW.toDp() }, with(rDensity) { rH.toDp() }),
                 ) {
-                    PosterCard(reverseTitle!!, onClick = {}, cardWidth = with(rDensity) { rW.toDp() })
+                    PosterCard(reverseTitle!!, onClick = { reverseTitle?.let { openTitle(it, isCarousel = reverseIsCarousel) } }, cardWidth = with(rDensity) { rW.toDp() })
                 }
             }
         }
@@ -2997,7 +3033,13 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
                     PosterCard(title, onClick = {}, onBounds = onPosterBounds, onPosterBounds = onPosterImageBounds, reportBoundsOnPlace = true)
                 }
                 Spacer(Modifier.width(16.dp))
-                Column(modifier = Modifier.weight(1f)) {
+                // 1.9-dev4.8.7: detail title slides up as it fades in
+                // during the hero (detailFade 0.2 -> 1), instead of
+                // just appearing at its final spot — the "nice
+                // transition" for Editor's picks, whose carousel
+                // card has no type/rating to travel in the overlay.
+                // When there is no hero, detailFade is 1, offset 0.
+                Column(modifier = Modifier.weight(1f).graphicsLayer { translationY = (1f - detailFade) * 20f }) {
                     Text(title.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont)
                     Spacer(Modifier.height(4.dp))
                     val meta = listOfNotNull(title.type, title.year).joinToString(" · ")

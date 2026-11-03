@@ -10,6 +10,9 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -356,11 +359,23 @@ private fun sampleSizeFor(width: Int, targetWidthPx: Int): Int {
     return s
 }
 
+// 1.9-dev4.8.7 Nuvio-inspired: is this poster already on disk?
+// PosterImage uses this to decide whether a load may start at once
+// (memory/disk hit = fast, no delay) or must wait 120ms first
+// (network fetch = expensive, and a card that flashes past in a
+// fling should never start one).
+fun isPosterOnDisk(url: String, context: Context?): Boolean {
+    if (context == null) return false
+    return try { java.io.File(java.io.File(context.cacheDir, "posters"), "${url.hashCode()}.jpg").exists() } catch (_: Exception) { false }
+}
+
 suspend fun loadPoster(url: String, context: Context? = null, targetWidthPx: Int = 0): Bitmap? {
     PosterCache.get(url, targetWidthPx)?.let { return it }
     return posterLoadSemaphore.withPermit {
     withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
         try {
+            currentCoroutineContext().ensureActive()
             if (context != null) {
                 val dir = java.io.File(context.cacheDir, "posters").apply { mkdirs() }
                 val file = java.io.File(dir, "${url.hashCode()}.jpg")
@@ -374,13 +389,22 @@ suspend fun loadPoster(url: String, context: Context? = null, targetWidthPx: Int
                     }
                 }
             }
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            // Coil-like cancellation: if this coroutine is cancelled
+            // (card scrolled off), disconnect aborts the blocking
+            // read immediately instead of holding a decode slot
+            // until the 8s timeout. Before, a cancelled load kept
+            // running — that is part of why Anipull "tried hard"
+            // to keep up with a fling while Nuvio just dropped it.
+            currentCoroutineContext().ensureActive()
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 8000
                 readTimeout = 8000
                 setRequestProperty("User-Agent", "Anipull/1.0")
             }
-            if (conn.responseCode != 200) return@withContext null
-            val bytes = conn.inputStream.use { it.readBytes() }
+            currentCoroutineContext()[Job]?.invokeOnCompletion { try { conn?.disconnect() } catch (_: Exception) { } }
+            if (conn!!.responseCode != 200) return@withContext null
+            val bytes = conn!!.inputStream.use { it.readBytes() }
+            currentCoroutineContext().ensureActive()
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
             val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx); inPreferredConfig = Bitmap.Config.HARDWARE }
@@ -397,6 +421,8 @@ suspend fun loadPoster(url: String, context: Context? = null, targetWidthPx: Int
             bmp
         } catch (_: Exception) {
             null
+        } finally {
+            try { conn?.disconnect() } catch (_: Exception) { }
         }
     }
     }
