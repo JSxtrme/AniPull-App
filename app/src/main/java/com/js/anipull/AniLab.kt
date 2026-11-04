@@ -332,8 +332,15 @@ object PosterCache {
     // 1.9-dev4.8.4: byte-capped, not count-capped. 200 bitmaps at
     // ~350x525 ARGB was ~150MB, and that memory pressure during
     // a fast scroll (dozens of new posters at once) GC-stuttered.
-    // Cap ~50MB, evict oldest first.
-    private val map = LinkedHashMap<String, Bitmap>()
+    // 4.9 optimisation (Coil/Nuvio-style cache): LRU, not FIFO —
+    // LinkedHashMap with accessOrder=true, so get() moves a poster
+    // to most-recently-used and eviction drops the LEAST recently
+    // viewed poster, not the oldest inserted (which could be the
+    // poster the user just came back from). Cap raised 50MB -> 
+    // 100MB: home holds ~180 posters, 50MB (~68 bitmaps) evicted
+    // constantly on scroll-back, forcing re-decode after loading.
+    // HARDWARE bitmaps live mostly on GPU, so 100MB is safe here.
+    private val map = LinkedHashMap<String, Bitmap>(16, 0.75f, true)
     private var totalBytes = 0L
     fun get(url: String, targetWidthPx: Int = 0): Bitmap? = synchronized(map) { map["$url@$targetWidthPx"] }
     fun put(url: String, bmp: Bitmap, targetWidthPx: Int = 0) = synchronized(map) {
@@ -341,7 +348,7 @@ object PosterCache {
         val bytes = (bmp.width * bmp.height * 4).toLong()
         map[key]?.let { totalBytes -= (it.width * it.height * 4).toLong() }
         map[key] = bmp; totalBytes += bytes
-        while (totalBytes > 50L * 1024 * 1024 && map.size > 1) {
+        while (totalBytes > 100L * 1024 * 1024 && map.size > 1) {
             val first = map.keys.first(); val old = map.remove(first)!!; totalBytes -= (old.width * old.height * 4).toLong()
         }
     }

@@ -62,6 +62,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     "Notifications" -> NotificationsPage()
                     "Storage" -> StoragePage()
                     "About" -> AboutPage()
+                    "Crash Logs" -> CrashLogsPage()
                 }
             }
         }
@@ -97,13 +98,32 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 SettingsDivider()
                 SettingsRow(R.drawable.ic_info, "About", "Version, GitHub, and acknowledgements", { onOpen("About") })
             }
+            // 4.9 fix 9: DEBUGGING section, as in JS's screenshot —
+            // Crash Logs row, styled like our own rows (same card,
+            // same 40dp icon box, same chevron), red-tinted icon
+            // box to match the screenshot's red bug icon.
+            Spacer(Modifier.height(20.dp))
+            SettingsSectionLabel("DEBUGGING")
+            SettingsCard {
+                Row(modifier = Modifier.fillMaxWidth().clickable(onClick = { onOpen("Crash Logs") }).padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(Color(0xFFFF3B30).copy(alpha = 0.15f)), contentAlignment = Alignment.Center) {
+                        androidx.compose.foundation.Image(painter = painterResource(R.drawable.ic_info), contentDescription = null, modifier = Modifier.size(20.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color(0xFFFF3B30)))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Crash Logs", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text("View app crash reports & error logs", color = Muted, fontSize = 13.sp)
+                    }
+                    Text("›", color = Muted, fontSize = 22.sp)
+                }
+            }
             Spacer(Modifier.height(28.dp))
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
                 androidx.compose.foundation.Image(painter = painterResource(R.drawable.ic_launcher_foreground), contentDescription = null, modifier = Modifier.size(48.dp))
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("1.9-dev4.8.17 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("1.9-dev4.9 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -130,7 +150,12 @@ fun SettingsSubPage(title: String, onBack: () -> Unit, content: @Composable Colu
 
 @Composable
 fun SettingsSectionLabel(text: String) {
-    Text(text, color = Faint, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.1.sp)
+    // 4.9 fix 8: old label was 11sp Faint grey — smaller and greyer
+    // than the content inside its card, hardly readable. Now 13sp
+    // Muted (lighter grey, not faint), ExtraBold, tighter tracking.
+    // Still smaller than card titles (15-16sp) and far smaller
+    // than the main page heading (36sp), as JS asked.
+    Text(text, color = Muted, fontSize = 13.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 0.8.sp)
     Spacer(Modifier.height(10.dp))
 }
 
@@ -311,9 +336,13 @@ fun LayoutPage() {
     var particles by remember { mutableStateOf(prefs.getBoolean("particles", true)) }
     var showExplore by remember { mutableStateOf(prefs.getBoolean("show_explore", true)) }
     var exploreCols by remember { mutableStateOf(prefs.getInt("explore_columns", 3)) }
-    var heroMotion by remember { mutableStateOf(prefs.getString("hero_motion", "normal") ?: "normal") }
+    // 4.9 fix 3: old hero_motion easing options (Ease in/out,
+    // Overshoot, Bouncy, Cinematic) no longer make sense — curve
+    // is fixed easeInOutCubic since 4.8.16. Replaced with 3 speed
+    // options, same pref file, new key transition_speed.
+    var transitionSpeed by remember { mutableStateOf(prefs.getString("transition_speed", "normal") ?: "normal") }
     fun save() {
-        prefs.edit().putBoolean("translucent_dock", translucentDock).putString("dock_mode", dockMode).putBoolean("carousel_auto", carouselAuto).putBoolean("particles", particles).putBoolean("show_explore", showExplore).putInt("explore_columns", exploreCols).putString("hero_motion", heroMotion).apply()
+        prefs.edit().putBoolean("translucent_dock", translucentDock).putString("dock_mode", dockMode).putBoolean("carousel_auto", carouselAuto).putBoolean("particles", particles).putBoolean("show_explore", showExplore).putInt("explore_columns", exploreCols).putString("transition_speed", transitionSpeed).apply()
     }
     SettingsSectionLabel("NAVIGATION")
     SettingsCard {
@@ -362,23 +391,20 @@ fun LayoutPage() {
         SettingsToggle("Home particles", "Drifting, glowing, twinkling dots on the home page.", particles) { particles = it; save() }
         SettingsDivider()
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
-            Text("Poster transition motion", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text("Poster transition speed", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
-            val heroLabel = when (heroMotion) { "easein" -> "Ease in"; "easeout" -> "Ease out"; "overshoot" -> "Overshoot"; "bouncy" -> "Bouncy"; "cinematic" -> "Cinematic"; else -> "Normal" }
+            val speedLabel = when (transitionSpeed) { "slow" -> "Slow"; "fast" -> "Fast"; else -> "Normal" }
             SettingsDropdown(
-                selectedLabel = heroLabel,
+                selectedLabel = speedLabel,
                 options = listOf(
-                    Triple("normal", "Normal", "Current spring, no bounce"),
-                    Triple("easein", "Ease in", "Slow start, then speeds up"),
-                    Triple("easeout", "Ease out", "Fast start, then gradually settles"),
-                    Triple("overshoot", "Overshoot", "Bounces slightly past, then settles"),
-                    Triple("bouncy", "Bouncy", "More bounce, then settles"),
-                    Triple("cinematic", "Cinematic", "Slow, smooth in-out"),
+                    Triple("slow", "Slow", "450ms — relaxed, cinematic"),
+                    Triple("normal", "Normal", "300ms — current speed"),
+                    Triple("fast", "Fast", "200ms — snappy"),
                 ),
-                currentValue = heroMotion,
-                onSelect = { heroMotion = it; save() },
+                currentValue = transitionSpeed,
+                onSelect = { transitionSpeed = it; save() },
             )
-            Text("How the poster flies home to details (and back). Try Ease in if you want the opposite of Ease out — it starts gentle and accelerates into place.", color = Faint, fontSize = 12.sp)
+            Text("How fast the poster flies home to details (and back). Curve stays easeInOutCubic — only speed changes, so poster and page always stay together.", color = Faint, fontSize = 12.sp)
         }
     }
 }
@@ -537,7 +563,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("1.9-dev4.8.17 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("1.9-dev4.9 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")

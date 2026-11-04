@@ -92,6 +92,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
@@ -429,7 +430,17 @@ fun PosterImage(poster: String?, modifier: Modifier, targetWidthPx: Int = 0) {
     // targetWidthPx is the card width in pixels, loadPoster
     // downsamples to it, so a 118dp card never decodes/uploads a
     // full-size poster texture during a fast scroll.
-    var bitmap by remember(poster, targetWidthPx) { mutableStateOf<android.graphics.Bitmap?>(null) }
+    // 4.9 fix 7: old init was ALWAYS null, even when the poster was
+    // already in memory cache (the back case: detail just showed
+    // it). On back, AnimatedContent's flying overlay used the
+    // freshly-composed home poster as its flight child, so frame 1
+    // was a blank dark poster, then LaunchedEffect loaded it, then
+    // flight started — poster -> black -> poster glitch, exactly
+    // JS's screenshot. Now: initialise synchronously from memory
+    // cache, so a cached poster is present on frame 1, no blank.
+    // Disk hits still load via LaunchedEffect (decode on IO, not
+    // UI thread), memory hits are the back case that matters.
+    var bitmap by remember(poster, targetWidthPx) { mutableStateOf<android.graphics.Bitmap?>(if (poster != null) PosterCache.get(poster, targetWidthPx) else null) }
     val ctx = androidx.compose.ui.platform.LocalContext.current
     if (poster != null) {
         LaunchedEffect(poster, targetWidthPx) {
@@ -494,6 +505,10 @@ val LocalSharedTransitionScope = compositionLocalOf<SharedTransitionScope?> { nu
 @OptIn(ExperimentalSharedTransitionApi::class)
 val LocalAnimatedVisibilityScope = compositionLocalOf<AnimatedVisibilityScope?> { null }
 val LocalSharedPosterKey = compositionLocalOf<String?> { null }
+// 4.9 fix 3: transition speed (Slow/Normal/Fast) is a pref, read in
+// AppInner and provided here, so page slide, shared-element arc,
+// post-landing fades and pageTransitioning all use ONE duration.
+val LocalTransitionDurationMs = compositionLocalOf { 300 }
 @OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
 fun SharedTransitionScope.sharedState(key: String) = rememberSharedContentState(key = key)
@@ -515,6 +530,19 @@ val PosterBoundsTransform: BoundsTransform = BoundsTransform { initialBounds, ta
         durationMillis = 300
         initialBounds at 0 using arcMode using androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)
         targetBounds at 300
+    }
+}
+// 4.9 fix 3: same arc/curve as PosterBoundsTransform, duration from
+// the speed pref. PosterCard/carousel build this with remember
+// (duration), so Slow/Normal/Fast changes the flight AND the page
+// slide together — never a drift between poster and page.
+@OptIn(ExperimentalSharedTransitionApi::class)
+fun boundsTransformFor(durationMs: Int): BoundsTransform = BoundsTransform { initialBounds, targetBounds ->
+    val arcMode = if (targetBounds.top < initialBounds.top) ArcMode.ArcBelow else ArcMode.ArcAbove
+    keyframes {
+        durationMillis = durationMs
+        initialBounds at 0 using arcMode using androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)
+        targetBounds at durationMs
     }
 }
 
@@ -581,6 +609,9 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     val sharedScope = LocalSharedTransitionScope.current
     val animScope = LocalAnimatedVisibilityScope.current
     val sharedPosterKeyState = LocalSharedPosterKey.current
+    // 4.9 fix 3: flight duration from speed pref, via local.
+    val transitionDurationMs = LocalTransitionDurationMs.current
+    val posterBoundsTransform = remember(transitionDurationMs) { boundsTransformFor(transitionDurationMs) }
     // 4.8.16 first-tap fix: ALL posters with a slot are ALWAYS shared,
     // not only the tapped one. Before, a poster only became shared at
     // tap time (when sharedPosterKey changed), so on the FIRST tap
@@ -609,7 +640,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     var titleVisible by remember { mutableStateOf(!shouldFadeTitle) }
     LaunchedEffect(shouldFadeTitle) {
         if (shouldFadeTitle) {
-            kotlinx.coroutines.delay(300)
+            kotlinx.coroutines.delay(transitionDurationMs.toLong())
             titleVisible = true
         }
     }
@@ -630,7 +661,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     var overlaysVisible by remember { mutableStateOf(!shouldFadeOverlays) }
     LaunchedEffect(shouldFadeOverlays) {
         if (shouldFadeOverlays) {
-            kotlinx.coroutines.delay(300)
+            kotlinx.coroutines.delay(transitionDurationMs.toLong())
             overlaysVisible = true
         }
     }
@@ -670,7 +701,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
             modifier = if (isSharedPoster && sharedScope != null && animScope != null && sharedContentState != null) {
                 with(sharedScope) {
                     Modifier
-                        .sharedElement(sharedContentState, animScope, boundsTransform = PosterBoundsTransform)
+                        .sharedElement(sharedContentState, animScope, boundsTransform = posterBoundsTransform)
                         .alpha(cardAlpha)
                         .size(width = cardWidth, height = cardHeight)
                         .clip(RoundedCornerShape(if (slot != null && slot.startsWith("carousel-")) 20.dp else 16.dp))
@@ -850,7 +881,24 @@ fun SearchSkeletonGrid() {
 }
 
 @Composable
-fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f) {
+fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, scrollStore: MutableMap<String, Pair<Int, Int>>? = null) {
+    // 4.9 fix 2: LazyRow state lived inside PosterRow, so when home
+    // was disposed during a detail (AnimatedContent replaces home
+    // with detail), the row state died with it and on back the row
+    // reset to item 0 — a 7th-slot card's slot was gone, so the
+    // poster vanished to the right instead of flying back. Fix:
+    // AppInner owns a plain scrollStore map (survives disposal,
+    // since AppInner is above AnimatedContent). Each row restores
+    // its saved first-visible index+offset on fresh composition,
+    // and saves its position via snapshotFlow while scrolling, so
+    // the row is EXACTLY where the user left it on back.
+    val savedRowPos = scrollStore?.get(heading)
+    val rowState = rememberLazyListState(initialFirstVisibleItemIndex = savedRowPos?.first ?: 0, initialFirstVisibleItemScrollOffset = savedRowPos?.second ?: 0)
+    if (scrollStore != null) {
+        LaunchedEffect(rowState) {
+            snapshotFlow { rowState.firstVisibleItemIndex to rowState.firstVisibleItemScrollOffset }.collect { scrollStore[heading] = it }
+        }
+    }
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (iconRes != null) {
@@ -875,7 +923,7 @@ fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpe
             }
         }
         Spacer(Modifier.height(12.dp))
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyRow(state = rowState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             items(titles, key = { it.id }) { PosterCard(it, { onOpen(it, "${heading}-${it.id}") }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade, slot = "${heading}-${it.id}") }
         }
     }
@@ -1041,6 +1089,8 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Uni
                 val carouselSharedScope = LocalSharedTransitionScope.current
                 val carouselAnimScope = LocalAnimatedVisibilityScope.current
                 val carouselSharedKey = LocalSharedPosterKey.current
+                val carouselTransitionDurationMs = LocalTransitionDurationMs.current
+                val carouselBoundsTransform = remember(carouselTransitionDurationMs) { boundsTransformFor(carouselTransitionDurationMs) }
                 // 4.8.16 first-tap fix, same as PosterCard: carousel poster is ALWAYS shared, not only when tapped, so first tap has starting bounds and flies, not teleports.
                 val isCarouselShared = carouselSharedScope != null && carouselAnimScope != null
                 @OptIn(ExperimentalSharedTransitionApi::class)
@@ -1049,7 +1099,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Uni
                 } else null
                 // 4.8.16 corners: shared PosterImage is clipped to 20dp (carousel card radius), INSIDE the shared element, so it never becomes a rectangle during flight, and detail poster for a carousel slot is also 20dp (see PosterCard), so no snap at landing — corners stay rounded throughout, morph is size/position only.
                 val carouselPosterModifier = if (isCarouselShared && carouselSharedScope != null && carouselAnimScope != null && carouselSharedState != null) {
-                    with(carouselSharedScope) { Modifier.sharedElement(carouselSharedState, carouselAnimScope, boundsTransform = PosterBoundsTransform).matchParentSize().clip(RoundedCornerShape(20.dp)) }
+                    with(carouselSharedScope) { Modifier.sharedElement(carouselSharedState, carouselAnimScope, boundsTransform = carouselBoundsTransform).matchParentSize().clip(RoundedCornerShape(20.dp)) }
                 } else Modifier.matchParentSize()
                 PosterImage(pick.poster, carouselPosterModifier, with(LocalDensity.current) { config.screenWidthDp.dp.toPx().toInt() })
                 // 1.9-dev4.8.4: reference-style card. No top pill
@@ -1074,7 +1124,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Uni
                 var detailsVisible by remember { mutableStateOf(!isTappedCarousel) }
                 LaunchedEffect(isTappedCarousel) {
                     if (isTappedCarousel) {
-                        kotlinx.coroutines.delay(300)
+                        kotlinx.coroutines.delay(carouselTransitionDurationMs.toLong())
                         detailsVisible = true
                     }
                 }
@@ -1210,10 +1260,21 @@ private data class BgDot(val xFrac: Float, val yFrac: Float, val radius: Float, 
 private data class TrailDot(val pos: Offset, val radius: Float)
 
 @Composable
-private fun androidx.compose.foundation.layout.BoxScope.ParticleLayer(particlesOn: Boolean, bgDots: List<BgDot>, bgOffsets: List<Offset>, searchTopPx: Float?) {
+private fun androidx.compose.foundation.layout.BoxScope.ParticleLayer(particlesOn: Boolean, paused: Boolean = false, bgDots: List<BgDot>, bgOffsets: List<Offset>, searchTopPx: Float?) {
+    // 4.9 fix 4: old call site passed particlesOn = pref && !scrolling,
+    // so dots VANISHED on scroll, and ParticleLayer returning early
+    // lost its animTime remember, so on scroll-stop dots SNAPPED
+    // back to t=0. Now: dots are always drawn when pref is on,
+    // ticker PAUSES (not hides) when paused — animTime freezes
+    // exactly where it is, no jerk, no snap, resumes from the
+    // same spot. Culling: header is a LazyColumn item, so when it
+    // scrolls off-screen LazyColumn disposes this composable and
+    // the ticker cancels automatically — no animation runs for
+    // particles the user cannot see.
     if (!particlesOn) return
     var animTime by remember { mutableStateOf(0L) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(paused) {
+        if (paused) return@LaunchedEffect
         while (true) {
             kotlinx.coroutines.delay(50)
             animTime += 50
@@ -1251,6 +1312,7 @@ fun HeaderSection(
     isSearching: Boolean,
     onPillPositioned: (androidx.compose.ui.layout.LayoutCoordinates) -> Unit = {},
     particlesOn: Boolean = true,
+    particlesPaused: Boolean = false,
     onCloseSearch: () -> Unit = {},
 ) {
     // No "Trail mode" text anywhere: the trail is an easter egg now.
@@ -1371,7 +1433,7 @@ fun HeaderSection(
                 )
             },
     ) {
-        ParticleLayer(particlesOn, bgDots, bgOffsets, searchTopPx)
+        ParticleLayer(particlesOn, particlesPaused, bgDots, bgOffsets, searchTopPx)
         Canvas(modifier = Modifier.matchParentSize()) {
             // One continuous glowing line: a wide low-alpha pink stroke
             // for the glow, then a thin bright core stroke. Round caps
@@ -1697,10 +1759,16 @@ fun AnipullAppInner() {
     // mid-flight and lose the tapped slot. This flag stays true
     // for 350ms after every screen change (tap or back), freezing
     // the carousel for the whole 300ms transition + buffer.
+    // 4.9 fix 3: speed pref, read every composition (tab switches
+    // recompose AppInner, so a Settings change applies immediately
+    // on return home). Curve is FIXED easeInOutCubic, only duration
+    // changes: Slow 450ms, Normal 300ms, Fast 200ms.
+    val transitionSpeedPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getString("transition_speed", "normal") ?: "normal"
+    val transitionDurationMs = when (transitionSpeedPref) { "slow" -> 450; "fast" -> 200; else -> 300 }
     var pageTransitioning by remember { mutableStateOf(false) }
     LaunchedEffect(screen) {
         pageTransitioning = true
-        kotlinx.coroutines.delay(350)
+        kotlinx.coroutines.delay(transitionDurationMs + 50L)
         pageTransitioning = false
     }
     // 4.8.17 stale-key fix (JS bug: tap Death Note, back, Settings,
@@ -1716,7 +1784,7 @@ fun AnipullAppInner() {
     // this key (4.8.16), so clearing cannot break first-tap flight.
     LaunchedEffect(screen) {
         if (screen != null) return@LaunchedEffect
-        kotlinx.coroutines.delay(650)
+        kotlinx.coroutines.delay(transitionDurationMs + 350L)
         sharedPosterKey = null
     }
     var carouselPage by remember { mutableStateOf(500) }
@@ -1753,9 +1821,20 @@ fun AnipullAppInner() {
     // smoothness comes from hardware bitmaps / scroll-wait updates,
     // not from dropping the blur.
     val listState = rememberLazyListState()
+    // 4.9 fix 2: row scroll positions, owned by AppInner so they
+    // survive home disposal during detail. Key = row heading.
+    val rowScrollStore = remember { mutableMapOf<String, Pair<Int, Int>>() }
     val translucentPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("translucent_dock", true)
     val dockTranslucent = translucentPref
-    val hazeSourceModifier: Modifier = if (dockTranslucent && screen == null)
+    // 4.9 fix 1: dock went SOLID during transition because both
+    // hazeSource and dock translucent were gated on screen == null,
+    // and screen flips to non-null at tap time, BEFORE the 300ms
+    // slide finishes. During transition the home branch is still
+    // rendered (sliding out), so its dock must stay translucent
+    // until the transition ends. pageTransitioning stays true for
+    // duration+50ms after every screen change, so gate on
+    // screen == null OR pageTransitioning instead.
+    val hazeSourceModifier: Modifier = if (dockTranslucent && (screen == null || pageTransitioning))
         Modifier.hazeSource(hazeState) else Modifier
     // 1.9-dev4.8.1: Show Explore toggle, re-read on every composition
     // (tab switches recompose this), so turning it off in Settings
@@ -1800,12 +1879,18 @@ fun AnipullAppInner() {
         appFocusManager.clearFocus()
         scope.launch { listState.scrollToItem(0) }
     }
+    // 4.9 fix 6: old order checked showLibrary BEFORE screen, so
+    // in Library tab first back closed the TAB (detail still on
+    // top, so user saw nothing happen), second back closed the
+    // detail to Home. Detail must outrank tabs: sheet, then
+    // detail, then tabs, then search. On-screen BackPill already
+    // called goBackFromDetail directly, which is why it worked.
     BackHandler(enabled = screen != null || sheetFor != null || showSettings || showDownloads || showLibrary || isSearchFocused || query.isNotBlank()) {
         if (sheetFor != null) sheetFor = null
+        else if (screen != null) goBackFromDetail()
         else if (showSettings) showSettings = false
         else if (showDownloads) showDownloads = false
         else if (showLibrary) showLibrary = false
-        else if (screen != null) goBackFromDetail()
         else if (isSearchFocused || query.isNotBlank()) closeSearch()
     }
 
@@ -2066,9 +2151,9 @@ fun AnipullAppInner() {
             transitionSpec = {
                 // 4.8.16 directional: forward (target = detail, non-null) slides in from right / out to left, as before. Reverse (target = home, null) MIRRORS: slides in from left / out to right, NOT same direction as forward — that was the infinite-scroll bug (detail went left, home came from right, on back too).
                 if (targetState == null) {
-                    slideInHorizontally(initialOffsetX = { -it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))) togetherWith slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)))
+                    slideInHorizontally(initialOffsetX = { -it }, animationSpec = tween(transitionDurationMs, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))) togetherWith slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(transitionDurationMs, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)))
                 } else {
-                    slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))) togetherWith slideOutHorizontally(targetOffsetX = { -it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)))
+                    slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(transitionDurationMs, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))) togetherWith slideOutHorizontally(targetOffsetX = { -it }, animationSpec = tween(transitionDurationMs, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)))
                 }
             },
             label = "pageSlide",
@@ -2077,6 +2162,7 @@ fun AnipullAppInner() {
                 LocalSharedTransitionScope provides this@SharedTransitionLayout,
                 LocalAnimatedVisibilityScope provides this@AnimatedContent,
                 LocalSharedPosterKey provides sharedPosterKey,
+                LocalTransitionDurationMs provides transitionDurationMs,
             ) {
                 if (targetScreen == null) {
                     Box(modifier = Modifier.fillMaxSize().background(Bg)) {
@@ -2154,7 +2240,9 @@ fun AnipullAppInner() {
                     isSearching = isSearchFocused || query.isNotBlank(),
                     onPillPositioned = { pillCoordsHolder[0] = it },
                     onCloseSearch = { closeSearch() },
-                    particlesOn = LocalContext.current.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("particles", true) && !listState.isScrollInProgress,
+                    // 4.9 fix 4: particles stay VISIBLE, ticker freezes on scroll/typing (particlesPaused), not hidden.
+                    particlesOn = LocalContext.current.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("particles", true),
+                    particlesPaused = listState.isScrollInProgress || isSearchFocused,
                 )
             }
             if (query.isNotBlank()) {
@@ -2230,7 +2318,7 @@ fun AnipullAppInner() {
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
-                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { t, slot -> openTitle(t, slot) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade) }
+                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { t, slot -> openTitle(t, slot) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore) }
                 }
                 featured?.let { pick ->
                     item(key = "home_carousel", contentType = "carousel") {
@@ -2263,7 +2351,7 @@ fun AnipullAppInner() {
                         "Top 10 Month" -> R.drawable.ic_trophy
                         else -> null
                     }
-                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade) }
+                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore) }
                 }
             } else if (homeFailed) {
                 // 1.9-dev2: failed load = skeletons + retry, never demo
@@ -2295,7 +2383,7 @@ fun AnipullAppInner() {
             // They load progressively in the background, like home rows.
             if (!isSearchFocused && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
-                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade) }
+                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore) }
                 }
             }
             // 1.9-dev4.8: Explore — after all catalogs, a grid (not a
@@ -2444,7 +2532,7 @@ fun AnipullAppInner() {
                 current = currentTab,
                 fraction = dockFraction,
                 onTab = { goTab(it) },
-                translucent = dockTranslucent && screen == null,
+                translucent = dockTranslucent && (screen == null || pageTransitioning),
                 hazeState = hazeState,
             )
         }
@@ -3169,9 +3257,11 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
     // the poster lands, exactly as JS asked).
     var detailAppeared by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) { detailAppeared = true }
+    // 4.9 fix 3: whole-screen fade matches flight duration, so it
+    // never finishes before landing on Slow or lags after on Fast.
     val detailAppearedFade by animateFloatAsState(
         targetValue = if (detailAppeared) 1f else 0f,
-        animationSpec = tween(300, easing = FastOutSlowInEasing),
+        animationSpec = tween(LocalTransitionDurationMs.current, easing = FastOutSlowInEasing),
         label = "detailFadeIn",
     )
     val detailAlpha = if (heroPosterHidden) detailFade else detailAppearedFade
