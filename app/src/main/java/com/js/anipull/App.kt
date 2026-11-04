@@ -1611,12 +1611,19 @@ fun AnipullAppInner() {
     // the Hero widget flies and the rest of the card stays.
     // This gives the empty poster slot for the overlay to land
     // in, on both home and detail sides.
-    val pageHiddenId by derivedStateOf { if (screen != null && pageAnim.value > 0f && pageAnim.value < 1f) screen!!.id else null }
+    // 4.8.14 AnymeX: NO hiding. Flight is OFF (see below), so
+    // there is no overlay to land on an empty slot. Hiding the
+    // tapped poster only created a black slot on home during the
+    // slide. Home poster stays visible until detail covers it.
+    val pageHiddenId: Long? = null
     val pageHiddenFade = if (pageHiddenId != null) 0f else 1f
     // 4.8.13: heroPosterHidden is also derived, for the same
     // reason — true during the whole flight, false only at
     // landing, so DetailScreen recomposes at landing, not per frame.
-    val heroPosterHiddenState by derivedStateOf { screen != null && pageAnim.value < 1f }
+    // 4.8.14: detail poster is NOT hidden — it slides in with
+    // the detail page at its real 118x177 layout size, never via
+    // a captured rect, so it cannot balloon.
+    val heroPosterHiddenState: Boolean = false
     var carouselPage by remember { mutableStateOf(500) }
     fun openTitle(t: ApiTitle, isCarousel: Boolean = false) {
         // 1.9-dev4.8.9 spam-proof: NO instant reopen, NO state
@@ -1964,7 +1971,7 @@ fun AnipullAppInner() {
         })
     } else if (showLoading) {
         LoadingScreen()
-    } else Box(modifier = Modifier.fillMaxSize().background(Bg).offset { androidx.compose.ui.unit.IntOffset(if (screen != null) (-pageAnim.value * screenWidthPx0).toInt() else 0, 0) }) {
+    } else Box(modifier = Modifier.fillMaxSize().background(Bg).offset { androidx.compose.ui.unit.IntOffset(if (screen != null) (-0.3f * pageAnim.value * screenWidthPx0).toInt() else 0, 0) }) {
     // Haze source: the whole tab content behind the dock, so the
     // translucent dock (when enabled) blurs real posters, not a
     // solid colour. The dock itself sits outside this inner Box.
@@ -2368,7 +2375,11 @@ fun AnipullAppInner() {
                 },
             )
         }
-        HeroFlightOverlay(pageAnim, heroSourceRect, heroSourceIsCarousel, detailCardFinal, detailPosterFinal, screen, { t, isC -> openTitle(t, isC) })
+        // 4.8.14: HeroFlightOverlay DISABLED on purpose.
+        // AnymeX slide only (home -0.3, detail 1->0). No manual
+        // poster flight, no captured rects, no balloon, no black.
+        // The function still exists below, unused, for a future
+        // SharedTransition replacement — it is NOT called here.
     }
 
     // 4.8.10 hidden pre-measure instance: only on the first
