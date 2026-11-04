@@ -592,21 +592,49 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     // slot matches detail, others just slide out with home.
     val isSharedPoster = slot != null && sharedScope != null && animScope != null
     val isTappedPoster = slot != null && slot == sharedPosterKeyState
-    // 4.8.16 tapped title fade: only for the tapped poster, on fresh
-    // composition (after reverse, home recomposed, isTapped true at
-    // start), title/meta fade in from below after 300ms landing,
-    // not instantly. Before tap, isTapped false, title visible
-    // immediately. During forward (outgoing), title already visible,
-    // no change.
-    var titleVisible by remember { mutableStateOf(!isTappedPoster) }
-    LaunchedEffect(isTappedPoster) {
-        if (isTappedPoster) {
+    // 4.8.17 correction (JS, his wording): normal cards shall travel
+    // with rating, type and title, title below fixed, NO fade, on
+    // way in AND way out. The 4.8.16 fade below EVERY tapped card
+    // was my over-application, not his ask. So: title/meta fade
+    // from below ONLY for a carousel-origin detail poster
+    // (slot starts with "carousel-", i.e. DetailScreen poster
+    // opened from Editor's Picks), where JS said keep the fade
+    // in title/type below the poster. Every other PosterCard
+    // (all grid rows, search, explore, library, and normal-origin
+    // detail poster) has titleVisible true from first composition,
+    // alpha 1, translation 0, fixed below the card, travelling
+    // with its page slide, no fade in either direction.
+    val isCarouselPoster = slot != null && slot.startsWith("carousel-")
+    val shouldFadeTitle = isTappedPoster && isCarouselPoster
+    var titleVisible by remember { mutableStateOf(!shouldFadeTitle) }
+    LaunchedEffect(shouldFadeTitle) {
+        if (shouldFadeTitle) {
             kotlinx.coroutines.delay(300)
             titleVisible = true
         }
     }
     val titleAlpha by animateFloatAsState(targetValue = if (titleVisible) 1f else 0f, animationSpec = tween(300, easing = FastOutSlowInEasing), label = "tappedTitleFade")
     val titleTransY = (1f - titleAlpha) * with(LocalDensity.current) { 16.dp.toPx() }
+    // 4.8.17 correction, Editor's Picks poster overlays: a carousel
+    // home poster is a bare PosterImage (no top pill, no download
+    // button), so when it lands in detail, the detail PosterCard's
+    // top rating pill + download button (and 1080p pill, which
+    // pops the same way) appeared SUDDENLY at landing. For
+    // carousel-origin detail posters ONLY, those overlays now
+    // fade in NORMALLY (alpha only, no direction, no slide):
+    // hidden at fresh composition, 300ms delay (poster landing),
+    // then 300ms alpha 0->1. Normal-origin posters already carry
+    // those overlays on home, so they travel with the shared
+    // poster, no fade, unchanged.
+    val shouldFadeOverlays = isCarouselPoster
+    var overlaysVisible by remember { mutableStateOf(!shouldFadeOverlays) }
+    LaunchedEffect(shouldFadeOverlays) {
+        if (shouldFadeOverlays) {
+            kotlinx.coroutines.delay(300)
+            overlaysVisible = true
+        }
+    }
+    val overlaysAlpha by animateFloatAsState(targetValue = if (overlaysVisible) 1f else 0f, animationSpec = tween(300, easing = FastOutSlowInEasing), label = "posterOverlaysFade")
     @OptIn(ExperimentalSharedTransitionApi::class)
     val sharedContentState = if (sharedScope != null) {
         sharedScope.sharedState(slot ?: "unused-${title.id}")
@@ -666,6 +694,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
             if (topLabel != null) {
                 Box(
                     modifier = Modifier
+                        .alpha(overlaysAlpha)
                         .align(Alignment.TopCenter)
                         .padding(top = 8.dp)
                         .clip(RoundedCornerShape(999.dp))
@@ -677,6 +706,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
             }
             Box(
                 modifier = Modifier
+                    .alpha(overlaysAlpha)
                     .align(Alignment.BottomStart)
                     .padding(8.dp)
                     .clip(RoundedCornerShape(6.dp))
@@ -687,6 +717,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
             }
             Box(
                 modifier = Modifier
+                    .alpha(overlaysAlpha)
                     .align(Alignment.BottomEnd)
                     .padding(8.dp)
                     .size(36.dp)
@@ -1038,7 +1069,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Uni
                         )
                     )
                 )
-                // 4.8.16 carousel details fade: only for the tapped pick, on fresh composition (after reverse), details (title/meta/buttons) fade in from below after 300ms landing, not instantly. Before tap, details visible immediately. During forward (outgoing), details already visible, no change.
+                // 4.8.16 carousel details fade, KEPT in 4.8.17 per JS (Editor's Picks: keep fade in title/type below the poster): only for the tapped pick, on fresh composition (after reverse), details (title/meta/buttons) fade in from below after 300ms landing, not instantly. Before tap, details visible immediately. During forward (outgoing), details already visible, no change.
                 val isTappedCarousel = "carousel-${pick.id}" == carouselSharedKey
                 var detailsVisible by remember { mutableStateOf(!isTappedCarousel) }
                 LaunchedEffect(isTappedCarousel) {
@@ -1672,6 +1703,22 @@ fun AnipullAppInner() {
         kotlinx.coroutines.delay(350)
         pageTransitioning = false
     }
+    // 4.8.17 stale-key fix (JS bug: tap Death Note, back, Settings,
+    // Home, Death Note title/type/year fades from below AGAIN):
+    // sharedPosterKey was set on tap and NEVER cleared, so a later
+    // tab return recomposed home fresh with the stale tapped key
+    // and re-ran return fades. Clear it 650ms after a return
+    // (300ms transition + 300ms fade + buffer), so a fade runs
+    // once on the actual return only. LaunchedEffect(screen)
+    // cancels this on reopen, so rapid back-and-reopen keeps the
+    // new key. goTab also clears immediately (tab switch is not
+    // a detail return). Always-shared posters do NOT depend on
+    // this key (4.8.16), so clearing cannot break first-tap flight.
+    LaunchedEffect(screen) {
+        if (screen != null) return@LaunchedEffect
+        kotlinx.coroutines.delay(650)
+        sharedPosterKey = null
+    }
     var carouselPage by remember { mutableStateOf(500) }
     fun openTitle(t: ApiTitle, slot: String? = null, isCarousel: Boolean = false) {
         // 4.8.15: simple. Set shared key BEFORE screen, so both
@@ -1806,6 +1853,10 @@ fun AnipullAppInner() {
         // handler, not in a LaunchedEffect(currentTab) that can fire
         // mid-composition and leave reverse state half-cleared.
         screen = null
+        // 4.8.17 stale-key fix: tab switch is not a detail return,
+        // so never leave a tapped key behind to re-trigger a
+        // return fade when Home recomposes later.
+        sharedPosterKey = null
         showSettings = tab == Tab.Settings
         showDownloads = tab == Tab.Downloads
         showLibrary = tab == Tab.Library
@@ -3124,14 +3175,13 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
         label = "detailFadeIn",
     )
     val detailAlpha = if (heroPosterHidden) detailFade else detailAppearedFade
-    // 4.8.16 detail info delayed fade: info Column (title/type/score/genres) fades in from below AFTER poster lands (300ms delay + 300ms fade), not instantly at landing. Poster itself is shared, so it is already visible at landing, only info delays. DetailScreen is only composed as incoming content, so LaunchedEffect(Unit) runs at transition start, info appears 300-600ms after tap.
-    var detailInfoVisible by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        kotlinx.coroutines.delay(300)
-        detailInfoVisible = true
-    }
-    val detailInfoAlpha by animateFloatAsState(targetValue = if (detailInfoVisible) 1f else 0f, animationSpec = tween(300, easing = FastOutSlowInEasing), label = "detailInfoFade")
-    val detailInfoTransY = (1f - detailInfoAlpha) * with(LocalDensity.current) { 20.dp.toPx() }
+    // 4.8.17 correction (JS): title on the RIGHT of the poster in
+    // detail is FIXED, no effects, for ALL origins (normal and
+    // Editor's Picks alike). The 4.8.16 delayed fade-from-below on
+    // this info Column is removed entirely. The pre-existing
+    // whole-screen 300ms detailAlpha fade from 4.8.8/4.8.15 stays,
+    // as it did in the build JS just approved — this change only
+    // removes the EXTRA info fade/slide on top of it.
     val isFrierenDemo = title.title.startsWith("Frieren") && title.episodes != null
     val episodes = if (isFrierenDemo && season == 2) emptyList()
         else title.episodes?.let { (1..it).toList() }
@@ -3164,7 +3214,7 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
                 // like shonenx's detail page sliding in from the
                 // right while its Hero poster flies. When there
                 // is no hero, detailFade is 1, offset 0.
-                Column(modifier = Modifier.weight(1f).alpha(detailInfoAlpha).graphicsLayer { translationX = (1f - detailFade) * 40f; translationY = detailInfoTransY }) {
+                Column(modifier = Modifier.weight(1f).graphicsLayer { translationX = (1f - detailFade) * 40f }) {
                     Text(title.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont)
                     Spacer(Modifier.height(4.dp))
                     val meta = listOfNotNull(title.type, title.year).joinToString(" · ")
