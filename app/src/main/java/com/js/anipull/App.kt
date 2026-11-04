@@ -3,6 +3,13 @@ package com.js.anipull
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibilityScope
+import androidx.compose.animation.BoundsTransform
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.SharedTransitionScope
+import androidx.compose.animation.core.ArcMode
+import androidx.compose.animation.core.keyframes
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
@@ -85,6 +92,8 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -480,8 +489,32 @@ private fun safeBounds(coords: androidx.compose.ui.layout.LayoutCoordinates?): a
     return try { coords.boundsInWindow() } catch (e: IllegalStateException) { null }
 }
 
+@OptIn(ExperimentalSharedTransitionApi::class)
+val LocalSharedTransitionScope = compositionLocalOf<SharedTransitionScope?> { null }
+@OptIn(ExperimentalSharedTransitionApi::class)
+val LocalAnimatedVisibilityScope = compositionLocalOf<AnimatedVisibilityScope?> { null }
+val LocalSharedPosterKey = compositionLocalOf<String?> { null }
+@OptIn(ExperimentalSharedTransitionApi::class)
 @Composable
-fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseHiddenId: Long? = null, reverseFade: Float = 1f) {
+fun SharedTransitionScope.sharedState(key: String) = rememberSharedContentState(key = key)
+
+// 4.8.15 SharedTransition bounds: poster morphs in 300ms, easeInOutCubic,
+// on a circular arc bulging UP (ArcAbove), matching shonenx/AnymeX Hero.
+// Same duration/curve as the page slide, so poster + page never drift.
+// BoundsTransform is a framework hook — no captured rects, no manual lerp,
+// size/position come from real layout in both pages, so balloon is impossible.
+@OptIn(ExperimentalSharedTransitionApi::class)
+val PosterBoundsTransform: BoundsTransform = BoundsTransform { initialBounds, targetBounds ->
+    keyframes {
+        durationMillis = 300
+        initialBounds at 0 using ArcMode.ArcAbove using androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)
+        targetBounds at 300
+    }
+}
+
+@Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
+fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseHiddenId: Long? = null, reverseFade: Float = 1f, slot: String? = null) {
     val cardHeight = cardWidth * 3 / 2
     // 1.9-dev4.8.2 scroll optimisation + full-card hero: bounds are
     // NO LONGER reported by onGloballyPositioned, which fires on
@@ -527,6 +560,26 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     // overlay clears there is no pop, and a tap at any moment
     // registers (openTitle cancels reverse and reopens, see below).
     val cardAlpha = if (isReverseHidden) reverseFade else 1f
+    // 4.8.15 SharedTransition, poster-only: if this card's slot
+    // matches the tapped slot (from LocalSharedPosterKey), and
+    // we are inside SharedTransitionLayout + AnimatedContent
+    // (locals non-null), this poster Box becomes the shared
+    // element. Framework hides it in place during transition
+    // (leaving the empty slot in home / gap in detail), flies
+    // it in the overlay with PosterBoundsTransform (arc, 300ms),
+    // and lands it in the detail poster slot. Title below the
+    // poster is NOT shared — it slides out with home, detail
+    // title slides in with detail, exactly AnymeX poster-only.
+    // Always remember the SharedContentState when a scope
+    // exists, so remember order stays stable when isShared flips.
+    val sharedScope = LocalSharedTransitionScope.current
+    val animScope = LocalAnimatedVisibilityScope.current
+    val sharedPosterKeyState = LocalSharedPosterKey.current
+    val isSharedPoster = slot != null && slot == sharedPosterKeyState && sharedScope != null && animScope != null
+    @OptIn(ExperimentalSharedTransitionApi::class)
+    val sharedContentState = if (sharedScope != null) {
+        sharedScope.sharedState(slot ?: "unused-${title.id}")
+    } else null
     Column(
         modifier = Modifier
             .width(cardWidth)
@@ -555,7 +608,17 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
             }),
     ) {
         Box(
-            modifier = Modifier
+            modifier = if (isSharedPoster && sharedScope != null && animScope != null && sharedContentState != null) {
+                with(sharedScope) {
+                    Modifier
+                        .sharedElement(sharedContentState, animScope, boundsTransform = PosterBoundsTransform)
+                        .alpha(cardAlpha)
+                        .size(width = cardWidth, height = cardHeight)
+                        .clip(RoundedCornerShape(16.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
+                        .onPlaced { coords -> safeBounds(coords)?.let { onPosterBounds?.invoke(it) } }
+                }
+            } else Modifier
                 .alpha(cardAlpha)
                 .size(width = cardWidth, height = cardHeight)
                 .clip(RoundedCornerShape(16.dp))
@@ -725,7 +788,7 @@ fun SearchSkeletonGrid() {
 }
 
 @Composable
-fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f) {
+fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f) {
     Column {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (iconRes != null) {
@@ -751,7 +814,7 @@ fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpe
         }
         Spacer(Modifier.height(12.dp))
         LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it) }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade) }
+            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it, "${heading}-${it.id}") }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade, slot = "${heading}-${it.id}") }
         }
     }
 }
@@ -775,7 +838,8 @@ fun CarouselDot(selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, initialPage: Int = -1, onPageChange: ((Int) -> Unit)? = null) {
+@OptIn(ExperimentalSharedTransitionApi::class)
+fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, initialPage: Int = -1, onPageChange: ((Int) -> Unit)? = null) {
     // 1.9-dev4.8: Editor's pick is now Editor's PICKS, a 5-item
     // carousel, and the description lines are GONE altogether (JS's
     // call) — title + type pill + buttons only, over the poster.
@@ -904,10 +968,26 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                     }
                     .clickable(interactionSource = cInteraction, indication = null) {
                         cardCoords[0]?.let { c -> safeBounds(c)?.let { onBounds?.invoke(pick, it) } }
-                        onOpen(pick)
+                        onOpen(pick, "carousel-${pick.id}")
                     },
             ) {
-                PosterImage(pick.poster, Modifier.matchParentSize(), with(LocalDensity.current) { config.screenWidthDp.dp.toPx().toInt() })
+                // 4.8.15 carousel shared poster, poster-only:
+                // title/buttons/gradient stay in the card and slide
+                // out with home, poster flies alone to detail.
+                // Inactive until LocalShared* locals are provided
+                // (Step 3), so old flight still works meanwhile.
+                val carouselSharedScope = LocalSharedTransitionScope.current
+                val carouselAnimScope = LocalAnimatedVisibilityScope.current
+                val carouselSharedKey = LocalSharedPosterKey.current
+                val isCarouselShared = "carousel-${pick.id}" == carouselSharedKey && carouselSharedScope != null && carouselAnimScope != null
+                @OptIn(ExperimentalSharedTransitionApi::class)
+                val carouselSharedState = if (carouselSharedScope != null) {
+                    carouselSharedScope.sharedState("carousel-${pick.id}")
+                } else null
+                val carouselPosterModifier = if (isCarouselShared && carouselSharedScope != null && carouselAnimScope != null && carouselSharedState != null) {
+                    with(carouselSharedScope) { Modifier.matchParentSize().sharedElement(carouselSharedState, carouselAnimScope, boundsTransform = PosterBoundsTransform) }
+                } else Modifier.matchParentSize()
+                PosterImage(pick.poster, carouselPosterModifier, with(LocalDensity.current) { config.screenWidthDp.dp.toPx().toInt() })
                 // 1.9-dev4.8.4: reference-style card. No top pill
                 // (no spotlight text in our data), no dark horizontal
                 // gradient hiding the poster, no full-width buttons.
@@ -988,7 +1068,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle) -> Unit, notWi
                                 // fell back to a stale rect. Set them
                                 // exactly like the card tap does.
                                 cardCoords[0]?.let { c -> safeBounds(c)?.let { onBounds?.invoke(pick, it) } }
-                                onOpen(pick)
+                                onOpen(pick, "carousel-${pick.id}")
                             },
                             colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1A1A24)),
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 18.dp, vertical = 11.dp),
@@ -1449,9 +1529,17 @@ fun AnipullApp() {
 }
 
 @Composable
+@OptIn(ExperimentalSharedTransitionApi::class)
 fun AnipullAppInner() {
     val context = LocalContext.current
     var screen by remember { mutableStateOf<ApiTitle?>(null) }
+    // 4.8.15: tapped poster's slot (e.g. "carousel-123", "Trending-456").
+    // Set on tap, BEFORE screen changes, so AnimatedContent transition
+    // renders both outgoing home poster and incoming detail poster with
+    // the SAME shared key. Never cleared on back — reverse flight needs
+    // the same key, and after transition only one content is present,
+    // so a stale key is harmless (it just becomes a normal poster).
+    var sharedPosterKey by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var sheetFor by remember { mutableStateOf<ApiTitle?>(null) }
     var liveSections by remember { mutableStateOf<List<HomeSection>?>(null) }
@@ -1509,163 +1597,53 @@ fun AnipullAppInner() {
     // Poster window bounds by title id, updated by PosterCard layout
     // (a plain map, not state, so scrolling never recomposes the app).
     val posterBounds = remember { mutableMapOf<Long, Rect>() }
-    // 1.9-dev4.8.9: SINGLE page transition, copied from shonenx/Flutter.
-    // Old model (4.8.4-4.8.8) had TWO separate flights: forward hero
-    // (animateFloatAsState, dest-rect-gated) and reverse hero
-    // (Animatable), plus detail appearing/disappearing instantly
-    // when screen was set/cleared. That is why spam-tapping
-    // back + same poster fast broke it: a tap could clear one
-    // flight while the other was still running, leaving a stuck
-    // overlay, a missing poster, or a jump. Flutter does it with
-    // ONE AnimationController: page slide + Hero flight are the
-    // SAME progress value, forward = 0->1, reverse = 1->0, and a
-    // tap mid-flight just flips the target — the animation
-    // continues from its CURRENT value, never jumps, never
-    // clears state mid-flight. That is what pageAnim is here.
-    // - screen = title in detail (open, transitioning, or closing)
-    // - pageClosing = true only while sliding out to home
-    // - target = 1 if open and not closing, else 0
-    // - LaunchedEffect(screen, pageClosing) animates to target,
-    //   and ONLY after reaching 0 does it clear screen.
-    // Home/tab is ALWAYS mounted underneath now (see root
-    // render below), so the detail page slides OVER home like
-    // a player, instead of replacing it instantly.
-    var heroSourceRect by remember { mutableStateOf<Rect?>(null) }
-    var heroSourceIsCarousel by remember { mutableStateOf(false) }
-    var detailCardRect by remember { mutableStateOf<Rect?>(null) }
-    var detailPosterRect by remember { mutableStateOf<Rect?>(null) }
-    // Final (page-offset = 0) detail rects, captured once per
-    // transition from the first reported rect minus the current
-    // page offset. The reported rect moves with the sliding page,
-    // so reported - offset is constant = final. Capturing once
-    // avoids chasing a moving target mid-flight.
-    var detailCardFinal by remember { mutableStateOf<Rect?>(null) }
-    var detailPosterFinal by remember { mutableStateOf<Rect?>(null) }
-    val pageAnim = remember { androidx.compose.animation.core.Animatable(0f) }
-    // 4.8.13: NO top-level pageProgress val here. Reading
-    // pageAnim.value during AnipullAppInner composition made
-    // the WHOLE home LazyColumn recompose every animation
-    // frame — posters reloaded, home went black, overlay lagged
-    // behind the page slide and snapped at the end. pageAnim
-    // is now read ONLY in layout lambdas (offset/graphicsLayer,
-    // layout invalidation, not composition), in derivedStateOf
-    // (notifies only when the result changes), and inside the
-    // isolated HeroFlightOverlay below (only overlay recomposes
-    // per frame, home/detail stay frozen and visible).
-    val pageDensity0 = LocalDensity.current
-    val pageConfig0 = LocalConfiguration.current
-    val screenWidthPx0 = with(pageDensity0) { pageConfig0.screenWidthDp.dp.toPx() }
-    var pageClosing by remember { mutableStateOf(false) }
-    val heroMotion = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getString("hero_motion", "normal") ?: "normal"
-    // 1.9-dev4.8.10: shonenx EXACT — AppPageTransition in
-    // shonenx/lib/core/theme/app_theme.dart: easeInOutCubic
-    // (CubicBezier 0.65, 0, 0.35, 1), slide in Offset(1,0)->0,
-    // slide out Offset(0)->(-1,0), go_router default 300ms.
-    // Previous 400ms FastOutSlowIn was the wrong curve and the
-    // wrong duration, and it made page + poster drift from the
-    // shonenx feel even when rects were right. heroMotion
-    // setting is ignored for the page transition now — one
-    // motion, copied exactly, not a menu of approximations.
-    val pageSpec: androidx.compose.animation.core.AnimationSpec<Float> = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))
-    LaunchedEffect(screen, pageClosing) {
-        val target = if (screen != null && !pageClosing) 1f else 0f
-        pageAnim.animateTo(target, pageSpec)
-        // 4.8.10: do NOT clear detail dest cache here. Detail
-        // poster position is constant (118dp, fixed header),
-        // so a once-captured dest is valid for every title.
-        // Clearing it forced a re-measure on every tap, and
-        // that re-measure during a slide is exactly what made
-        // the overlay fly to the wrong place / appear late.
-        if (target == 0f && screen != null) { screen = null; pageClosing = false }
-    }
-    // 4.8.10 pre-measure: on the FIRST ever tap, dest is null,
-    // so we do NOT start the slide yet. Instead we render a
-    // hidden detail page at final position (offset 0, alpha 0)
-    // for one frame, capture its poster rects, THEN start the
-    // slide with dest already known. That is the whole black-
-    // snap fix: before, dest was captured DURING the slide,
-    // when the detail page was off-screen / partially visible,
-    // so the overlay either never appeared (black empty slot)
-    // or appeared late at an intermediate rect and snapped.
-    // After the first capture, dest is cached forever, so all
-    // later taps slide immediately with overlay from frame 1.
-    var pendingTitle by remember { mutableStateOf<ApiTitle?>(null) }
-    var pendingIsCarousel by remember { mutableStateOf(false) }
-    LaunchedEffect(pendingTitle, detailCardFinal, detailPosterFinal) {
-        val pt = pendingTitle
-        if (pt != null) {
-            val needCard = !pendingIsCarousel
-            val ready = if (needCard) detailCardFinal != null else detailPosterFinal != null
-            if (ready) {
-                heroSourceRect = posterBounds[pt.id]
-                heroSourceIsCarousel = pendingIsCarousel
-                pendingTitle = null
-                pageClosing = false
-                screen = pt
-            }
-        }
-    }
-    // Poster-hidden for the transitioning title: only the POSTER
-    // is hidden (see PosterCard/Carousel below), title/buttons
-    // stay in the home slot — exactly Flutter Hero, where only
-    // the Hero widget flies and the rest of the card stays.
-    // This gives the empty poster slot for the overlay to land
-    // in, on both home and detail sides.
-    // 4.8.14 AnymeX: NO hiding. Flight is OFF (see below), so
-    // there is no overlay to land on an empty slot. Hiding the
-    // tapped poster only created a black slot on home during the
-    // slide. Home poster stays visible until detail covers it.
+    // 4.8.9-4.8.14 manual pageAnim/overlay model SUPERSEDED by 4.8.15 below.
+    // 4.8.15 SharedTransition, from scratch: NO manual flight at all.
+    // No pageAnim, no rect capture, no overlay, no hiding, no pre-measure.
+    // Page slide + poster flight are ONE framework transition:
+    // SharedTransitionLayout + AnimatedContent below, with
+    // slideIn from right + slideOut to left, 300ms easeInOutCubic,
+    // and poster sharedElement with PosterBoundsTransform (arc, 300ms).
+    // AnimatedContent renders BOTH pages during the slide, so
+    // home + detail always cover the screen — no gap, no black.
+    // Poster size/position come from real layout in both pages,
+    // so it cannot balloon. Spam-taps just flip AnimatedContent
+    // targetState — framework interrupts and continues from current
+    // value, never jumps, never clears state mid-flight.
+    // pageHiddenId / pageHiddenFade are kept as constants ONLY
+    // because existing PosterCard/Row/Carousel call sites still
+    // pass them — they are always null / 1 now, SharedTransition
+    // handles hiding in place during transition, not manual alpha.
     val pageHiddenId: Long? = null
-    val pageHiddenFade = if (pageHiddenId != null) 0f else 1f
-    // 4.8.13: heroPosterHidden is also derived, for the same
-    // reason — true during the whole flight, false only at
-    // landing, so DetailScreen recomposes at landing, not per frame.
-    // 4.8.14: detail poster is NOT hidden — it slides in with
-    // the detail page at its real 118x177 layout size, never via
-    // a captured rect, so it cannot balloon.
-    val heroPosterHiddenState: Boolean = false
+    val pageHiddenFade = 1f
+    // Carousel auto-scroll freeze during page transition: during
+    // reverse, screen becomes null immediately, so the old
+    // "screen == null" guard would let the carousel advance
+    // mid-flight and lose the tapped slot. This flag stays true
+    // for 350ms after every screen change (tap or back), freezing
+    // the carousel for the whole 300ms transition + buffer.
+    var pageTransitioning by remember { mutableStateOf(false) }
+    LaunchedEffect(screen) {
+        pageTransitioning = true
+        kotlinx.coroutines.delay(350)
+        pageTransitioning = false
+    }
     var carouselPage by remember { mutableStateOf(500) }
-    fun openTitle(t: ApiTitle, isCarousel: Boolean = false) {
-        // 1.9-dev4.8.9 spam-proof: NO instant reopen, NO state
-        // clear. If this title is already closing, just flip
-        // pageClosing off — the LaunchedEffect above animates
-        // pageAnim back to 1 from its CURRENT value, so the
-        // detail slides back in and the poster flies back to
-        // detail, exactly like Flutter reversing a page route.
-        // If a different title is tapped mid-close, it starts a
-        // fresh forward flight from its own home rect.
-        if (screen?.id == t.id && pageClosing) { pageClosing = false; return }
-        if (screen?.id == t.id && !pageClosing) return
-        val src = posterBounds[t.id]
-        // First ever tap: dest not yet cached -> pre-measure
-        // (see above), do not start slide with a null dest.
-        // 4.8.11 carousel bug: flag used to be set ONLY when
-        // src != null. A carousel Details-button tap never set
-        // bounds (see below), so src was null, flag stayed at
-        // the previous tap's value, and the flight fell back to
-        // the grid PosterCard path with a carousel-sized src —
-        // a full-width PosterCard overflowing its box to a huge
-        // tall poster, then snapping to the 275dp card at
-        // landing. That is exactly the screenshots. Now the
-        // flag is always set for a new title, bounds or not.
-        heroSourceIsCarousel = isCarousel
-        if (detailCardFinal == null && detailPosterFinal == null && pendingTitle == null) {
-            if (src != null) heroSourceRect = src
-            pendingTitle = t; pendingIsCarousel = isCarousel
-            return
-        }
-        if (src != null) { heroSourceRect = src }
-        pageClosing = false
+    fun openTitle(t: ApiTitle, slot: String? = null, isCarousel: Boolean = false) {
+        // 4.8.15: simple. Set shared key BEFORE screen, so both
+        // outgoing home poster and incoming detail poster render
+        // with the SAME key during AnimatedContent transition.
+        // If this title is already open, do nothing.
+        if (screen?.id == t.id) return
+        if (slot != null) sharedPosterKey = slot
+        else if (isCarousel) sharedPosterKey = "carousel-${t.id}"
         screen = t
     }
     fun goBackFromDetail() {
-        // 1.9-dev4.8.9: do NOT clear screen here. Just flip the
-        // target to 0 — detail slides out to the right, poster
-        // flies back, home is revealed underneath, and ONLY
-        // after the animation reaches 0 does the LaunchedEffect
-        // above clear screen. That is why back no longer makes
-        // the page instantly disappear.
-        if (screen != null) pageClosing = true
+        // 4.8.15: just clear screen. AnimatedContent reverses:
+        // detail slides out right, home slides in left, poster
+        // flies back to its home slot (same shared key, kept).
+        screen = null
     }
     val dockModeState = remember {
         mutableStateOf(
@@ -1783,7 +1761,7 @@ fun AnipullAppInner() {
         // 1.9-dev4.8.6-hotfix: clear any reverse here, in the tap
         // handler, not in a LaunchedEffect(currentTab) that can fire
         // mid-composition and leave reverse state half-cleared.
-        screen = null; pageClosing = false
+        screen = null
         showSettings = tab == Tab.Settings
         showDownloads = tab == Tab.Downloads
         showLibrary = tab == Tab.Library
@@ -1971,7 +1949,21 @@ fun AnipullAppInner() {
         })
     } else if (showLoading) {
         LoadingScreen()
-    } else Box(modifier = Modifier.fillMaxSize().background(Bg).offset { androidx.compose.ui.unit.IntOffset(if (screen != null) (-0.3f * pageAnim.value * screenWidthPx0).toInt() else 0, 0) }) {
+    } else SharedTransitionLayout {
+        AnimatedContent(
+            targetState = screen,
+            transitionSpec = {
+                slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))) togetherWith slideOutHorizontally(targetOffsetX = { -it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)))
+            },
+            label = "pageSlide",
+        ) { targetScreen ->
+            CompositionLocalProvider(
+                LocalSharedTransitionScope provides this@SharedTransitionLayout,
+                LocalAnimatedVisibilityScope provides this@AnimatedContent,
+                LocalSharedPosterKey provides sharedPosterKey,
+            ) {
+                if (targetScreen == null) {
+                    Box(modifier = Modifier.fillMaxSize().background(Bg)) {
     // Haze source: the whole tab content behind the dock, so the
     // translucent dock (when enabled) blurs real posters, not a
     // solid colour. The dock itself sits outside this inner Box.
@@ -1983,7 +1975,7 @@ fun AnipullAppInner() {
     } else if (showLibrary) {
         LibraryScreen(
             saved = savedTitles,
-            onOpen = { openTitle(it) },
+            onOpen = { t, slot -> openTitle(t, slot) },
             onBrowseHome = { goTab(Tab.Home) },
             onRemove = { toggleSave(it) },
         )
@@ -2080,7 +2072,7 @@ fun AnipullAppInner() {
                                 results.chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade)
+                                            PosterCard(t, onClick = { openTitle(t, "search-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "search-${t.id}")
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -2110,7 +2102,7 @@ fun AnipullAppInner() {
                                 cachedTitles.take(12).chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade)
+                                            PosterCard(t, onClick = { openTitle(t, "cached-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "cached-${t.id}")
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -2122,7 +2114,7 @@ fun AnipullAppInner() {
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
-                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { openTitle(it) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade) }
+                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { t, slot -> openTitle(t, slot) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade) }
                 }
                 featured?.let { pick ->
                     item(key = "home_carousel", contentType = "carousel") {
@@ -2139,7 +2131,7 @@ fun AnipullAppInner() {
                         Spacer(Modifier.height(12.dp))
                         val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
                             .distinctBy { it.id }.take(5)
-                        EditorsPickCarousel(picks, { openTitle(it, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, initialPage = carouselPage, onPageChange = { carouselPage = it })
+                        EditorsPickCarousel(picks, { t, slot -> openTitle(t, slot, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null && !pageTransitioning, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, initialPage = carouselPage, onPageChange = { carouselPage = it })
                     }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
@@ -2155,7 +2147,7 @@ fun AnipullAppInner() {
                         "Top 10 Month" -> R.drawable.ic_trophy
                         else -> null
                     }
-                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade) }
+                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade) }
                 }
             } else if (homeFailed) {
                 // 1.9-dev2: failed load = skeletons + retry, never demo
@@ -2187,7 +2179,7 @@ fun AnipullAppInner() {
             // They load progressively in the background, like home rows.
             if (!isSearchFocused && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
-                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { openTitle(it) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade) }
+                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade) }
                 }
             }
             // 1.9-dev4.8: Explore — after all catalogs, a grid (not a
@@ -2252,7 +2244,7 @@ fun AnipullAppInner() {
                                 shownExplore.chunked(exploreCols).forEach { trio ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         trio.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t) }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade)
+                                            PosterCard(t, onClick = { openTitle(t, "explore-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "explore-${t.id}")
                                         }
                                         repeat(exploreCols - trio.size) { Spacer(Modifier.width(cardW)) }
                                     }
@@ -2341,68 +2333,24 @@ fun AnipullAppInner() {
             )
         }
     }
-    }
-
-    // 1.9-dev4.8.9: detail is a PAGE over home, not a screen swap.
-    // Tab is always mounted underneath (see else branch above),
-    // so this Box slides in from the right over home, and slides
-    // out to the right on back, revealing home underneath —
-    // exactly shonenx's page route. Poster overlay below uses
-    // the SAME pageProgress, so page + poster never drift apart.
-    if (screen != null) {
-        val pageDensity = LocalDensity.current
-        val pageConfig = LocalConfiguration.current
-        val screenWidthPx = with(pageDensity) { pageConfig.screenWidthDp.dp.toPx() }
-        // 4.8.13: offset lambda reads pageAnim directly
-        // (layout invalidation, not composition), so Detail
-        // slides smoothly without recomposing DetailScreen per frame.
-        Box(modifier = Modifier.fillMaxSize().background(Bg).offset { androidx.compose.ui.unit.IntOffset(((1f - pageAnim.value) * screenWidthPx).toInt(), 0) }) {
-            DetailScreen(
-                title = screen!!,
-                onBack = { goBackFromDetail() },
-                onPull = { sheetFor = it },
-                isSaved = savedTitles.any { it.id == screen!!.id },
-                onSaveToggle = { screen?.let { toggleSave(it) } },
-                heroPosterHidden = heroPosterHiddenState,
-                detailFade = 1f,
-                onPosterBounds = { rect ->
-                    detailCardRect = rect
-                    if (detailCardFinal == null) detailCardFinal = Rect(rect.left - (1f - pageAnim.value) * screenWidthPx, rect.top, rect.right - (1f - pageAnim.value) * screenWidthPx, rect.bottom)
-                },
-                onPosterImageBounds = { rect ->
-                    detailPosterRect = rect
-                    if (detailPosterFinal == null) detailPosterFinal = Rect(rect.left - (1f - pageAnim.value) * screenWidthPx, rect.top, rect.right - (1f - pageAnim.value) * screenWidthPx, rect.bottom)
-                },
-            )
-        }
-        // 4.8.14: HeroFlightOverlay DISABLED on purpose.
-        // AnymeX slide only (home -0.3, detail 1->0). No manual
-        // poster flight, no captured rects, no balloon, no black.
-        // The function still exists below, unused, for a future
-        // SharedTransition replacement — it is NOT called here.
-    }
-
-    // 4.8.10 hidden pre-measure instance: only on the first
-    // ever tap, while pendingTitle is set. Rendered at final
-    // position (offset 0) with alpha 0, so the user never sees
-    // it, but its poster IS laid out and onPlaced fires with
-    // the true final rect. Once captured, the LaunchedEffect
-    // above starts the real slide with dest already known.
-    if (pendingTitle != null) {
-        Box(modifier = Modifier.fillMaxSize().background(Bg).alpha(0f)) {
-            DetailScreen(
-                title = pendingTitle!!,
-                onBack = {},
-                onPull = {},
-                isSaved = false,
-                onSaveToggle = {},
-                heroPosterHidden = false,
-                detailFade = 1f,
-                onPosterBounds = { rect -> if (detailCardFinal == null) detailCardFinal = rect },
-                onPosterImageBounds = { rect -> if (detailPosterFinal == null) detailPosterFinal = rect },
-            )
+                    } // close Tab Box
+                } else {
+                    Box(modifier = Modifier.fillMaxSize().background(Bg)) {
+                        DetailScreen(
+                            title = targetScreen,
+                            onBack = { goBackFromDetail() },
+                            onPull = { sheetFor = it },
+                            isSaved = savedTitles.any { it.id == targetScreen.id },
+                            onSaveToggle = { toggleSave(targetScreen) },
+                        )
+                    }
+                }
+            }
         }
     }
+    // 4.8.15: pre-measure DELETED. SharedTransition uses real layout
+    // in both pages, no dest rect capture, no hidden DetailScreen,
+    // no pendingTitle — that whole mechanism was the snap source.
 
     sheetFor?.let { title ->
         DownloadSheet(title = title, onDismiss = { sheetFor = null }, notWired = notWired)
@@ -2577,7 +2525,7 @@ fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit, translucen
 @Composable
 fun LibraryScreen(
     saved: List<ApiTitle>,
-    onOpen: (ApiTitle) -> Unit,
+    onOpen: (ApiTitle, String) -> Unit,
     onBrowseHome: () -> Unit,
     onRemove: (ApiTitle) -> Unit,
 ) {
@@ -2638,7 +2586,7 @@ fun LibraryScreen(
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 pair.forEach { t ->
                                     Column(modifier = Modifier.width(cardW)) {
-                                        PosterCard(t, onClick = { onOpen(t) }, cardWidth = cardW)
+                                        PosterCard(t, onClick = { onOpen(t, "library-${t.id}") }, cardWidth = cardW, slot = "library-${t.id}")
                                         Spacer(Modifier.height(6.dp))
                                         Text(
                                             "Remove from Library",
@@ -3096,133 +3044,6 @@ fun BackPill(onBack: () -> Unit) {
 }
 
 @Composable
-fun HeroFlightOverlay(
-    pageAnim: androidx.compose.animation.core.Animatable<Float, androidx.compose.animation.core.AnimationVector1D>,
-    heroSourceRect: Rect?,
-    heroSourceIsCarousel: Boolean,
-    detailCardFinal: Rect?,
-    detailPosterFinal: Rect?,
-    screen: ApiTitle?,
-    openTitle: (ApiTitle, Boolean) -> Unit,
-) {
-    // 4.8.13 isolated: ONLY this composable reads
-    // pageAnim.value during composition, so ONLY the
-    // overlay recomposes per frame. Home/detail stay
-    // frozen (see derivedStateOf in AnipullAppInner),
-    // which is what keeps home visible, not black,
-    // during the whole push, and stops the overlay
-    // lagging behind the page slide and snapping.
-    val pr = pageAnim.value
-    if (pr <= 0f || pr >= 1f || heroSourceRect == null || screen == null) return
-            val src = heroSourceRect!!
-            // 4.8.12: derive carousel from src width too, not
-            // flag alone. A carousel src is full-width (>200dp),
-            // a grid src is ~118dp. If the flag is ever stale,
-            // a wide src can no longer fall into the grid
-            // PosterCard path and balloon to a huge tall poster.
-            val isCarouselFlight = heroSourceIsCarousel || src.width > with(LocalDensity.current) { 200.dp.toPx() }
-            val dst = if (isCarouselFlight) detailPosterFinal else detailCardFinal
-            if (dst != null) {
-                // pr is pageAnim.value, read in this isolated composable only (see function header)
-                // 4.8.13 arc, NOT a straight line: Flutter Hero
-                // uses MaterialRectArcTween, centre travels on a
-                // circular arc, bulging up in the middle. sin(pi*pr)
-                // is 0 at both ends, 1 at the middle, so reverse
-                // retraces the exact same arc. This is the curved
-                // swoop JS drew in his shonenx screenshot, versus
-                // our old straight diagonal (red arrow in his
-                // Anipull screenshot).
-                val dx = dst.left - src.left
-                val dy = dst.top - src.top
-                val dist = kotlin.math.sqrt(dx * dx + dy * dy)
-                val arcMag = if (dist > 0f) minOf(with(LocalDensity.current) { 60.dp.toPx() }, dist * 0.25f) else 0f
-                var perpX = if (dist > 0f) -dy / dist else 0f
-                var perpY = if (dist > 0f) dx / dist else 0f
-                if (perpY > 0f) { perpX = -perpX; perpY = -perpY }
-                val arc = kotlin.math.sin(kotlin.math.PI.toFloat() * pr) * arcMag
-                val left = src.left + dx * pr + perpX * arc
-                val top = src.top + dy * pr + perpY * arc
-                // 4.8.13 cap: lerped size can never exceed the
-                // larger of src/dst, and never the screen — a
-                // stale/wrong rect can no longer balloon to 80%
-                // of the screen and show only the top half of a poster.
-                val w = (src.width + (dst.width - src.width) * pr).coerceAtMost(maxOf(src.width, dst.width))
-                val h = (src.height + (dst.height - src.height) * pr).coerceAtMost(maxOf(src.height, dst.height))
-                if (w > 1f && h > 1f && w.isFinite() && h.isFinite() && left.isFinite() && top.isFinite()) {
-                    val oDensity = LocalDensity.current
-                    if (isCarouselFlight) {
-                        Box(
-                            modifier = Modifier
-                                .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
-                                .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() })
-                                .clip(RoundedCornerShape(16.dp))
-                                .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
-                                .clickable { screen?.let { openTitle(it, isCarouselFlight) } },
-                        ) {
-                            PosterImage(screen!!.poster, Modifier.fillMaxSize())
-                            // 4.8.12: meta shows on BOTH directions,
-                            // fading with 1-pr: forward it fades out
-                            // inside the shrinking poster as detail
-                            // info takes over, reverse it fades back
-                            // in as the poster grows to carousel size.
-                            if (true) {
-                                Box(Modifier.matchParentSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(colors = listOf(Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.78f)))))
-                                Column(modifier = Modifier.fillMaxSize().padding(18.dp).graphicsLayer { alpha = 1f - pr; translationX = pr * 80f }) {
-                                    Spacer(Modifier.weight(1f))
-                                    Text(screen!!.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis, style = TextStyle(shadow = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset(0f, 2f), blurRadius = 10f)))
-                                    if (screen!!.score != null || screen!!.type != null) {
-                                        Spacer(Modifier.height(6.dp))
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            if (screen!!.score != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text("★ ${screen!!.score}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
-                                            if (screen!!.type != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text(screen!!.type!!, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
-                                        }
-                                    }
-                                    val oGenreTags = screen!!.genres?.split(",", "/")?.map { it.trim() }?.filter { it.isNotBlank() }?.take(2) ?: emptyList()
-                                    if (oGenreTags.isNotEmpty()) {
-                                        Spacer(Modifier.height(6.dp))
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            oGenreTags.forEach { g ->
-                                                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) {
-                                                    Text(g, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Spacer(Modifier.height(12.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White).padding(horizontal = 20.dp, vertical = 11.dp)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                androidx.compose.foundation.Image(painter = painterResource(R.drawable.ic_download), contentDescription = null, modifier = Modifier.size(18.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.Black))
-                                                Spacer(Modifier.width(8.dp))
-                                                Text("Download", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                            }
-                                        }
-                                        Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color(0xFF1A1A24)).padding(horizontal = 18.dp, vertical = 11.dp)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                androidx.compose.foundation.Image(painter = painterResource(R.drawable.ic_info), contentDescription = null, modifier = Modifier.size(18.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White))
-                                                Spacer(Modifier.width(8.dp))
-                                                Text("Details", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
-                                .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() })
-                                .clip(RoundedCornerShape(16.dp)),
-                        ) {
-                            PosterCard(screen!!, onClick = { screen?.let { openTitle(it, isCarouselFlight) } }, cardWidth = with(oDensity) { w.toDp() })
-                        }
-                    }
-                }
-            }
-}
-
-@Composable
 fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null, onPosterImageBounds: ((Rect) -> Unit)? = null) {
     var season by remember { mutableStateOf(1) }
     var synExpanded by remember { mutableStateOf(false) }
@@ -3259,7 +3080,7 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
             Spacer(Modifier.height(16.dp))
             Row {
                 Box(modifier = Modifier.alpha(if (heroPosterHidden) 0f else 1f)) {
-                    PosterCard(title, onClick = {}, onBounds = onPosterBounds, onPosterBounds = onPosterImageBounds, reportBoundsOnPlace = true)
+                    PosterCard(title, onClick = {}, onBounds = onPosterBounds, onPosterBounds = onPosterImageBounds, reportBoundsOnPlace = true, slot = LocalSharedPosterKey.current ?: "detail-${title.id}")
                 }
                 Spacer(Modifier.width(16.dp))
                 // 1.9-dev4.8.8: shonenx-style — detail info flies
