@@ -88,6 +88,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -1541,7 +1542,16 @@ fun AnipullAppInner() {
     var detailCardFinal by remember { mutableStateOf<Rect?>(null) }
     var detailPosterFinal by remember { mutableStateOf<Rect?>(null) }
     val pageAnim = remember { androidx.compose.animation.core.Animatable(0f) }
-    val pageProgress = pageAnim.value
+    // 4.8.13: NO top-level pageProgress val here. Reading
+    // pageAnim.value during AnipullAppInner composition made
+    // the WHOLE home LazyColumn recompose every animation
+    // frame — posters reloaded, home went black, overlay lagged
+    // behind the page slide and snapped at the end. pageAnim
+    // is now read ONLY in layout lambdas (offset/graphicsLayer,
+    // layout invalidation, not composition), in derivedStateOf
+    // (notifies only when the result changes), and inside the
+    // isolated HeroFlightOverlay below (only overlay recomposes
+    // per frame, home/detail stay frozen and visible).
     val pageDensity0 = LocalDensity.current
     val pageConfig0 = LocalConfiguration.current
     val screenWidthPx0 = with(pageDensity0) { pageConfig0.screenWidthDp.dp.toPx() }
@@ -1601,8 +1611,12 @@ fun AnipullAppInner() {
     // the Hero widget flies and the rest of the card stays.
     // This gives the empty poster slot for the overlay to land
     // in, on both home and detail sides.
-    val pageHiddenId = if (screen != null && pageProgress > 0f && pageProgress < 1f) screen!!.id else null
+    val pageHiddenId by derivedStateOf { if (screen != null && pageAnim.value > 0f && pageAnim.value < 1f) screen!!.id else null }
     val pageHiddenFade = if (pageHiddenId != null) 0f else 1f
+    // 4.8.13: heroPosterHidden is also derived, for the same
+    // reason — true during the whole flight, false only at
+    // landing, so DetailScreen recomposes at landing, not per frame.
+    val heroPosterHiddenState by derivedStateOf { screen != null && pageAnim.value < 1f }
     var carouselPage by remember { mutableStateOf(500) }
     fun openTitle(t: ApiTitle, isCarousel: Boolean = false) {
         // 1.9-dev4.8.9 spam-proof: NO instant reopen, NO state
@@ -1665,7 +1679,7 @@ fun AnipullAppInner() {
     val listState = rememberLazyListState()
     val translucentPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("translucent_dock", true)
     val dockTranslucent = translucentPref
-    val hazeSourceModifier: Modifier = if (dockTranslucent)
+    val hazeSourceModifier: Modifier = if (dockTranslucent && screen == null)
         Modifier.hazeSource(hazeState) else Modifier
     // 1.9-dev4.8.1: Show Explore toggle, re-read on every composition
     // (tab switches recompose this), so turning it off in Settings
@@ -1950,7 +1964,7 @@ fun AnipullAppInner() {
         })
     } else if (showLoading) {
         LoadingScreen()
-    } else Box(modifier = Modifier.fillMaxSize().background(Bg).offset { androidx.compose.ui.unit.IntOffset(if (screen != null) (-pageProgress * screenWidthPx0).toInt() else 0, 0) }) {
+    } else Box(modifier = Modifier.fillMaxSize().background(Bg).offset { androidx.compose.ui.unit.IntOffset(if (screen != null) (-pageAnim.value * screenWidthPx0).toInt() else 0, 0) }) {
     // Haze source: the whole tab content behind the dock, so the
     // translucent dock (when enabled) blurs real posters, not a
     // solid colour. The dock itself sits outside this inner Box.
@@ -2315,7 +2329,7 @@ fun AnipullAppInner() {
                 current = currentTab,
                 fraction = dockFraction,
                 onTab = { goTab(it) },
-                translucent = dockTranslucent,
+                translucent = dockTranslucent && screen == null,
                 hazeState = hazeState,
             )
         }
@@ -2332,122 +2346,29 @@ fun AnipullAppInner() {
         val pageDensity = LocalDensity.current
         val pageConfig = LocalConfiguration.current
         val screenWidthPx = with(pageDensity) { pageConfig.screenWidthDp.dp.toPx() }
-        val pageOffsetPx = (1f - pageProgress) * screenWidthPx
-        Box(modifier = Modifier.fillMaxSize().background(Bg).offset { androidx.compose.ui.unit.IntOffset(pageOffsetPx.toInt(), 0) }) {
+        // 4.8.13: offset lambda reads pageAnim directly
+        // (layout invalidation, not composition), so Detail
+        // slides smoothly without recomposing DetailScreen per frame.
+        Box(modifier = Modifier.fillMaxSize().background(Bg).offset { androidx.compose.ui.unit.IntOffset(((1f - pageAnim.value) * screenWidthPx).toInt(), 0) }) {
             DetailScreen(
                 title = screen!!,
                 onBack = { goBackFromDetail() },
                 onPull = { sheetFor = it },
                 isSaved = savedTitles.any { it.id == screen!!.id },
                 onSaveToggle = { screen?.let { toggleSave(it) } },
-                heroPosterHidden = pageProgress < 1f,
+                heroPosterHidden = heroPosterHiddenState,
                 detailFade = 1f,
                 onPosterBounds = { rect ->
                     detailCardRect = rect
-                    if (detailCardFinal == null) detailCardFinal = Rect(rect.left - pageOffsetPx, rect.top, rect.right - pageOffsetPx, rect.bottom)
+                    if (detailCardFinal == null) detailCardFinal = Rect(rect.left - (1f - pageAnim.value) * screenWidthPx, rect.top, rect.right - (1f - pageAnim.value) * screenWidthPx, rect.bottom)
                 },
                 onPosterImageBounds = { rect ->
                     detailPosterRect = rect
-                    if (detailPosterFinal == null) detailPosterFinal = Rect(rect.left - pageOffsetPx, rect.top, rect.right - pageOffsetPx, rect.bottom)
+                    if (detailPosterFinal == null) detailPosterFinal = Rect(rect.left - (1f - pageAnim.value) * screenWidthPx, rect.top, rect.right - (1f - pageAnim.value) * screenWidthPx, rect.bottom)
                 },
             )
         }
-        // Single poster flight, driven by pageProgress only.
-        // Forward (closing=false): poster-only for carousel,
-        // full PosterCard for grid. Reverse (closing=true):
-        // carousel info flies in from the right during flight.
-        // Home poster is hidden during flight (pageHiddenId),
-        // detail poster is hidden during flight
-        // (heroPosterHidden above), so the overlay is the ONLY
-        // poster, flying into an empty slot on both sides.
-        if (pageProgress > 0f && pageProgress < 1f && heroSourceRect != null) {
-            val src = heroSourceRect!!
-            // 4.8.12: derive carousel from src width too, not
-            // flag alone. A carousel src is full-width (>200dp),
-            // a grid src is ~118dp. If the flag is ever stale,
-            // a wide src can no longer fall into the grid
-            // PosterCard path and balloon to a huge tall poster.
-            val isCarouselFlight = heroSourceIsCarousel || src.width > with(LocalDensity.current) { 200.dp.toPx() }
-            val dst = if (isCarouselFlight) detailPosterFinal else detailCardFinal
-            if (dst != null) {
-                val pr = pageProgress
-                val left = src.left + (dst.left - src.left) * pr
-                val top = src.top + (dst.top - src.top) * pr
-                val w = src.width + (dst.width - src.width) * pr
-                val h = src.height + (dst.height - src.height) * pr
-                if (w > 1f && h > 1f && w.isFinite() && h.isFinite() && left.isFinite() && top.isFinite()) {
-                    val oDensity = LocalDensity.current
-                    if (isCarouselFlight) {
-                        Box(
-                            modifier = Modifier
-                                .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
-                                .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() })
-                                .clip(RoundedCornerShape(16.dp))
-                                .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
-                                .clickable { screen?.let { openTitle(it, isCarousel = isCarouselFlight) } },
-                        ) {
-                            PosterImage(screen!!.poster, Modifier.fillMaxSize())
-                            // 4.8.12: meta shows on BOTH directions,
-                            // fading with 1-pr: forward it fades out
-                            // inside the shrinking poster as detail
-                            // info takes over, reverse it fades back
-                            // in as the poster grows to carousel size.
-                            if (true) {
-                                Box(Modifier.matchParentSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(colors = listOf(Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.78f)))))
-                                Column(modifier = Modifier.fillMaxSize().padding(18.dp).graphicsLayer { alpha = 1f - pr; translationX = pr * 80f }) {
-                                    Spacer(Modifier.weight(1f))
-                                    Text(screen!!.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis, style = TextStyle(shadow = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset(0f, 2f), blurRadius = 10f)))
-                                    if (screen!!.score != null || screen!!.type != null) {
-                                        Spacer(Modifier.height(6.dp))
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            if (screen!!.score != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text("★ ${screen!!.score}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
-                                            if (screen!!.type != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text(screen!!.type!!, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
-                                        }
-                                    }
-                                    val oGenreTags = screen!!.genres?.split(",", "/")?.map { it.trim() }?.filter { it.isNotBlank() }?.take(2) ?: emptyList()
-                                    if (oGenreTags.isNotEmpty()) {
-                                        Spacer(Modifier.height(6.dp))
-                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                                            oGenreTags.forEach { g ->
-                                                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) {
-                                                    Text(g, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-                                                }
-                                            }
-                                        }
-                                    }
-                                    Spacer(Modifier.height(12.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White).padding(horizontal = 20.dp, vertical = 11.dp)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                androidx.compose.foundation.Image(painter = painterResource(R.drawable.ic_download), contentDescription = null, modifier = Modifier.size(18.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.Black))
-                                                Spacer(Modifier.width(8.dp))
-                                                Text("Download", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 14.sp)
-                                            }
-                                        }
-                                        Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color(0xFF1A1A24)).padding(horizontal = 18.dp, vertical = 11.dp)) {
-                                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                                androidx.compose.foundation.Image(painter = painterResource(R.drawable.ic_info), contentDescription = null, modifier = Modifier.size(18.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White))
-                                                Spacer(Modifier.width(8.dp))
-                                                Text("Details", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    } else {
-                        Box(
-                            modifier = Modifier
-                                .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
-                                .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() })
-                                .clip(RoundedCornerShape(16.dp)),
-                        ) {
-                            PosterCard(screen!!, onClick = { screen?.let { openTitle(it, isCarousel = isCarouselFlight) } }, cardWidth = with(oDensity) { w.toDp() })
-                        }
-                    }
-                }
-            }
-        }
+        HeroFlightOverlay(pageAnim, heroSourceRect, heroSourceIsCarousel, detailCardFinal, detailPosterFinal, screen, { t, isC -> openTitle(t, isC) })
     }
 
     // 4.8.10 hidden pre-measure instance: only on the first
@@ -3161,6 +3082,133 @@ fun BackPill(onBack: () -> Unit) {
     ) {
         Text("←  Back", color = Pink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
     }
+}
+
+@Composable
+fun HeroFlightOverlay(
+    pageAnim: androidx.compose.animation.core.Animatable<Float, androidx.compose.animation.core.AnimationVector1D>,
+    heroSourceRect: Rect?,
+    heroSourceIsCarousel: Boolean,
+    detailCardFinal: Rect?,
+    detailPosterFinal: Rect?,
+    screen: ApiTitle?,
+    openTitle: (ApiTitle, Boolean) -> Unit,
+) {
+    // 4.8.13 isolated: ONLY this composable reads
+    // pageAnim.value during composition, so ONLY the
+    // overlay recomposes per frame. Home/detail stay
+    // frozen (see derivedStateOf in AnipullAppInner),
+    // which is what keeps home visible, not black,
+    // during the whole push, and stops the overlay
+    // lagging behind the page slide and snapping.
+    val pr = pageAnim.value
+    if (pr <= 0f || pr >= 1f || heroSourceRect == null || screen == null) return
+            val src = heroSourceRect!!
+            // 4.8.12: derive carousel from src width too, not
+            // flag alone. A carousel src is full-width (>200dp),
+            // a grid src is ~118dp. If the flag is ever stale,
+            // a wide src can no longer fall into the grid
+            // PosterCard path and balloon to a huge tall poster.
+            val isCarouselFlight = heroSourceIsCarousel || src.width > with(LocalDensity.current) { 200.dp.toPx() }
+            val dst = if (isCarouselFlight) detailPosterFinal else detailCardFinal
+            if (dst != null) {
+                // pr is pageAnim.value, read in this isolated composable only (see function header)
+                // 4.8.13 arc, NOT a straight line: Flutter Hero
+                // uses MaterialRectArcTween, centre travels on a
+                // circular arc, bulging up in the middle. sin(pi*pr)
+                // is 0 at both ends, 1 at the middle, so reverse
+                // retraces the exact same arc. This is the curved
+                // swoop JS drew in his shonenx screenshot, versus
+                // our old straight diagonal (red arrow in his
+                // Anipull screenshot).
+                val dx = dst.left - src.left
+                val dy = dst.top - src.top
+                val dist = kotlin.math.sqrt(dx * dx + dy * dy)
+                val arcMag = if (dist > 0f) minOf(with(LocalDensity.current) { 60.dp.toPx() }, dist * 0.25f) else 0f
+                var perpX = if (dist > 0f) -dy / dist else 0f
+                var perpY = if (dist > 0f) dx / dist else 0f
+                if (perpY > 0f) { perpX = -perpX; perpY = -perpY }
+                val arc = kotlin.math.sin(kotlin.math.PI.toFloat() * pr) * arcMag
+                val left = src.left + dx * pr + perpX * arc
+                val top = src.top + dy * pr + perpY * arc
+                // 4.8.13 cap: lerped size can never exceed the
+                // larger of src/dst, and never the screen — a
+                // stale/wrong rect can no longer balloon to 80%
+                // of the screen and show only the top half of a poster.
+                val w = (src.width + (dst.width - src.width) * pr).coerceAtMost(maxOf(src.width, dst.width))
+                val h = (src.height + (dst.height - src.height) * pr).coerceAtMost(maxOf(src.height, dst.height))
+                if (w > 1f && h > 1f && w.isFinite() && h.isFinite() && left.isFinite() && top.isFinite()) {
+                    val oDensity = LocalDensity.current
+                    if (isCarouselFlight) {
+                        Box(
+                            modifier = Modifier
+                                .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
+                                .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() })
+                                .clip(RoundedCornerShape(16.dp))
+                                .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
+                                .clickable { screen?.let { openTitle(it, isCarouselFlight) } },
+                        ) {
+                            PosterImage(screen!!.poster, Modifier.fillMaxSize())
+                            // 4.8.12: meta shows on BOTH directions,
+                            // fading with 1-pr: forward it fades out
+                            // inside the shrinking poster as detail
+                            // info takes over, reverse it fades back
+                            // in as the poster grows to carousel size.
+                            if (true) {
+                                Box(Modifier.matchParentSize().background(androidx.compose.ui.graphics.Brush.verticalGradient(colors = listOf(Color.Transparent, Color.Transparent, Color.Black.copy(alpha = 0.78f)))))
+                                Column(modifier = Modifier.fillMaxSize().padding(18.dp).graphicsLayer { alpha = 1f - pr; translationX = pr * 80f }) {
+                                    Spacer(Modifier.weight(1f))
+                                    Text(screen!!.title, color = Color.White, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis, style = TextStyle(shadow = Shadow(color = Color.Black.copy(alpha = 0.85f), offset = Offset(0f, 2f), blurRadius = 10f)))
+                                    if (screen!!.score != null || screen!!.type != null) {
+                                        Spacer(Modifier.height(6.dp))
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            if (screen!!.score != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text("★ ${screen!!.score}", color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+                                            if (screen!!.type != null) Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) { Text(screen!!.type!!, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold) }
+                                        }
+                                    }
+                                    val oGenreTags = screen!!.genres?.split(",", "/")?.map { it.trim() }?.filter { it.isNotBlank() }?.take(2) ?: emptyList()
+                                    if (oGenreTags.isNotEmpty()) {
+                                        Spacer(Modifier.height(6.dp))
+                                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                            oGenreTags.forEach { g ->
+                                                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.Black.copy(alpha = 0.60f)).border(1.dp, Color.White.copy(alpha = 0.30f), RoundedCornerShape(999.dp)).padding(horizontal = 10.dp, vertical = 4.dp)) {
+                                                    Text(g, color = Color.White, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Spacer(Modifier.height(12.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White).padding(horizontal = 20.dp, vertical = 11.dp)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                androidx.compose.foundation.Image(painter = painterResource(R.drawable.ic_download), contentDescription = null, modifier = Modifier.size(18.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.Black))
+                                                Spacer(Modifier.width(8.dp))
+                                                Text("Download", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                                            }
+                                        }
+                                        Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color(0xFF1A1A24)).padding(horizontal = 18.dp, vertical = 11.dp)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                androidx.compose.foundation.Image(painter = painterResource(R.drawable.ic_info), contentDescription = null, modifier = Modifier.size(18.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color.White))
+                                                Spacer(Modifier.width(8.dp))
+                                                Text("Details", color = Color.White, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .offset { androidx.compose.ui.unit.IntOffset(left.toInt(), top.toInt()) }
+                                .size(with(oDensity) { w.toDp() }, with(oDensity) { h.toDp() })
+                                .clip(RoundedCornerShape(16.dp)),
+                        ) {
+                            PosterCard(screen!!, onClick = { screen?.let { openTitle(it, isCarouselFlight) } }, cardWidth = with(oDensity) { w.toDp() })
+                        }
+                    }
+                }
+            }
 }
 
 @Composable
