@@ -505,9 +505,15 @@ fun SharedTransitionScope.sharedState(key: String) = rememberSharedContentState(
 // size/position come from real layout in both pages, so balloon is impossible.
 @OptIn(ExperimentalSharedTransitionApi::class)
 val PosterBoundsTransform: BoundsTransform = BoundsTransform { initialBounds, targetBounds ->
+    // 4.8.16 loop: forward (to detail, target top smaller than initial top)
+    // mirrors to ArcBelow, reverse (back home, target top larger) keeps
+    // ArcAbove. Same 300ms, same easeInOutCubic, ONLY the side flips,
+    // so forward + reverse together form a loop, both clockwise in
+    // traversal as JS asked, curve path otherwise unchanged.
+    val arcMode = if (targetBounds.top < initialBounds.top) ArcMode.ArcBelow else ArcMode.ArcAbove
     keyframes {
         durationMillis = 300
-        initialBounds at 0 using ArcMode.ArcAbove using androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)
+        initialBounds at 0 using arcMode using androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)
         targetBounds at 300
     }
 }
@@ -575,7 +581,32 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
     val sharedScope = LocalSharedTransitionScope.current
     val animScope = LocalAnimatedVisibilityScope.current
     val sharedPosterKeyState = LocalSharedPosterKey.current
-    val isSharedPoster = slot != null && slot == sharedPosterKeyState && sharedScope != null && animScope != null
+    // 4.8.16 first-tap fix: ALL posters with a slot are ALWAYS shared,
+    // not only the tapped one. Before, a poster only became shared at
+    // tap time (when sharedPosterKey changed), so on the FIRST tap
+    // the framework had no starting bounds for it and teleported it
+    // to detail — second tap worked because sharedPosterKey was
+    // already that slot from the previous tap. Now every poster is
+    // pre-registered with its unique slot key before any tap, so
+    // the first tap flies like every later tap. Only the tapped
+    // slot matches detail, others just slide out with home.
+    val isSharedPoster = slot != null && sharedScope != null && animScope != null
+    val isTappedPoster = slot != null && slot == sharedPosterKeyState
+    // 4.8.16 tapped title fade: only for the tapped poster, on fresh
+    // composition (after reverse, home recomposed, isTapped true at
+    // start), title/meta fade in from below after 300ms landing,
+    // not instantly. Before tap, isTapped false, title visible
+    // immediately. During forward (outgoing), title already visible,
+    // no change.
+    var titleVisible by remember { mutableStateOf(!isTappedPoster) }
+    LaunchedEffect(isTappedPoster) {
+        if (isTappedPoster) {
+            kotlinx.coroutines.delay(300)
+            titleVisible = true
+        }
+    }
+    val titleAlpha by animateFloatAsState(targetValue = if (titleVisible) 1f else 0f, animationSpec = tween(300, easing = FastOutSlowInEasing), label = "tappedTitleFade")
+    val titleTransY = (1f - titleAlpha) * with(LocalDensity.current) { 16.dp.toPx() }
     @OptIn(ExperimentalSharedTransitionApi::class)
     val sharedContentState = if (sharedScope != null) {
         sharedScope.sharedState(slot ?: "unused-${title.id}")
@@ -614,8 +645,8 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
                         .sharedElement(sharedContentState, animScope, boundsTransform = PosterBoundsTransform)
                         .alpha(cardAlpha)
                         .size(width = cardWidth, height = cardHeight)
-                        .clip(RoundedCornerShape(16.dp))
-                        .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(16.dp))
+                        .clip(RoundedCornerShape(if (slot != null && slot.startsWith("carousel-")) 20.dp else 16.dp))
+                        .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(if (slot != null && slot.startsWith("carousel-")) 20.dp else 16.dp))
                         .onPlaced { coords -> safeBounds(coords)?.let { onPosterBounds?.invoke(it) } }
                 }
             } else Modifier
@@ -673,10 +704,10 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
             }
         }
         Spacer(Modifier.height(8.dp))
-        Text(title.title, color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, minLines = 2, lineHeight = 16.sp)
+        Text(title.title, color = TextMain, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, minLines = 2, lineHeight = 16.sp, modifier = Modifier.alpha(titleAlpha).graphicsLayer { translationY = titleTransY })
         Spacer(Modifier.height(2.dp))
         val meta = listOfNotNull(title.type, title.year).joinToString(" · ")
-        if (meta.isNotBlank()) Text(meta, color = Muted, fontSize = 11.sp)
+        if (meta.isNotBlank()) Text(meta, color = Muted, fontSize = 11.sp, modifier = Modifier.alpha(titleAlpha).graphicsLayer { translationY = titleTransY })
     }
 }
 
@@ -979,13 +1010,15 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Uni
                 val carouselSharedScope = LocalSharedTransitionScope.current
                 val carouselAnimScope = LocalAnimatedVisibilityScope.current
                 val carouselSharedKey = LocalSharedPosterKey.current
-                val isCarouselShared = "carousel-${pick.id}" == carouselSharedKey && carouselSharedScope != null && carouselAnimScope != null
+                // 4.8.16 first-tap fix, same as PosterCard: carousel poster is ALWAYS shared, not only when tapped, so first tap has starting bounds and flies, not teleports.
+                val isCarouselShared = carouselSharedScope != null && carouselAnimScope != null
                 @OptIn(ExperimentalSharedTransitionApi::class)
                 val carouselSharedState = if (carouselSharedScope != null) {
                     carouselSharedScope.sharedState("carousel-${pick.id}")
                 } else null
+                // 4.8.16 corners: shared PosterImage is clipped to 20dp (carousel card radius), INSIDE the shared element, so it never becomes a rectangle during flight, and detail poster for a carousel slot is also 20dp (see PosterCard), so no snap at landing — corners stay rounded throughout, morph is size/position only.
                 val carouselPosterModifier = if (isCarouselShared && carouselSharedScope != null && carouselAnimScope != null && carouselSharedState != null) {
-                    with(carouselSharedScope) { Modifier.matchParentSize().sharedElement(carouselSharedState, carouselAnimScope, boundsTransform = PosterBoundsTransform) }
+                    with(carouselSharedScope) { Modifier.sharedElement(carouselSharedState, carouselAnimScope, boundsTransform = PosterBoundsTransform).matchParentSize().clip(RoundedCornerShape(20.dp)) }
                 } else Modifier.matchParentSize()
                 PosterImage(pick.poster, carouselPosterModifier, with(LocalDensity.current) { config.screenWidthDp.dp.toPx().toInt() })
                 // 1.9-dev4.8.4: reference-style card. No top pill
@@ -1005,7 +1038,18 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Uni
                         )
                     )
                 )
-                Column(modifier = Modifier.fillMaxSize().padding(18.dp)) {
+                // 4.8.16 carousel details fade: only for the tapped pick, on fresh composition (after reverse), details (title/meta/buttons) fade in from below after 300ms landing, not instantly. Before tap, details visible immediately. During forward (outgoing), details already visible, no change.
+                val isTappedCarousel = "carousel-${pick.id}" == carouselSharedKey
+                var detailsVisible by remember { mutableStateOf(!isTappedCarousel) }
+                LaunchedEffect(isTappedCarousel) {
+                    if (isTappedCarousel) {
+                        kotlinx.coroutines.delay(300)
+                        detailsVisible = true
+                    }
+                }
+                val detailsAlpha by animateFloatAsState(targetValue = if (detailsVisible) 1f else 0f, animationSpec = tween(300, easing = FastOutSlowInEasing), label = "carouselDetailsFade")
+                val detailsTransY = (1f - detailsAlpha) * with(density) { 16.dp.toPx() }
+                Column(modifier = Modifier.fillMaxSize().padding(18.dp).alpha(detailsAlpha).graphicsLayer { translationY = detailsTransY }) {
                     Spacer(Modifier.weight(1f))
                     // 4.8.11: centre shadow on the title so it
                     // stays legible over any poster, plus, under
@@ -1828,8 +1872,24 @@ fun AnipullAppInner() {
     // animation instead of it being eaten by onboarding time.
     LaunchedEffect(onboardingDone) {
         if (!onboardingDone) return@LaunchedEffect
+        // 4.8.16 loading range: min 1.75s (animation plays), max 2.0s (hard cap, NOT 1.75). Between 1.75 and 2.0, wait up to 250ms more for at least one home poster to be on disk (preload below runs during loading), then show home anyway at 2.0s total, even if posters are still loading.
         kotlinx.coroutines.delay(1750)
+        val deadline = System.currentTimeMillis() + 250
+        while (System.currentTimeMillis() < deadline) {
+            val anyPosterOnDisk = liveSections?.flatMap { it.titles }?.any { it.poster != null && isPosterOnDisk(it.poster!!, context) } == true
+            if (anyPosterOnDisk) break
+            kotlinx.coroutines.delay(50)
+        }
         showLoading = false
+    }
+    // 4.8.16 poster preload during loading: home fetch runs regardless of showLoading, so sections land DURING the loading screen. The moment they land, start downloading the first posters (featured + first section + second section) to disk cache, so when home appears, PosterImage finds them on disk and loads instantly, instead of starting network fetches after home appears (which was the scroll-lag-while-loading cause). Preload is background, cancellable on next sections landing.
+    LaunchedEffect(liveSections, featured) {
+        val urls = (listOfNotNull(featured?.poster) + (liveSections?.firstOrNull()?.titles?.take(10)?.mapNotNull { it.poster } ?: emptyList()) + (liveSections?.getOrNull(1)?.titles?.take(5)?.mapNotNull { it.poster } ?: emptyList())).distinct()
+        urls.forEach { url ->
+            launch {
+                try { loadPoster(url, context, 0) } catch (_: Exception) { }
+            }
+        }
     }
     LaunchedEffect(fetchAttempt) {
         homeFailed = false
@@ -1953,7 +2013,12 @@ fun AnipullAppInner() {
         AnimatedContent(
             targetState = screen,
             transitionSpec = {
-                slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))) togetherWith slideOutHorizontally(targetOffsetX = { -it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)))
+                // 4.8.16 directional: forward (target = detail, non-null) slides in from right / out to left, as before. Reverse (target = home, null) MIRRORS: slides in from left / out to right, NOT same direction as forward — that was the infinite-scroll bug (detail went left, home came from right, on back too).
+                if (targetState == null) {
+                    slideInHorizontally(initialOffsetX = { -it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))) togetherWith slideOutHorizontally(targetOffsetX = { it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)))
+                } else {
+                    slideInHorizontally(initialOffsetX = { it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f))) togetherWith slideOutHorizontally(targetOffsetX = { -it }, animationSpec = tween(300, easing = androidx.compose.animation.core.CubicBezierEasing(0.65f, 0f, 0.35f, 1f)))
+                }
             },
             label = "pageSlide",
         ) { targetScreen ->
@@ -3059,6 +3124,14 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
         label = "detailFadeIn",
     )
     val detailAlpha = if (heroPosterHidden) detailFade else detailAppearedFade
+    // 4.8.16 detail info delayed fade: info Column (title/type/score/genres) fades in from below AFTER poster lands (300ms delay + 300ms fade), not instantly at landing. Poster itself is shared, so it is already visible at landing, only info delays. DetailScreen is only composed as incoming content, so LaunchedEffect(Unit) runs at transition start, info appears 300-600ms after tap.
+    var detailInfoVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(300)
+        detailInfoVisible = true
+    }
+    val detailInfoAlpha by animateFloatAsState(targetValue = if (detailInfoVisible) 1f else 0f, animationSpec = tween(300, easing = FastOutSlowInEasing), label = "detailInfoFade")
+    val detailInfoTransY = (1f - detailInfoAlpha) * with(LocalDensity.current) { 20.dp.toPx() }
     val isFrierenDemo = title.title.startsWith("Frieren") && title.episodes != null
     val episodes = if (isFrierenDemo && season == 2) emptyList()
         else title.episodes?.let { (1..it).toList() }
@@ -3091,7 +3164,7 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
                 // like shonenx's detail page sliding in from the
                 // right while its Hero poster flies. When there
                 // is no hero, detailFade is 1, offset 0.
-                Column(modifier = Modifier.weight(1f).graphicsLayer { translationX = (1f - detailFade) * 40f }) {
+                Column(modifier = Modifier.weight(1f).alpha(detailInfoAlpha).graphicsLayer { translationX = (1f - detailFade) * 40f; translationY = detailInfoTransY }) {
                     Text(title.title, color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 26.sp, fontFamily = HeadingFont)
                     Spacer(Modifier.height(4.dp))
                     val meta = listOfNotNull(title.type, title.year).joinToString(" · ")
