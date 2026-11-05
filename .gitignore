@@ -9,3 +9,6 @@ app/build/
 .idea/
 *.iml
 .DS_Store
+*.keystore
+*.jks
+signing.properties
