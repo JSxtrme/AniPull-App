@@ -35,8 +35,11 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.ui.unit.toSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -548,7 +551,7 @@ fun boundsTransformFor(durationMs: Int): BoundsTransform = BoundsTransform { ini
 
 @Composable
 @OptIn(ExperimentalSharedTransitionApi::class)
-fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseHiddenId: Long? = null, reverseFade: Float = 1f, slot: String? = null) {
+fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseHiddenId: Long? = null, reverseFade: Float = 1f, slot: String? = null, onLongClick: (() -> Unit)? = null) {
     val cardHeight = cardWidth * 3 / 2
     // 1.9-dev4.8.2 scroll optimisation + full-card hero: bounds are
     // NO LONGER reported by onGloballyPositioned, which fires on
@@ -692,10 +695,10 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
                 // does this, once, not every card per frame.
                 if (reportBoundsOnPlace || isReverseHidden) safeBounds(coords)?.let { onBounds?.invoke(it) }
             }
-            .clickable(interactionSource = interaction, indication = null, onClick = {
+            .combinedClickable(interactionSource = interaction, indication = null, onClick = {
                 coordsHolder[0]?.let { c -> safeBounds(c)?.let { onBounds?.invoke(it) } }
                 onClick()
-            }),
+            }, onLongClick = { onLongClick?.invoke() }),
     ) {
         Box(
             modifier = if (isSharedPoster && sharedScope != null && animScope != null && sharedContentState != null) {
@@ -881,7 +884,7 @@ fun SearchSkeletonGrid() {
 }
 
 @Composable
-fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, scrollStore: MutableMap<String, Pair<Int, Int>>? = null) {
+fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, scrollStore: MutableMap<String, Pair<Int, Int>>? = null, onLongPress: ((ApiTitle) -> Unit)? = null) {
     // 4.9 fix 2: LazyRow state lived inside PosterRow, so when home
     // was disposed during a detail (AnimatedContent replaces home
     // with detail), the row state died with it and on back the row
@@ -924,7 +927,7 @@ fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpe
         }
         Spacer(Modifier.height(12.dp))
         LazyRow(state = rowState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it, "${heading}-${it.id}") }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade, slot = "${heading}-${it.id}") }
+            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it, "${heading}-${it.id}") }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade, slot = "${heading}-${it.id}", onLongClick = { onLongPress?.invoke(it) }) }
         }
     }
 }
@@ -949,7 +952,7 @@ fun CarouselDot(selected: Boolean, onClick: () -> Unit) {
 
 @Composable
 @OptIn(ExperimentalSharedTransitionApi::class)
-fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, initialPage: Int = -1, onPageChange: ((Int) -> Unit)? = null) {
+fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, initialPage: Int = -1, onPageChange: ((Int) -> Unit)? = null, onLongPress: ((ApiTitle) -> Unit)? = null) {
     // 1.9-dev4.8: Editor's pick is now Editor's PICKS, a 5-item
     // carousel, and the description lines are GONE altogether (JS's
     // call) — title + type pill + buttons only, over the poster.
@@ -1076,10 +1079,10 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Uni
                     .onPlaced { coords ->
                         cardCoords[0] = coords
                     }
-                    .clickable(interactionSource = cInteraction, indication = null) {
+                    .combinedClickable(interactionSource = cInteraction, indication = null, onClick = {
                         cardCoords[0]?.let { c -> safeBounds(c)?.let { onBounds?.invoke(pick, it) } }
                         onOpen(pick, "carousel-${pick.id}")
-                    },
+                    }, onLongClick = { onLongPress?.invoke(pick) }),
             ) {
                 // 4.8.15 carousel shared poster, poster-only:
                 // title/buttons/gradient stay in the card and slide
@@ -1679,7 +1682,32 @@ fun AnipullAppInner() {
     var sharedPosterKey by remember { mutableStateOf<String?>(null) }
     var query by remember { mutableStateOf("") }
     var sheetFor by remember { mutableStateOf<ApiTitle?>(null) }
+    // 1.9-dev5.0 QOL 1: hold popup target. Long-press on any card
+    // sets this; HoldSheet (below) renders the 3-action sheet.
+    var holdFor by remember { mutableStateOf<ApiTitle?>(null) }
+    val haptics = LocalHapticFeedback.current
+    val hapticsOn = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("haptics", true)
+    // 1.9-dev5.0 QOL 3: Show Editor's Picks toggle (Layout).
+    val showEditorsPicks = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("show_editor_picks", true)
+    fun onCardLongPress(t: ApiTitle) {
+        if (hapticsOn) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        holdFor = t
+    }
     var liveSections by remember { mutableStateOf<List<HomeSection>?>(null) }
+    // 1.9-dev5.0 updater: auto-check result, shown on home entry
+    // once home has loaded (never blocking loading). Silent when
+    // up to date; "Later" snoozes that versionCode.
+    var pendingUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
+    var updateChecked by remember { mutableStateOf(false) }
+    LaunchedEffect(liveSections) {
+        if (liveSections == null || updateChecked) return@LaunchedEffect
+        updateChecked = true
+        val result = checkForUpdate(context)
+        if (result is UpdateCheckResult.Available) {
+            val snoozed = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getInt("update_snoozed_code", -1)
+            if (snoozed != result.info.versionCode) pendingUpdate = result.info
+        }
+    }
     var featured by remember { mutableStateOf<ApiTitle?>(null) }
     var homeFailed by remember { mutableStateOf(false) }
     var extraSections by remember { mutableStateOf<List<HomeSection>>(emptyList()) }
@@ -1723,6 +1751,17 @@ fun AnipullAppInner() {
     val dockFractionState = remember { mutableStateOf(1f) }
     var dockAccumulatedDelta by remember { mutableStateOf(0f) }
     var isSearchFocused by remember { mutableStateOf(false) }
+    // 1.9-dev5.0 QOL 2b: was search open when a detail was tapped?
+    // The cached "From your catalog" grid only shows while the
+    // search pill is focused (query is blank there), but opening a
+    // detail disposes the pill and focus is lost — so on back the
+    // home showed plain rows instead of the catalog grid, the
+    // shared poster slot was gone, and the reverse flight had
+    // nothing to fly back to. Searched items never had this bug:
+    // a non-blank query drives their results regardless of focus.
+    // Fix: remember the search state at tap time, restore focus
+    // (grid only, no keyboard) on back from detail.
+    var searchOpenBeforeDetail by remember { mutableStateOf(false) }
     var lastLiveQuery by remember { mutableStateOf("") }
     // 1.9-dev4.8: Explore + hero transition + dock/appearance prefs.
     var exploreTitles by remember { mutableStateOf<List<ApiTitle>>(emptyList()) }
@@ -1794,6 +1833,9 @@ fun AnipullAppInner() {
         // with the SAME key during AnimatedContent transition.
         // If this title is already open, do nothing.
         if (screen?.id == t.id) return
+        // 1.9-dev5.0 QOL 2b: snapshot search mode at tap time (see
+        // searchOpenBeforeDetail above) — restored on back.
+        searchOpenBeforeDetail = isSearchFocused || query.isNotBlank()
         if (slot != null) sharedPosterKey = slot
         else if (isCarousel) sharedPosterKey = "carousel-${t.id}"
         screen = t
@@ -1803,6 +1845,13 @@ fun AnipullAppInner() {
         // detail slides out right, home slides in left, poster
         // flies back to its home slot (same shared key, kept).
         screen = null
+        // 1.9-dev5.0 QOL 2b: if the detail came from search / the
+        // cached catalog (blank query, focus-only), put search mode
+        // back on so the catalog grid — and its shared poster slot
+        // — is there for the reverse flight to land on. A non-blank
+        // query already keeps search results on its own.
+        if (searchOpenBeforeDetail && query.isBlank()) isSearchFocused = true
+        searchOpenBeforeDetail = false
     }
     val dockModeState = remember {
         mutableStateOf(
@@ -1875,6 +1924,7 @@ fun AnipullAppInner() {
         liveResults = null
         searching = false
         isChipQuery = false
+        searchOpenBeforeDetail = false
         homeKeyboard?.hide()
         appFocusManager.clearFocus()
         scope.launch { listState.scrollToItem(0) }
@@ -1946,6 +1996,7 @@ fun AnipullAppInner() {
         showDownloads = tab == Tab.Downloads
         showLibrary = tab == Tab.Library
         // Home = all three off, which is the Home branch below.
+        searchOpenBeforeDetail = false
     }
     val currentTab: Tab = when {
         showLibrary -> Tab.Library
@@ -2180,6 +2231,7 @@ fun AnipullAppInner() {
             onOpen = { t, slot -> openTitle(t, slot) },
             onBrowseHome = { goTab(Tab.Home) },
             onRemove = { toggleSave(it) },
+            onLongPress = { onCardLongPress(it) },
         )
     } else {
         // 1.9-dev4.8.9: Home is ALWAYS mounted, even while a
@@ -2276,7 +2328,7 @@ fun AnipullAppInner() {
                                 results.chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t, "search-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "search-${t.id}")
+                                            PosterCard(t, onClick = { openTitle(t, "search-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "search-${t.id}", onLongClick = { onCardLongPress(t) })
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -2306,7 +2358,7 @@ fun AnipullAppInner() {
                                 cachedTitles.take(12).chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t, "cached-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "cached-${t.id}")
+                                            PosterCard(t, onClick = { openTitle(t, "cached-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "cached-${t.id}", onLongClick = { onCardLongPress(t) })
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -2318,9 +2370,11 @@ fun AnipullAppInner() {
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
-                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { t, slot -> openTitle(t, slot) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore) }
+                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { t, slot -> openTitle(t, slot) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
                 }
-                featured?.let { pick ->
+                // 1.9-dev5.0 QOL 3: Show Editor's Picks toggle — off
+                // hides the whole carousel item, not just its motion.
+                if (showEditorsPicks) featured?.let { pick ->
                     item(key = "home_carousel", contentType = "carousel") {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             androidx.compose.foundation.Image(
@@ -2335,7 +2389,7 @@ fun AnipullAppInner() {
                         Spacer(Modifier.height(12.dp))
                         val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
                             .distinctBy { it.id }.take(5)
-                        EditorsPickCarousel(picks, { t, slot -> openTitle(t, slot, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null && !pageTransitioning, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, initialPage = carouselPage, onPageChange = { carouselPage = it })
+                        EditorsPickCarousel(picks, { t, slot -> openTitle(t, slot, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null && !pageTransitioning, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, initialPage = carouselPage, onPageChange = { carouselPage = it }, onLongPress = { onCardLongPress(it) })
                     }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
@@ -2351,7 +2405,7 @@ fun AnipullAppInner() {
                         "Top 10 Month" -> R.drawable.ic_trophy
                         else -> null
                     }
-                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore) }
+                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
                 }
             } else if (homeFailed) {
                 // 1.9-dev2: failed load = skeletons + retry, never demo
@@ -2378,12 +2432,22 @@ fun AnipullAppInner() {
                 item(key = "home_skeleton_1", contentType = "skeleton") { SkeletonRow() }
                 item(key = "home_skeleton_2", contentType = "skeleton") { SkeletonRow() }
             }
+            // 1.9-dev5.0 QOL 2a: search results and the pre-search
+            // "From your catalog" grid have NO footer (footer is
+            // home-only), so their last row ended right at the
+            // bottom of the list — under the floating dock, titles
+            // hidden, and no way to scroll further. Let the grid
+            // scroll a bit past the end: 140dp of air above the
+            // dock, so the last row fully clears it.
+            if (query.isNotBlank() || isSearchFocused) {
+                item(key = "search_bottom_spacer", contentType = "spacer") { Spacer(Modifier.height(140.dp)) }
+            }
             // Extra catalogs, below the AniLab home rows: genre rows from
             // /api/category (Action 1, Romance 14, Comedy 5, Fantasy 4).
             // They load progressively in the background, like home rows.
             if (!isSearchFocused && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
-                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore) }
+                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
                 }
             }
             // 1.9-dev4.8: Explore — after all catalogs, a grid (not a
@@ -2448,7 +2512,7 @@ fun AnipullAppInner() {
                                 shownExplore.chunked(exploreCols).forEach { trio ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         trio.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t, "explore-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "explore-${t.id}")
+                                            PosterCard(t, onClick = { openTitle(t, "explore-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "explore-${t.id}", onLongClick = { onCardLongPress(t) })
                                         }
                                         repeat(exploreCols - trio.size) { Spacer(Modifier.width(cardW)) }
                                     }
@@ -2534,6 +2598,7 @@ fun AnipullAppInner() {
                 onTab = { goTab(it) },
                 translucent = dockTranslucent && (screen == null || pageTransitioning),
                 hazeState = hazeState,
+                haptics = hapticsOn,
             )
         }
     }
@@ -2559,6 +2624,38 @@ fun AnipullAppInner() {
     sheetFor?.let { title ->
         DownloadSheet(title = title, onDismiss = { sheetFor = null }, notWired = notWired)
     }
+    // 1.9-dev5.0 QOL 1: hold popup. Exactly 3 actions, nothing else.
+    holdFor?.let { title ->
+        val wasSaved = savedTitles.any { it.id == title.id }
+        HoldSheet(
+            title = title,
+            isSaved = wasSaved,
+            onDismiss = { holdFor = null },
+            onSaveToggle = {
+                toggleSave(title)
+                Toast.makeText(context, if (wasSaved) "Removed from Library" else "Saved to Library", Toast.LENGTH_SHORT).show()
+                holdFor = null
+            },
+            onDownload = { holdFor = null; sheetFor = title },
+            onShare = { shareText(context, title.title); holdFor = null },
+        )
+    }
+    // 1.9-dev5.0 updater: auto-check sheet, home entry only —
+    // never over a detail page or a Settings/Downloads/Library
+    // screen. Plain dismiss hides it for this launch; Later
+    // snoozes that versionCode (auto-check won't re-show it).
+    if (pendingUpdate != null && screen == null && !showSettings && !showDownloads && !showLibrary) {
+        UpdateSheet(
+            info = pendingUpdate!!,
+            currentVersionName = installedVersionName(context),
+            onLater = {
+                context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+                    .edit().putInt("update_snoozed_code", pendingUpdate!!.versionCode).apply()
+                pendingUpdate = null
+            },
+            onDismiss = { pendingUpdate = null },
+        )
+    }
 }
 
 // ---- 1.9-dev2: floating dock, Library, loading, onboarding ------------
@@ -2567,7 +2664,7 @@ enum class Tab { Home, Library, Downloads, Settings }
 
 @Composable
 @OptIn(ExperimentalHazeApi::class, ExperimentalHazeMaterialsApi::class)
-fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit, translucent: Boolean = false, hazeState: HazeState? = null) {
+fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit, translucent: Boolean = false, hazeState: HazeState? = null, haptics: Boolean = true) {
     // 1.9-dev4: Nuvio's FloatingNavigationBar, adaptive style, glow
     // OFF — read in full from NuvioMobile (NavigationBar.kt +
     // FloatingNavigationBar.android.kt) and mirrored, not approximated:
@@ -2680,12 +2777,16 @@ fun FloatingDock(current: Tab, fraction: Float, onTab: (Tab) -> Unit, translucen
                         targetValue = if (dockPressed && !ThemeState.reduceMotion) 1.12f else 1f,
                         animationSpec = spring(stiffness = 400f, dampingRatio = 0.7f), label = "dockPress",
                     )
+                    // 1.9-dev5.0 QOL 3: dock tap haptic (Haptics toggle,
+                    // default on) — a light KeyboardTap buzz, not the
+                    // heavy LongPress buzz used for hold.
+                    val dockHaptics = LocalHapticFeedback.current
                     Box(
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()
                             .clip(RoundedCornerShape(999.dp))
-                            .clickable(interactionSource = dockInteraction, indication = null) { onTab(tab) },
+                            .clickable(interactionSource = dockInteraction, indication = null) { if (haptics) dockHaptics.performHapticFeedback(HapticFeedbackType.KeyboardTap); onTab(tab) },
                         contentAlignment = Alignment.Center,
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -2732,6 +2833,7 @@ fun LibraryScreen(
     onOpen: (ApiTitle, String) -> Unit,
     onBrowseHome: () -> Unit,
     onRemove: (ApiTitle) -> Unit,
+    onLongPress: ((ApiTitle) -> Unit)? = null,
 ) {
     // Library = manage what the user already touched. Saved = favourited
     // for later downloading. Downloaded = actually on the device — that
@@ -2790,7 +2892,7 @@ fun LibraryScreen(
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                 pair.forEach { t ->
                                     Column(modifier = Modifier.width(cardW)) {
-                                        PosterCard(t, onClick = { onOpen(t, "library-${t.id}") }, cardWidth = cardW, slot = "library-${t.id}")
+                                        PosterCard(t, onClick = { onOpen(t, "library-${t.id}") }, cardWidth = cardW, slot = "library-${t.id}", onLongClick = { onLongPress?.invoke(t) })
                                         Spacer(Modifier.height(6.dp))
                                         Text(
                                             "Remove from Library",
@@ -3438,6 +3540,93 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
             ) { Text("Download", color = OnAccent, fontWeight = FontWeight.Bold) }
             Spacer(Modifier.height(24.dp))
         }
+    }
+}
+
+// ---- 1.9-dev5.0 QOL 1: hold popup --------------------------------------
+// Long-press on any poster card opens this small bottom sheet
+// (shonenX-style menu, in Anipull's own bottom-sheet style — NOT
+// AnymeX's peek preview, NOT a floating popup menu). Poster +
+// title at the top, then EXACTLY 3 rows, nothing else:
+// Save to Library / Remove from Library, Download (same download
+// sheet as the detail page — still demo-only in 5.0), Share (the
+// anime title via the Android share sheet). No Hide, no Copy
+// title, no Open Details (tap already does that), no Watch/Play,
+// no tracking status — Anipull is download-only, no tracking.
+//
+// Dismissal (JS, 2026-11-06 — MUST disappear on scroll AND on a
+// tap elsewhere): this is deliberately NOT a ModalBottomSheet.
+// A ModalBottomSheet lives in its own dialog window — its scrim
+// only handles taps, and the window swallows scroll gestures, so
+// a swipe on the dimmed home behind the sheet would leave it
+// stuck. This is a plain overlay in the same window instead: the
+// scrim's pointer input dismisses on the FIRST touch — tap, or
+// the first movement of a scroll attempt — and a swipe down on
+// the card itself dismisses too.
+@Composable
+fun HoldSheet(title: ApiTitle, isSaved: Boolean, onDismiss: () -> Unit, onSaveToggle: () -> Unit, onDownload: () -> Unit, onShare: () -> Unit) {
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Scrim: any touch outside the card dismisses — a tap, or
+        // a scroll attempt (first drag movement). Two detectors
+        // share the scrim: tap wins a tap, drag wins a swipe.
+        Box(
+            modifier = Modifier.fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.6f))
+                .pointerInput(Unit) { detectTapGestures(onTap = { onDismiss() }) }
+                .pointerInput(Unit) { detectDragGestures(onDragStart = { onDismiss() }) { _, _ -> } }
+        )
+        Column(
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp))
+                .background(Card)
+                .pointerInput(Unit) {
+                    // Swipe down on the sheet itself dismisses too.
+                    detectVerticalDragGestures { _, dragAmount -> if (dragAmount > 8f) onDismiss() }
+                }
+                .padding(horizontal = 16.dp)
+                .padding(bottom = 24.dp, top = 8.dp)
+        ) {
+            Box(modifier = Modifier.align(Alignment.CenterHorizontally).size(width = 36.dp, height = 4.dp).clip(RoundedCornerShape(999.dp)).background(Line))
+            Spacer(Modifier.height(12.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.size(width = 72.dp, height = 108.dp).clip(RoundedCornerShape(12.dp))) {
+                    PosterImage(title.poster, Modifier.fillMaxSize(), with(LocalDensity.current) { 72.dp.toPx().toInt() })
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title.title, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    val meta = listOfNotNull(title.type, title.year).joinToString(" · ")
+                    if (meta.isNotBlank()) { Spacer(Modifier.height(4.dp)); Text(meta, color = Muted, fontSize = 13.sp) }
+                    if (title.score != null) { Spacer(Modifier.height(2.dp)); Text("★ ${title.score}", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Box(modifier = Modifier.fillMaxWidth().height(1.dp).background(Line))
+            Spacer(Modifier.height(8.dp))
+            HoldRow(R.drawable.ic_bookmark, if (isSaved) "Remove from Library" else "Save to Library", onSaveToggle)
+            HoldRow(R.drawable.ic_download, "Download", onDownload)
+            HoldRow(R.drawable.ic_share, "Share", onShare)
+        }
+    }
+}
+
+@Composable
+private fun HoldRow(iconRes: Int, label: String, onClick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(if (ThemeState.lightMode) Color.Black.copy(alpha = 0.06f) else Color.White.copy(alpha = 0.07f)), contentAlignment = Alignment.Center) {
+            androidx.compose.foundation.Image(
+                painter = painterResource(iconRes),
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(if (ThemeState.lightMode) TextMain else Color.White),
+            )
+        }
+        Spacer(Modifier.width(12.dp))
+        Text(label, color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
     }
 }
 

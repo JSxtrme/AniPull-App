@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.graphicsLayer
 
 // 1.9-dev4.8.4 Settings redesign, Nuvio-style: the old single long
@@ -123,7 +124,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("1.9-dev4.9 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("1.9-dev5.0 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -336,13 +337,18 @@ fun LayoutPage() {
     var particles by remember { mutableStateOf(prefs.getBoolean("particles", true)) }
     var showExplore by remember { mutableStateOf(prefs.getBoolean("show_explore", true)) }
     var exploreCols by remember { mutableStateOf(prefs.getInt("explore_columns", 3)) }
+    // 1.9-dev5.0 QOL 3: haptics (long-press + dock tap, default on)
+    // and Show Editor's Picks (show/hide the carousel itself —
+    // auto-scroll below only controls motion, not visibility).
+    var haptics by remember { mutableStateOf(prefs.getBoolean("haptics", true)) }
+    var showEditorsPicks by remember { mutableStateOf(prefs.getBoolean("show_editor_picks", true)) }
     // 4.9 fix 3: old hero_motion easing options (Ease in/out,
     // Overshoot, Bouncy, Cinematic) no longer make sense — curve
     // is fixed easeInOutCubic since 4.8.16. Replaced with 3 speed
     // options, same pref file, new key transition_speed.
     var transitionSpeed by remember { mutableStateOf(prefs.getString("transition_speed", "normal") ?: "normal") }
     fun save() {
-        prefs.edit().putBoolean("translucent_dock", translucentDock).putString("dock_mode", dockMode).putBoolean("carousel_auto", carouselAuto).putBoolean("particles", particles).putBoolean("show_explore", showExplore).putInt("explore_columns", exploreCols).putString("transition_speed", transitionSpeed).apply()
+        prefs.edit().putBoolean("translucent_dock", translucentDock).putString("dock_mode", dockMode).putBoolean("carousel_auto", carouselAuto).putBoolean("particles", particles).putBoolean("show_explore", showExplore).putInt("explore_columns", exploreCols).putString("transition_speed", transitionSpeed).putBoolean("haptics", haptics).putBoolean("show_editor_picks", showEditorsPicks).apply()
     }
     SettingsSectionLabel("NAVIGATION")
     SettingsCard {
@@ -387,6 +393,10 @@ fun LayoutPage() {
         }
         SettingsDivider()
         SettingsToggle("Auto-scroll Editor's picks", "One poster every 5 seconds. Pauses off-screen and while you drag.", carouselAuto) { carouselAuto = it; save() }
+        SettingsDivider()
+        SettingsToggle("Show Editor's picks", "The carousel itself on Home. Off = the picks row disappears entirely, not just stops scrolling.", showEditorsPicks) { showEditorsPicks = it; save() }
+        SettingsDivider()
+        SettingsToggle("Haptics", "A light buzz on long-press and dock taps. Off = silent taps everywhere.", haptics) { haptics = it; save() }
         SettingsDivider()
         SettingsToggle("Home particles", "Drifting, glowing, twinkling dots on the home page.", particles) { particles = it; save() }
         SettingsDivider()
@@ -529,12 +539,63 @@ fun StoragePage() {
     val ctx = LocalContext.current
     val prefs = SettingsPrefs()
     var cacheMsg by remember { mutableStateOf<String?>(null) }
+    var backupMsg by remember { mutableStateOf<String?>(null) }
+    var showResetConfirm by remember { mutableStateOf(false) }
     val folder = prefs.getString("folder", "Downloads/Anipull") ?: "Downloads/Anipull"
+    // 1.9-dev5.0 QOL 3: show the real poster-cache size, so "Clear home
+    // cache" is an informed tap, not a guess. Computed once per visit
+    // (a few hundred stat calls, no network).
+    val cacheSizeText = remember {
+        try {
+            var bytes = 0L
+            ctx.cacheDir.resolve("posters").walkTopDown().forEach { if (it.isFile) bytes += it.length() }
+            if (bytes < 1024L * 1024L) "${bytes / 1024L} KB" else String.format("%.1f MB", bytes / 1024.0 / 1024.0)
+        } catch (_: Exception) { "?" }
+    }
+    // Backup & restore Saved library: a plain JSON file, no account,
+    // no upload — export shares/saves it, import reads it back and
+    // replaces the Saved list (duplicates by id are dropped).
+    val exportLauncher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        try {
+            val json = ctx.getSharedPreferences("anipull_library", Context.MODE_PRIVATE).getString("saved_json", "[]") ?: "[]"
+            ctx.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray(Charsets.UTF_8)) }
+            val count = try { org.json.JSONArray(json).length() } catch (_: Exception) { 0 }
+            backupMsg = "Saved library exported — $count title(s) in the file."
+        } catch (_: Exception) { backupMsg = "Export failed — try again." }
+    }
+    val importLauncher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        try {
+            val text = ctx.contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() } ?: ""
+            val titles = libraryTitlesFromJson(text).distinctBy { it.id }
+            if (titles.isEmpty()) { backupMsg = "That file has no saved titles in it."; return@rememberLauncherForActivityResult }
+            saveLibraryTitles(ctx, titles)
+            backupMsg = "Restored ${titles.size} saved title(s) — check the Library tab."
+        } catch (_: Exception) { backupMsg = "Import failed — that file is not an Anipull library backup." }
+    }
+    if (showResetConfirm) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showResetConfirm = false },
+            title = { Text("Reset all settings?", color = TextMain, fontWeight = FontWeight.Bold, fontFamily = HeadingFont) },
+            text = { Text("Every setting goes back to its default — accent, dock, downloads, notifications, everything. Your Saved library and home cache are NOT touched.", color = Muted, fontSize = 14.sp) },
+            confirmButton = {
+                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink).clickable {
+                    prefs.edit().clear().apply()
+                    AccentState.color = Color(0xFFFF4D8D)
+                    ThemeState.amoled = false; ThemeState.sfHeadings = true; ThemeState.reduceMotion = false; ThemeState.lightMode = false
+                    showResetConfirm = false
+                    cacheMsg = "Settings reset to defaults."
+                }.padding(horizontal = 20.dp, vertical = 10.dp)) { Text("Reset", color = OnAccent, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { Text("Cancel", color = Muted, modifier = Modifier.clickable(onClick = { showResetConfirm = false }).padding(horizontal = 12.dp, vertical = 10.dp)) },
+        )
+    }
     SettingsSectionLabel("CACHE")
     SettingsCard {
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
             Text("Home cache", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text("Last good home catalogs plus downloaded posters. Clearing it reloads live on next open.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Last good home catalogs plus downloaded posters ($cacheSizeText on disk). Clearing it reloads live on next open.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
             Spacer(Modifier.height(12.dp))
             Box(modifier = Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).clickable {
                 ctx.cacheDir.resolve("posters").deleteRecursively()
@@ -542,6 +603,30 @@ fun StoragePage() {
                 cacheMsg = "Home cache cleared — next open reloads live."
             }.padding(horizontal = 16.dp, vertical = 12.dp)) { Text("Clear home cache", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
             if (cacheMsg != null) { Spacer(Modifier.height(8.dp)); Text(cacheMsg!!, color = Teal, fontSize = 12.5.sp) }
+        }
+    }
+    Spacer(Modifier.height(20.dp))
+    SettingsSectionLabel("LIBRARY BACKUP")
+    SettingsCard {
+        Column(modifier = Modifier.padding(vertical = 12.dp)) {
+            Text("Saved library", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text("Export your Saved list to a file, import it back after a reinstall. No account, nothing leaves your phone except the file you choose.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(modifier = Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).clickable { exportLauncher.launch("anipull-library.json") }.padding(horizontal = 16.dp, vertical = 12.dp)) { Text("Export", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+                Box(modifier = Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).clickable { importLauncher.launch(arrayOf("application/json", "text/*")) }.padding(horizontal = 16.dp, vertical = 12.dp)) { Text("Import", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
+            }
+            if (backupMsg != null) { Spacer(Modifier.height(8.dp)); Text(backupMsg!!, color = Teal, fontSize = 12.5.sp) }
+        }
+    }
+    Spacer(Modifier.height(20.dp))
+    SettingsSectionLabel("RESET")
+    SettingsCard {
+        Column(modifier = Modifier.padding(vertical = 12.dp)) {
+            Text("Reset all settings", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text("Back to defaults for every setting. Saved library and home cache are kept.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Spacer(Modifier.height(12.dp))
+            Box(modifier = Modifier.clip(RoundedCornerShape(12.dp)).border(1.dp, Color(0xFFFF3B30).copy(alpha = 0.4f), RoundedCornerShape(12.dp)).background(Bg).clickable { showResetConfirm = true }.padding(horizontal = 16.dp, vertical = 12.dp)) { Text("Reset all settings", color = Color(0xFFFF3B30), fontSize = 14.sp, fontWeight = FontWeight.SemiBold) }
         }
     }
     Spacer(Modifier.height(20.dp))
@@ -555,6 +640,22 @@ fun StoragePage() {
 }
 
 // ---- About ------------------------------------------------------------
+// ---- 1.9-dev5.0: update-channel radio row (Nuvio-style) --------------
+@Composable
+private fun ChannelOption(title: String, sub: String, selected: Boolean, onPick: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(onClick = onPick).padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RadioButton(selected = selected, onClick = onPick, colors = RadioButtonDefaults.colors(selectedColor = Pink, unselectedColor = Muted))
+        Spacer(Modifier.width(8.dp))
+        Column {
+            Text(title, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(sub, color = Muted, fontSize = 13.sp, lineHeight = 18.sp)
+        }
+    }
+}
+
 @Composable
 fun AboutPage() {
     val uriHandler = LocalUriHandler.current
@@ -563,7 +664,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("1.9-dev4.9 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("1.9-dev5.0 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")
@@ -573,6 +674,68 @@ fun AboutPage() {
         SettingsRow(R.drawable.ic_info, "GitHub — Website", "github.com/JSxtrme/AniPull (demo, paused)", { uriHandler.openUri("https://github.com/JSxtrme/AniPull") })
         SettingsDivider()
         SettingsRow(R.drawable.ic_info, "Website demo", "anipull.vercel.app", { uriHandler.openUri("https://anipull.vercel.app") })
+    }
+    Spacer(Modifier.height(20.dp))
+    SettingsSectionLabel("UPDATES")
+    SettingsCard {
+        val ctx = LocalContext.current
+        val scope = rememberCoroutineScope()
+        var channel by remember { mutableStateOf(updateChannel(ctx)) }
+        var showChannelDialog by remember { mutableStateOf(false) }
+        var checkMsg by remember { mutableStateOf<String?>(null) }
+        var checking by remember { mutableStateOf(false) }
+        // Manual check ignores the Later snooze — it always shows
+        // the sheet when an update exists for this channel.
+        var manualUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
+        SettingsRow(R.drawable.ic_download, "Update channel", if (channel == "dev") "Dev" else "Stable", { showChannelDialog = true })
+        SettingsDivider()
+        SettingsRow(R.drawable.ic_download, "Check for updates", "See if a newer build is out", {
+            if (checking) return@SettingsRow
+            checking = true
+            checkMsg = "Checking for updates…"
+            scope.launch {
+                val result = checkForUpdate(ctx, channel)
+                checking = false
+                when (result) {
+                    is UpdateCheckResult.Available -> { checkMsg = null; manualUpdate = result.info }
+                    UpdateCheckResult.UpToDate -> checkMsg = "No updates available — you're on the latest build."
+                    UpdateCheckResult.NoNetwork -> checkMsg = "Couldn't check for updates — check your connection and try again."
+                    is UpdateCheckResult.Failed -> checkMsg = "Couldn't check for updates — ${result.message}"
+                }
+            }
+        })
+        SettingsDivider()
+        SettingsRow(R.drawable.ic_share, "Share Anipull", "Tell a friend about the app", { shareAnipull(ctx) })
+        if (checkMsg != null) {
+            Column(modifier = Modifier.padding(vertical = 12.dp)) {
+                Text(
+                    checkMsg!!,
+                    color = if (checkMsg!!.startsWith("Couldn't")) Color(0xFFFF3B30) else Teal,
+                    fontSize = 13.sp, lineHeight = 19.sp,
+                )
+            }
+        }
+        if (showChannelDialog) {
+            AlertDialog(
+                onDismissRequest = { showChannelDialog = false },
+                title = { Text("Update channel", color = TextMain, fontWeight = FontWeight.Bold, fontFamily = HeadingFont) },
+                text = {
+                    Column {
+                        ChannelOption("Stable", "Intended for everyday use.", channel == "stable") {
+                            setUpdateChannel(ctx, "stable"); channel = "stable"; showChannelDialog = false
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        ChannelOption("Dev", "Early updates that may contain bugs, break features, or behave unexpectedly.", channel == "dev") {
+                            setUpdateChannel(ctx, "dev"); channel = "dev"; showChannelDialog = false
+                        }
+                    }
+                },
+                confirmButton = { Text("Cancel", color = Muted, modifier = Modifier.clickable(onClick = { showChannelDialog = false }).padding(horizontal = 12.dp, vertical = 10.dp)) },
+            )
+        }
+        manualUpdate?.let { info ->
+            UpdateSheet(info = info, currentVersionName = installedVersionName(ctx), onLater = { manualUpdate = null }, onDismiss = { manualUpdate = null })
+        }
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("DATA")

@@ -198,6 +198,19 @@ fun loadHomeCache(context: Context): HomeData? {
 // --- Library (Saved): favourites for later downloading, stored separately
 // from the home cache, so "Clear home cache" in Settings never wipes
 // them. Same JSON shape as the home cache, one array in its own prefs file.
+// 1.9-dev5.0 QOL 3: public JSON helpers for Settings backup/restore —
+// export writes this string to a file, import parses it back.
+fun libraryTitlesToJson(titles: List<ApiTitle>): String {
+    val arr = JSONArray()
+    titles.forEach { arr.put(it.toJson()) }
+    return arr.toString()
+}
+fun libraryTitlesFromJson(text: String): List<ApiTitle> {
+    return try {
+        val arr = JSONArray(text)
+        (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.toApiTitle() }
+    } catch (_: Exception) { emptyList() }
+}
 fun loadLibraryTitles(context: Context): List<ApiTitle> {
     return try {
         val text = context.getSharedPreferences("anipull_library", Context.MODE_PRIVATE)
