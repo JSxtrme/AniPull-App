@@ -1,5 +1,7 @@
 package com.js.anipull
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +23,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -38,6 +41,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.launch
+import java.io.File
 
 // ---- 1.9-dev5.0: in-app updater sheet (AnymeX-style) ------------------
 // Half-height (or less) bottom sheet, home dimmed behind it
@@ -52,6 +56,26 @@ import kotlinx.coroutines.launch
 // this install); a plain dismiss (scrim/back) just hides it for
 // this launch. Manual "Check for updates" in About ignores the
 // snooze.
+// 1.9-dev5.2, sheet: the sheet MUST open fully extended —
+// ModalBottomSheet's default skipPartiallyExpanded = false
+// opens it at the ~50% partially-expanded anchor, which is
+// shorter than this sheet's 0.55-height content, so the
+// changelog card and the buttons were cut off at the bottom
+// until the user dragged it up (JS screenshot, 5.1).
+// skipPartiallyExpanded = true opens it at the expanded
+// anchor, i.e. the full intended height, buttons visible.
+// 1.9-dev5.2, permission resume: the APK bytes are downloaded
+// AT MOST ONCE per update. If the "install unknown apps"
+// allow is off, the downloaded file is KEPT (pendingInstallFile
+// + the same file on disk, SHA-verified), the user is sent to
+// the allow screen through an ActivityResultLauncher, and the
+// moment they come back with the allow on, the Android install
+// dialog fires straight away — no second tap, no re-download
+// (AnymeX does exactly this: download, request permission,
+// install the saved file). Same for the pre-download check:
+// if the allow was off before downloading, coming back with
+// it on auto-starts the download. A SHA mismatch is the only
+// legitimate re-download (file deleted, error shown).
 
 private enum class UpdatePhase { Idle, Downloading, Installing }
 
@@ -67,8 +91,152 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
     var downloaded by remember { mutableStateOf(0L) }
     var total by remember { mutableStateOf(-1L) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
+    // 1.9-dev5.2: the sheet opens fully extended (see header
+    // comment) — the default partially-expanded state cut the
+    // changelog card and the buttons off at the bottom.
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    // 1.9-dev5.2: resume state. pendingInstallFile = an APK
+    // already downloaded for THIS version, kept so the install
+    // can fire the moment the user comes back from the allow
+    // screen — never downloaded twice. awaitingPermissionForDownload
+    // = the allow was off before any download started, so coming
+    // back with it on auto-starts the download. Explicit
+    // MutableState objects (not `by` delegates) so the launcher
+    // callback below always reads the current value.
+    val pendingInstallFile = remember { mutableStateOf<File?>(null) }
+    val awaitingPermissionForDownload = remember { mutableStateOf(false) }
+    // 1.9-dev5.2 Path B trigger (see the LaunchedEffect below the
+    // startDownloadAndInstall function): the launcher callback
+    // cannot call that function directly — it is declared after
+    // the launcher, and Kotlin does not forward-reference a
+    // local function from a lambda argument (build-verified).
+    // So the callback only bumps this counter; the effect below
+    // runs the download when it changes.
+    var permissionReturnCount by remember { mutableStateOf(0) }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    // Runs when the user comes back from the "install unknown
+    // apps" screen, whichever path sent them there. AnymeX's
+    // model: request the permission, then install the file you
+    // already downloaded — never download again.
+    val permissionSettingsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) {
+        if (!context.packageManager.canRequestPackageInstalls()) {
+            // Still off — keep the downloaded file (if any) and
+            // the error, and do NOT re-open settings in a loop.
+            awaitingPermissionForDownload.value = false
+            errorMsg = "Allow Anipull to install apps first — the download is saved, tap Download & Install again and it will install without downloading again."
+            return@rememberLauncherForActivityResult
+        }
+        val pending = pendingInstallFile.value
+        if (pending != null) {
+            // Path A: APK already on disk — install it NOW.
+            if (!pending.exists() || pending.length() <= 0 ||
+                (info.sha256 != null && sha256Of(pending)?.equals(info.sha256, ignoreCase = true) != true)
+            ) {
+                pendingInstallFile.value = null
+                errorMsg = "The downloaded file was changed or removed — tap Download & Install to download it again."
+                return@rememberLauncherForActivityResult
+            }
+            phase = UpdatePhase.Installing
+            errorMsg = null
+            if (installUpdate(context, pending)) onDismiss()
+            else {
+                phase = UpdatePhase.Idle
+                errorMsg = "Allow Anipull to install apps first — the download is saved, tap Download & Install again and it will install without downloading again."
+            }
+            return@rememberLauncherForActivityResult
+        }
+        if (awaitingPermissionForDownload.value) {
+            // Path B: allow was off before downloading — the
+            // download starts by itself now, no second tap
+            // (via permissionReturnCount -> LaunchedEffect below,
+            // because this callback cannot call the function
+            // declared after it — see the state comment above).
+            awaitingPermissionForDownload.value = false
+            permissionReturnCount++
+        }
+    }
+
+    // One entry point for Download & Install, used by the button
+    // AND by the permission-return callback above.
+    fun startDownloadAndInstall() {
+        // 0. An APK already downloaded for THIS version? Install
+        // it — downloading it again would waste data for nothing.
+        // pendingInstallFile is this sheet's own download;
+        // usableDownloadedUpdate is the same file found on disk
+        // (sheet dismissed / app killed while in settings), but
+        // only when its SHA-256 matches the JSON.
+        val already: File? = pendingInstallFile.value?.takeIf { it.exists() && it.length() > 0 &&
+            (info.sha256 == null || sha256Of(it)?.equals(info.sha256, ignoreCase = true) == true)
+        } ?: usableDownloadedUpdate(context, info)
+        if (already != null) {
+            pendingInstallFile.value = already
+            if (!context.packageManager.canRequestPackageInstalls()) {
+                phase = UpdatePhase.Idle
+                errorMsg = "Allow Anipull to install apps first — the download is already saved, it'll install when you're back."
+                permissionSettingsLauncher.launch(unknownSourcesIntent(context))
+                return
+            }
+            phase = UpdatePhase.Installing
+            errorMsg = null
+            if (installUpdate(context, already)) onDismiss()
+            else {
+                phase = UpdatePhase.Idle
+                errorMsg = "Allow Anipull to install apps first — the download is already saved, it'll install when you're back."
+                permissionSettingsLauncher.launch(unknownSourcesIntent(context))
+            }
+            return
+        }
+        // 1. 5.1 refinement, kept: check the install permission
+        // BEFORE downloading, so a missing allow never wastes a
+        // download. 5.2 addition: coming back with the allow on
+        // auto-starts the download (launcher callback, Path B).
+        if (!context.packageManager.canRequestPackageInstalls()) {
+            awaitingPermissionForDownload.value = true
+            errorMsg = "Allow Anipull to install apps first — the download will start automatically when you're back."
+            permissionSettingsLauncher.launch(unknownSourcesIntent(context))
+            return
+        }
+        // 2. Fresh download, then install.
+        phase = UpdatePhase.Downloading
+        errorMsg = null
+        downloaded = 0L
+        total = -1L
+        scope.launch {
+            val file = downloadUpdate(context, info) { d, t -> downloaded = d; total = t }
+            if (file == null) {
+                phase = UpdatePhase.Idle
+                errorMsg = "Download failed — check your connection and try again."
+                return@launch
+            }
+            // Keep the file: if the allow is off, the user is
+            // sent to settings and the install fires from THIS
+            // file on return — no re-download (Path A).
+            pendingInstallFile.value = file
+            phase = UpdatePhase.Installing
+            if (!installUpdate(context, file)) {
+                phase = UpdatePhase.Idle
+                errorMsg = "Allow Anipull to install apps first — the download is saved, it'll install when you're back."
+                permissionSettingsLauncher.launch(unknownSourcesIntent(context))
+            } else {
+                // Android takes over from here: system dialog
+                // -> Update -> app closes.
+                onDismiss()
+            }
+        }
+    }
+
+    // 1.9-dev5.2 Path B, continued: when the launcher callback
+    // above bumps permissionReturnCount, the user has come back
+    // from the allow screen with the allow on and a download was
+    // waiting to start — start it now, no second tap.
+    androidx.compose.runtime.LaunchedEffect(permissionReturnCount) {
+        if (permissionReturnCount == 0) return@LaunchedEffect
+        startDownloadAndInstall()
+    }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
         Column(
             modifier = Modifier.fillMaxWidth().fillMaxHeight(0.55f).padding(horizontal = 16.dp).padding(bottom = 24.dp),
             verticalArrangement = Arrangement.SpaceBetween,
@@ -165,45 +333,7 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = TextMain),
                 ) { Text("Later", fontWeight = FontWeight.Bold) }
                 Button(
-                    onClick = {
-                        // 1.9-dev5.1 refinement (from the 5.0 research
-                        // report): 5.0 checked the install permission
-                        // only AFTER downloading — a wasted ~10 MB
-                        // download when the one-time allow is off.
-                        // Check BEFORE downloading instead. Safe here:
-                        // this only changes 5.1's own updater for
-                        // future updates; 5.0 on JS's phone does the
-                        // checking for 5.1 with its own (5.0) code.
-                        if (!context.packageManager.canRequestPackageInstalls()) {
-                            errorMsg = "Allow Anipull to install apps first, then tap Download & Install again."
-                            openUnknownSourcesSettings(context)
-                            return@Button
-                        }
-                        phase = UpdatePhase.Downloading
-                        errorMsg = null
-                        downloaded = 0L
-                        total = -1L
-                        scope.launch {
-                            val file = downloadUpdate(context, info) { d, t -> downloaded = d; total = t }
-                            if (file == null) {
-                                phase = UpdatePhase.Idle
-                                errorMsg = "Download failed — check your connection and try again."
-                                return@launch
-                            }
-                            phase = UpdatePhase.Installing
-                            if (!installUpdate(context, file)) {
-                                // One-time "install unknown apps" allow
-                                // isn't on yet — send them to the toggle.
-                                phase = UpdatePhase.Idle
-                                errorMsg = "Allow Anipull to install apps first, then tap Download & Install again."
-                                openUnknownSourcesSettings(context)
-                            } else {
-                                // Android takes over from here: system
-                                // dialog -> Update -> app closes.
-                                onDismiss()
-                            }
-                        }
-                    },
+                    onClick = { startDownloadAndInstall() },
                     modifier = Modifier.weight(1f).height(50.dp),
                     enabled = phase == UpdatePhase.Idle,
                     colors = ButtonDefaults.buttonColors(containerColor = Pink, disabledContainerColor = Pink.copy(alpha = 0.4f)),

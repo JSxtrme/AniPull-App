@@ -130,7 +130,7 @@ suspend fun checkForUpdate(context: Context, channel: String = updateChannel(con
  *  from there are safe (snapshot state is thread-safe). */
 suspend fun downloadUpdate(context: Context, info: UpdateInfo, onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit): File? = withContext(Dispatchers.IO) {
     val dir = File(context.cacheDir, "updates").apply { mkdirs() }
-    val out = File(dir, "anipull-update.apk")
+    val out = downloadedUpdateFile(context)
     val digest = MessageDigest.getInstance("SHA-256")
     try {
         val conn = (URL(info.apkUrl).openConnection() as HttpURLConnection).apply {
@@ -166,6 +166,47 @@ suspend fun downloadUpdate(context: Context, info: UpdateInfo, onProgress: (down
     }
 }
 
+/** The single file a downloaded update APK lives in
+ *  (cacheDir/updates/anipull-update.apk). One file, one
+ *  version at a time — a new download overwrites it. */
+fun downloadedUpdateFile(context: Context): File =
+    File(File(context.cacheDir, "updates"), "anipull-update.apk")
+
+/** SHA-256 hex of a file, or null if it can't be read. */
+fun sha256Of(file: File): String? = try {
+    val digest = MessageDigest.getInstance("SHA-256")
+    file.inputStream().use { input ->
+        val buf = ByteArray(64 * 1024)
+        while (true) {
+            val n = input.read(buf)
+            if (n <= 0) break
+            digest.update(buf, 0, n)
+        }
+    }
+    digest.digest().joinToString("") { "%02x".format(it) }
+} catch (_: Exception) { null }
+
+/** 1.9-dev5.2: is there already a downloaded APK on disk for
+ *  THIS exact update (same version, SHA-256 matches the JSON)?
+ *  Returns it if yes, null if no. This is what stops the
+ *  updater downloading the same APK twice: after the
+ *  permission screen, after a dismissed sheet, even after
+ *  the app was killed while the user was in settings — the
+ *  file is still there and still verified, so the next tap
+ *  installs it instead of re-downloading it. Without a SHA
+ *  in the JSON there is nothing to verify identity against,
+ *  so no cross-session reuse (the in-sheet pending file,
+ *  whose origin is known, is still reused — see
+ *  UpdateSheet). A mismatched file is deleted, never
+ *  installed. */
+fun usableDownloadedUpdate(context: Context, info: UpdateInfo): File? {
+    val expected = info.sha256 ?: return null
+    val file = downloadedUpdateFile(context)
+    if (!file.exists() || file.length() <= 0) return null
+    return if (sha256Of(file)?.equals(expected, ignoreCase = true) == true) file
+    else { file.delete(); null }
+}
+
 /** Fires Android's system install dialog for the downloaded APK
  *  (FileProvider + ACTION_VIEW). Returns true if the dialog was
  *  fired. Returns false if Anipull isn't allowed to install
@@ -185,12 +226,20 @@ fun installUpdate(context: Context, apk: File): Boolean {
     return true
 }
 
-fun openUnknownSourcesSettings(context: Context) {
-    val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+/** Intent for the per-app "install unknown apps" screen.
+ *  1.9-dev5.2: deliberately NO FLAG_ACTIVITY_NEW_TASK here —
+ *  UpdateSheet launches it through an ActivityResultLauncher,
+ *  and a NEW_TASK flag would break result delivery (the
+ *  return callback would never fire). */
+fun unknownSourcesIntent(context: Context): Intent =
+    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
         data = Uri.parse("package:${context.packageName}")
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
-    context.startActivity(intent)
+
+fun openUnknownSourcesSettings(context: Context) {
+    context.startActivity(unknownSourcesIntent(context).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    })
 }
 
 // ---- Share ------------------------------------------------------------
