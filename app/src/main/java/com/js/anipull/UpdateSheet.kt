@@ -166,6 +166,19 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
                 ) { Text("Later", fontWeight = FontWeight.Bold) }
                 Button(
                     onClick = {
+                        // 1.9-dev5.1 refinement (from the 5.0 research
+                        // report): 5.0 checked the install permission
+                        // only AFTER downloading — a wasted ~10 MB
+                        // download when the one-time allow is off.
+                        // Check BEFORE downloading instead. Safe here:
+                        // this only changes 5.1's own updater for
+                        // future updates; 5.0 on JS's phone does the
+                        // checking for 5.1 with its own (5.0) code.
+                        if (!context.packageManager.canRequestPackageInstalls()) {
+                            errorMsg = "Allow Anipull to install apps first, then tap Download & Install again."
+                            openUnknownSourcesSettings(context)
+                            return@Button
+                        }
                         phase = UpdatePhase.Downloading
                         errorMsg = null
                         downloaded = 0L

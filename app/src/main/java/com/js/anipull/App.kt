@@ -1606,6 +1606,15 @@ fun HeaderSection(
                                 .clip(RoundedCornerShape(999.dp))
                                 .background(Card)
                                 .clickable {
+                                    // 1.9-dev5.1: the X used to close search
+                                    // by clearing focus (isSearchFocused
+                                    // drove the grid). Search mode is now
+                                    // explicit state, so focus loss alone
+                                    // no longer closes it — call the close
+                                    // path explicitly, or X would leave the
+                                    // user stuck on the cached grid with an
+                                    // empty query instead of home rows.
+                                    onCloseSearch()
                                     onQueryChange("")
                                     keyboard?.hide()
                                     focusManager.clearFocus()
@@ -1751,16 +1760,30 @@ fun AnipullAppInner() {
     val dockFractionState = remember { mutableStateOf(1f) }
     var dockAccumulatedDelta by remember { mutableStateOf(0f) }
     var isSearchFocused by remember { mutableStateOf(false) }
-    // 1.9-dev5.0 QOL 2b: was search open when a detail was tapped?
-    // The cached "From your catalog" grid only shows while the
-    // search pill is focused (query is blank there), but opening a
-    // detail disposes the pill and focus is lost — so on back the
-    // home showed plain rows instead of the catalog grid, the
-    // shared poster slot was gone, and the reverse flight had
-    // nothing to fly back to. Searched items never had this bug:
-    // a non-blank query drives their results regardless of focus.
-    // Fix: remember the search state at tap time, restore focus
-    // (grid only, no keyboard) on back from detail.
+    // 1.9-dev5.1 BUG 1 root cause (JS phone test on 5.0): the cached
+    // "From your catalog" grid was driven by isSearchFocused — the
+    // TRANSIENT focus of the search TextField. Focus is lost/cleared
+    // by (a) the LazyColumn tap-outside detector firing on a poster
+    // tap, (b) the pill being disposed when home is disposed during
+    // a detail, (c) IME back / keyboard hide. 5.0 snapshotted
+    // isSearchFocused at tap time, so if focus was already gone at
+    // that instant the snapshot was false, back returned to plain
+    // Home rows, the "cached-" shared slot never existed, and the
+    // reverse flight had nothing to land on — "pushes user to home
+    // directly". Searched items never had this bug: a non-blank
+    // query drives their results regardless of focus. And the
+    // "threshold swipe" JS reported is the second half: the list
+    // kept Home's scroll offset when the composition switched to
+    // search mode, so the cached grid started displaced and its
+    // top posters were only laid out in the viewport after the
+    // user scrolled back up a minimum amount (see Bug 2 below).
+    // Fix: search MODE is now explicit state, owned here, set true
+    // when the pill gains focus and cleared ONLY by an explicit
+    // close (closeSearch). Focus loss alone never closes it — the
+    // grid, the hero collapse, and the back-restore all read
+    // searchMode, never focus. isSearchFocused stays as the raw
+    // focus state (particles pause, keyboard-hide-on-scroll).
+    var searchMode by remember { mutableStateOf(false) }
     var searchOpenBeforeDetail by remember { mutableStateOf(false) }
     var lastLiveQuery by remember { mutableStateOf("") }
     // 1.9-dev4.8: Explore + hero transition + dock/appearance prefs.
@@ -1833,9 +1856,10 @@ fun AnipullAppInner() {
         // with the SAME key during AnimatedContent transition.
         // If this title is already open, do nothing.
         if (screen?.id == t.id) return
-        // 1.9-dev5.0 QOL 2b: snapshot search mode at tap time (see
-        // searchOpenBeforeDetail above) — restored on back.
-        searchOpenBeforeDetail = isSearchFocused || query.isNotBlank()
+        // 1.9-dev5.1: snapshot the explicit search MODE at tap time
+        // (see searchMode above) — focus may already be gone by the
+        // time this tap lands, mode cannot be. Restored on back.
+        searchOpenBeforeDetail = searchMode || query.isNotBlank()
         if (slot != null) sharedPosterKey = slot
         else if (isCarousel) sharedPosterKey = "carousel-${t.id}"
         screen = t
@@ -1845,12 +1869,15 @@ fun AnipullAppInner() {
         // detail slides out right, home slides in left, poster
         // flies back to its home slot (same shared key, kept).
         screen = null
-        // 1.9-dev5.0 QOL 2b: if the detail came from search / the
-        // cached catalog (blank query, focus-only), put search mode
-        // back on so the catalog grid — and its shared poster slot
-        // — is there for the reverse flight to land on. A non-blank
+        // 1.9-dev5.1: if the detail came from search / the cached
+        // catalog (blank query), put search MODE back on so the
+        // catalog grid — and its shared poster slot — is there for
+        // the reverse flight to land on. No list scroll change here:
+        // the tapped poster is already in the viewport at the scroll
+        // position search left it at, and scrolling to top would
+        // move a lower-row poster out of the viewport. A non-blank
         // query already keeps search results on its own.
-        if (searchOpenBeforeDetail && query.isBlank()) isSearchFocused = true
+        if (searchOpenBeforeDetail && query.isBlank()) { searchMode = true; isSearchFocused = true }
         searchOpenBeforeDetail = false
     }
     val dockModeState = remember {
@@ -1924,6 +1951,7 @@ fun AnipullAppInner() {
         liveResults = null
         searching = false
         isChipQuery = false
+        searchMode = false
         searchOpenBeforeDetail = false
         homeKeyboard?.hide()
         appFocusManager.clearFocus()
@@ -1935,13 +1963,13 @@ fun AnipullAppInner() {
     // detail to Home. Detail must outrank tabs: sheet, then
     // detail, then tabs, then search. On-screen BackPill already
     // called goBackFromDetail directly, which is why it worked.
-    BackHandler(enabled = screen != null || sheetFor != null || showSettings || showDownloads || showLibrary || isSearchFocused || query.isNotBlank()) {
+    BackHandler(enabled = screen != null || sheetFor != null || showSettings || showDownloads || showLibrary || searchMode || isSearchFocused || query.isNotBlank()) {
         if (sheetFor != null) sheetFor = null
         else if (screen != null) goBackFromDetail()
         else if (showSettings) showSettings = false
         else if (showDownloads) showDownloads = false
         else if (showLibrary) showLibrary = false
-        else if (isSearchFocused || query.isNotBlank()) closeSearch()
+        else if (searchMode || isSearchFocused || query.isNotBlank()) closeSearch()
     }
 
     // 1.9-dev4 dock scroll, copied from Nuvio's
@@ -2285,11 +2313,31 @@ fun AnipullAppInner() {
                         liveResults = null
                         searching = false
                         appFocusManager.clearFocus()
+                        scope.launch { listState.scrollToItem(0) }
                     },
                     live = liveSections != null,
                     loadingHome = liveSections == null && !homeFailed,
-                    onFocusChange = { isSearchFocused = it },
-                    isSearching = isSearchFocused || query.isNotBlank(),
+                    // 1.9-dev5.1 BUG 2: tapping the search bar must
+                    // ALWAYS put the user at the top of the page.
+                    // The list kept Home's scroll offset when the
+                    // composition switched to search mode, so the
+                    // hero collapse + cached grid happened ABOVE the
+                    // viewport and the user stayed scrolled down by
+                    // the amount they were on Home. Focus gain is
+                    // the pill tap: jump the list to item 0 first,
+                    // so search starts at the top, from the top of
+                    // the page or from scrolled-down Home alike.
+                    // scrollToItem is an instant jump (no animation
+                    // racing the 320ms hero collapse), and a no-op
+                    // when already at the top.
+                    onFocusChange = { focused ->
+                        isSearchFocused = focused
+                        if (focused) {
+                            searchMode = true
+                            scope.launch { listState.scrollToItem(0) }
+                        }
+                    },
+                    isSearching = searchMode || query.isNotBlank(),
                     onPillPositioned = { pillCoordsHolder[0] = it },
                     onCloseSearch = { closeSearch() },
                     // 4.9 fix 4: particles stay VISIBLE, ticker freezes on scroll/typing (particlesPaused), not hidden.
@@ -2337,7 +2385,7 @@ fun AnipullAppInner() {
                         }
                     }
                 }
-            } else if (isSearchFocused) {
+            } else if (searchMode) {
                 // 1.9-dev4.7: focused with an empty query is not an
                 // empty screen any more — show cached posters below
                 // the pill instantly (they are already on the phone
@@ -2439,13 +2487,13 @@ fun AnipullAppInner() {
             // hidden, and no way to scroll further. Let the grid
             // scroll a bit past the end: 140dp of air above the
             // dock, so the last row fully clears it.
-            if (query.isNotBlank() || isSearchFocused) {
+            if (query.isNotBlank() || searchMode) {
                 item(key = "search_bottom_spacer", contentType = "spacer") { Spacer(Modifier.height(140.dp)) }
             }
             // Extra catalogs, below the AniLab home rows: genre rows from
             // /api/category (Action 1, Romance 14, Comedy 5, Fantasy 4).
             // They load progressively in the background, like home rows.
-            if (!isSearchFocused && query.isBlank() && liveSections != null) {
+            if (!searchMode && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
                     item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
                 }
@@ -2457,7 +2505,7 @@ fun AnipullAppInner() {
             // when it finally stops does the footer below appear.
             // This is what the Downloads "Browse anime" button points
             // at: home no longer has only a handful of picks.
-            if (!isSearchFocused && query.isBlank() && liveSections != null && showExplore) {
+            if (!searchMode && query.isBlank() && liveSections != null && showExplore) {
                 item(key = "home_explore", contentType = "explore") {
                     // First composition of Explore = user scrolled
                     // near it, so now (and only now) start loading.
@@ -2557,7 +2605,7 @@ fun AnipullAppInner() {
             // it stayed visible when the search box was tapped
             // (short focused list) and while results were fetching
             // (short skeleton list) — both screenshots JS circled.
-            if (!isSearchFocused && query.isBlank() && !searching && (liveSections == null || exploreFinished || !showExplore)) item(key = "home_footer", contentType = "footer") {
+            if (!searchMode && query.isBlank() && !searching && (liveSections == null || exploreFinished || !showExplore)) item(key = "home_footer", contentType = "footer") {
                 Column {
                     LogoRow()
                     Spacer(Modifier.height(8.dp))
