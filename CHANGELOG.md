@@ -1,3 +1,8 @@
+## 1.9-dev5.3 (2026-11-06, versionCode 44) — Version bump only, to test the 5.2 updater fixes
+
+No code changes except the version strings. 5.2 contains the updater permission-resume fix (keep downloaded APK, install dialog on return, no re-download) and the sheet fully-extended fix (skipPartiallyExpanded), but those fixes live in the updater code of the version you are updating FROM — so they can only be exercised by updating FROM 5.2 to a newer build. This build exists only to give 5.2 something to update to. JS test, on 5.2 with the install allow OFF: updater sheet must open fully extended (header + changelog + buttons visible, no drag), tap Download & Install -> permission screen -> turn allow on -> return -> download starts by itself, no second tap, no second download, then Android dialog -> reopen = 5.3.
+Signed stable key, in-place over 5.2.
+
 ## 1.9-dev5.2 (2026-11-06, versionCode 43) — Updater permission resume + sheet opens fully extended
 
 JS phone test on 5.1: updater worked perfectly ("Yoooo, the updater worked perfectly, I'm jumping in excitement lol"), search bugs fixed (catalog reverse + search scroll-to-top, both confirmed). Two updater issues left, both fixed here:
