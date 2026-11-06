@@ -119,7 +119,7 @@ jobs:
           if os.path.exists("release-notes.json"):
               with open("release-notes.json") as f:
                   notes = json.load(f)
-                    data = {}
+          data = {}
           # Preserve an existing "stable" entry (the 1.9 stable
           # release) so a later dev push does not wipe it from
           # updates.json. The checked-out repo already contains the
