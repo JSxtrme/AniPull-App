@@ -1,4 +1,6 @@
 ## 1.9-dev5.4 (2026-11-06, versionCode 45) — GitHub Actions automation + updates.json moves to the app repo
+Note: workflow file .github/workflows/dev-release.yml was added via the GitHub web UI (API push of workflow files is refused with 403); this commit triggers the first Actions run.
+
 
 JS approved: "set up GitHub Actions now, with the keystore as a secret". This is the FIRST Actions-built build.
 1. GitHub Actions automation: new .github/workflows/dev-release.yml — on every push to dev/1.9 (paths-ignore updates.json, so the workflow's own updates.json commit does not loop) and on manual workflow_dispatch, it builds the signed release APK, verifies the signer fingerprint is the stable key (0b9c4b02..., job fails otherwise — in-place updates depend on it), creates a prerelease (tag = versionName, NOT latest release) with the APK attached, then regenerates updates.json with the real SHA-256 and commits it back with "[skip ci]". Re-runs are idempotent (same-tag prerelease deleted first, no duplicate release, no commit loop). Never touches main, never creates a stable release. First run is slow (cold cache: SDK + Gradle download) — that is build time only, the app itself is unchanged and just as fast.
