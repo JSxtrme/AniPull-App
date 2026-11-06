@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Themed-icon (Android 13+) monochrome layer: v2 logo SIMPLIFIED.
-     Why: themed icons are a single colour by system design — Android
-     discards the pink/white distinction entirely. In the colour icon the
-     white arrow stands out against the pink chevrons, but in all-white
-     the arrow merges into the chevrons (its head even coincides with the
-     bottom chevron), which is exactly the messy blob in JS's screenshot.
-     Fix: monochrome is the stack only — diamond + two rounded chevrons,
-     no arrow. Those shapes never overlap, so they stay clean and readable
-     at launcher size in a single colour. The colour icon keeps the arrow. -->
+<!-- Themed-icon (Android 13+) monochrome layer: Orbit spark, all white
+     on transparent, same geometry as the colour layer (same arc, sparkle
+     and dot, same 0.9 scale + translateY 3.6 centring).
+     Unlike the v2 stack, nothing is removed here: the mono SVG JS chose
+     already uses these exact shapes in white, so colour and mono match
+     shape-for-shape. One thing to check on a real phone: the dot sits
+     ON the ring arc (south-east), so in a single colour it reads as a
+     bump on the ring rather than a separate dot — that is the original
+     design, not a merge bug, but only the themed-icon check on device
+     settles whether it reads cleanly at launcher size. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -18,21 +19,17 @@
         android:pivotY="50"
         android:scaleX="0.9"
         android:scaleY="0.9"
-        android:translateY="6">
+        android:translateY="3.6">
+        <path
+            android:strokeColor="#FFFFFF"
+            android:strokeWidth="6"
+            android:strokeLineCap="round"
+            android:pathData="M76.87,19.13 A38,38 0 1,1 23.6,18.67" />
         <path
             android:fillColor="#FFFFFF"
-            android:pathData="M50,8 L88,26 L50,44 L12,26 Z" />
+            android:pathData="M50,22 L57,39 L74,46 L57,53 L50,70 L43,53 L26,46 L43,39 Z" />
         <path
-            android:strokeColor="#FFFFFF"
-            android:strokeWidth="11"
-            android:strokeLineCap="round"
-            android:strokeLineJoin="round"
-            android:pathData="M17,43 L50,59 L83,43" />
-        <path
-            android:strokeColor="#FFFFFF"
-            android:strokeWidth="11"
-            android:strokeLineCap="round"
-            android:strokeLineJoin="round"
-            android:pathData="M17,63 L50,79 L83,63" />
+            android:fillColor="#FFFFFF"
+            android:pathData="M83,73 A6,6 0 1,1 71,73 A6,6 0 1,1 83,73 Z" />
     </group>
 </vector>

@@ -7,8 +7,12 @@ import android.content.Context
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.withPermit
 import org.json.JSONArray
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -191,6 +195,39 @@ fun loadHomeCache(context: Context): HomeData? {
     } catch (_: Exception) { null }
 }
 
+// --- Library (Saved): favourites for later downloading, stored separately
+// from the home cache, so "Clear home cache" in Settings never wipes
+// them. Same JSON shape as the home cache, one array in its own prefs file.
+// 1.9-dev5.0 QOL 3: public JSON helpers for Settings backup/restore —
+// export writes this string to a file, import parses it back.
+fun libraryTitlesToJson(titles: List<ApiTitle>): String {
+    val arr = JSONArray()
+    titles.forEach { arr.put(it.toJson()) }
+    return arr.toString()
+}
+fun libraryTitlesFromJson(text: String): List<ApiTitle> {
+    return try {
+        val arr = JSONArray(text)
+        (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.toApiTitle() }
+    } catch (_: Exception) { emptyList() }
+}
+fun loadLibraryTitles(context: Context): List<ApiTitle> {
+    return try {
+        val text = context.getSharedPreferences("anipull_library", Context.MODE_PRIVATE)
+            .getString("saved_json", null) ?: return emptyList()
+        val arr = JSONArray(text)
+        (0 until arr.length()).mapNotNull { arr.optJSONObject(it)?.toApiTitle() }
+    } catch (_: Exception) { emptyList() }
+}
+fun saveLibraryTitles(context: Context, titles: List<ApiTitle>) {
+    try {
+        val arr = JSONArray()
+        titles.forEach { arr.put(it.toJson()) }
+        context.getSharedPreferences("anipull_library", Context.MODE_PRIVATE)
+            .edit().putString("saved_json", arr.toString()).apply()
+    } catch (_: Exception) { }
+}
+
 suspend fun fetchHome(): HomeData? {
     val sections = mutableListOf<HomeSection>()
     var featured: ApiTitle? = null
@@ -198,7 +235,7 @@ suspend fun fetchHome(): HomeData? {
         onSection = { _, sec -> synchronized(sections) { sections += sec } },
         onFeatured = { featured = it },
     )
-    val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched")
+    val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched", "Most Favorite", "Top 10 Today", "Top 10 Week", "Top 10 Month")
     val ordered = sections.sortedBy { wanted.indexOf(it.name) }
     return if (ordered.isEmpty() && featured == null) null else HomeData(ordered, featured)
 }
@@ -208,15 +245,15 @@ suspend fun fetchHome(): HomeData? {
 // details land — the first row appears in ~1s instead of waiting for all
 // 50 detail calls to finish, which was the old sequential bottleneck.
 suspend fun fetchHomeProgressive(
-    onSection: (Int, HomeSection) -> Unit,
-    onFeatured: (ApiTitle) -> Unit,
+    onSection: suspend (Int, HomeSection) -> Unit,
+    onFeatured: suspend (ApiTitle) -> Unit,
 ) = withContext(Dispatchers.IO) {
     val text = getText("https://anilab2.amdapi.click/api/home") ?: return@withContext
     try {
         val root = JSONObject(text)
         val featuredObj = root.optJSONObject("featured")
         val sectionsJson = root.optJSONArray("sections") ?: return@withContext
-        val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched")
+        val wanted = listOf("Spotlight", "Trending", "Most Popular", "Top Airing", "Most Watched", "Most Favorite", "Top 10 Today", "Top 10 Week", "Top 10 Month")
         val jobs = mutableListOf<kotlinx.coroutines.Job>()
         // coroutineScope so this returns only after every section finished,
         // while callbacks already fired progressively inside each launch.
@@ -264,6 +301,23 @@ suspend fun fetchCategory(id: Int, name: String): HomeSection? = withContext(Dis
     } catch (_: Exception) { null }
 }
 
+// Paged category, for the Explore grid (1.9-dev4.8): /api/category
+// takes ?page=, verified live 2026-11-02 for page=2 returning a
+// distinct 30 posts. Enrich the first 10, like the genre rows.
+suspend fun fetchCategoryPaged(id: Int, page: Int): HomeSection? = withContext(Dispatchers.IO) {
+    val text = getText("https://anilab2.amdapi.click/api/category?id=$id&page=$page") ?: return@withContext null
+    try {
+        val root = JSONObject(text)
+        val arr = root.optJSONArray("posts") ?: return@withContext null
+        val posts = (0 until arr.length()).mapNotNull { j ->
+            val pp = arr.optJSONObject(j) ?: return@mapNotNull null
+            pp.optLong("id", 0).takeIf { it != 0L }?.let { it to pp.optString("poster").takeIf { x -> x.isNotBlank() } }
+        }
+        val titles = enrich(posts, 10)
+        if (titles.isEmpty()) null else HomeSection("Explore", titles)
+    } catch (_: Exception) { null }
+}
+
 suspend fun searchAniLab(query: String): List<ApiTitle> = withContext(Dispatchers.IO) {
     val q = URLEncoder.encode(query, "UTF-8").replace("+", "%20")
     val text = getText("https://anilab2.amdapi.click/api/search?query=$q") ?: return@withContext emptyList()
@@ -282,49 +336,114 @@ suspend fun searchAniLab(query: String): List<ApiTitle> = withContext(Dispatcher
 
 // --- Tiny poster loader: no Coil dependency, so no new download risk.
 // Small AniLab posters only, in-memory cache, decoded off the main thread.
+// 1.9-dev4.8.3: size-aware decode, Coil-style without Coil.
+// The cache key includes the target width, because the same poster
+// shows at 118dp in a row and at full width in the carousel —
+// sharing one bitmap would either upscale the row or waste a
+// full-size texture on every grid card during a fast scroll.
 object PosterCache {
-    private val map = LinkedHashMap<String, Bitmap>()
-    fun get(url: String): Bitmap? = synchronized(map) { map[url] }
-    fun put(url: String, bmp: Bitmap) = synchronized(map) {
-        if (map.size > 120) map.remove(map.keys.first())
-        map[url] = bmp
+    // 1.9-dev4.8.4: byte-capped, not count-capped. 200 bitmaps at
+    // ~350x525 ARGB was ~150MB, and that memory pressure during
+    // a fast scroll (dozens of new posters at once) GC-stuttered.
+    // 4.9 optimisation (Coil/Nuvio-style cache): LRU, not FIFO —
+    // LinkedHashMap with accessOrder=true, so get() moves a poster
+    // to most-recently-used and eviction drops the LEAST recently
+    // viewed poster, not the oldest inserted (which could be the
+    // poster the user just came back from). Cap raised 50MB -> 
+    // 100MB: home holds ~180 posters, 50MB (~68 bitmaps) evicted
+    // constantly on scroll-back, forcing re-decode after loading.
+    // HARDWARE bitmaps live mostly on GPU, so 100MB is safe here.
+    private val map = LinkedHashMap<String, Bitmap>(16, 0.75f, true)
+    private var totalBytes = 0L
+    fun get(url: String, targetWidthPx: Int = 0): Bitmap? = synchronized(map) { map["$url@$targetWidthPx"] }
+    fun put(url: String, bmp: Bitmap, targetWidthPx: Int = 0) = synchronized(map) {
+        val key = "$url@$targetWidthPx"
+        val bytes = (bmp.width * bmp.height * 4).toLong()
+        map[key]?.let { totalBytes -= (it.width * it.height * 4).toLong() }
+        map[key] = bmp; totalBytes += bytes
+        while (totalBytes > 100L * 1024 * 1024 && map.size > 1) {
+            val first = map.keys.first(); val old = map.remove(first)!!; totalBytes -= (old.width * old.height * 4).toLong()
+        }
     }
 }
 
-suspend fun loadPoster(url: String, context: Context? = null): Bitmap? {
-    PosterCache.get(url)?.let { return it }
-    return withContext(Dispatchers.IO) {
+// 1.9-dev4.8.4: at most 4 poster decodes at once. Unbounded IO
+// meant a fast scroll launched dozens of decodes simultaneously,
+// all competing for CPU + GPU upload in the same frames.
+private val posterLoadSemaphore = kotlinx.coroutines.sync.Semaphore(4)
+
+private fun sampleSizeFor(width: Int, targetWidthPx: Int): Int {
+    if (targetWidthPx <= 0 || width <= targetWidthPx) return 1
+    var s = 1
+    while (width / (s * 2) >= targetWidthPx) s *= 2
+    return s
+}
+
+// 1.9-dev4.8.7 Nuvio-inspired: is this poster already on disk?
+// PosterImage uses this to decide whether a load may start at once
+// (memory/disk hit = fast, no delay) or must wait 120ms first
+// (network fetch = expensive, and a card that flashes past in a
+// fling should never start one).
+fun isPosterOnDisk(url: String, context: Context?): Boolean {
+    if (context == null) return false
+    return try { java.io.File(java.io.File(context.cacheDir, "posters"), "${url.hashCode()}.jpg").exists() } catch (_: Exception) { false }
+}
+
+suspend fun loadPoster(url: String, context: Context? = null, targetWidthPx: Int = 0): Bitmap? {
+    PosterCache.get(url, targetWidthPx)?.let { return it }
+    return posterLoadSemaphore.withPermit {
+    withContext(Dispatchers.IO) {
+        var conn: HttpURLConnection? = null
         try {
-            // Disk first: a poster downloaded on a previous launch is
-            // already on the phone, so a cached home row renders instantly
-            // with no network at all.
+            currentCoroutineContext().ensureActive()
             if (context != null) {
                 val dir = java.io.File(context.cacheDir, "posters").apply { mkdirs() }
                 val file = java.io.File(dir, "${url.hashCode()}.jpg")
                 if (file.exists()) {
-                    BitmapFactory.decodeFile(file.absolutePath)?.let {
-                        PosterCache.put(url, it); return@withContext it
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(file.absolutePath, bounds)
+                    val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx); inPreferredConfig = Bitmap.Config.HARDWARE }
+                    (BitmapFactory.decodeFile(file.absolutePath, opts)
+                        ?: BitmapFactory.decodeFile(file.absolutePath, BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx) }))?.let {
+                        PosterCache.put(url, it, targetWidthPx); return@withContext it
                     }
                 }
             }
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            // Coil-like cancellation: if this coroutine is cancelled
+            // (card scrolled off), disconnect aborts the blocking
+            // read immediately instead of holding a decode slot
+            // until the 8s timeout. Before, a cancelled load kept
+            // running — that is part of why Anipull "tried hard"
+            // to keep up with a fling while Nuvio just dropped it.
+            currentCoroutineContext().ensureActive()
+            conn = (URL(url).openConnection() as HttpURLConnection).apply {
                 connectTimeout = 8000
                 readTimeout = 8000
                 setRequestProperty("User-Agent", "Anipull/1.0")
             }
-            if (conn.responseCode != 200) return@withContext null
-            val bytes = conn.inputStream.use { it.readBytes() }
-            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withContext null
+            currentCoroutineContext()[Job]?.invokeOnCompletion { try { conn?.disconnect() } catch (_: Exception) { } }
+            if (conn!!.responseCode != 200) return@withContext null
+            val bytes = conn!!.inputStream.use { it.readBytes() }
+            currentCoroutineContext().ensureActive()
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+            val opts = BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx); inPreferredConfig = Bitmap.Config.HARDWARE }
+            val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size, opts)
+                ?: BitmapFactory.decodeByteArray(bytes, 0, bytes.size, BitmapFactory.Options().apply { inSampleSize = sampleSizeFor(bounds.outWidth, targetWidthPx) })
+                ?: return@withContext null
             if (context != null) {
                 try {
                     val dir = java.io.File(context.cacheDir, "posters").apply { mkdirs() }
                     java.io.File(dir, "${url.hashCode()}.jpg").writeBytes(bytes)
                 } catch (_: Exception) { }
             }
-            PosterCache.put(url, bmp)
+            PosterCache.put(url, bmp, targetWidthPx)
             bmp
         } catch (_: Exception) {
             null
+        } finally {
+            try { conn?.disconnect() } catch (_: Exception) { }
         }
+    }
     }
 }

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 1.9-dev5.0: FileProvider paths for the in-app updater — the
+     downloaded APK lives in cacheDir/updates/ and is handed to
+     Android's installer via a content:// URI. Nothing else is
+     shared. -->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>

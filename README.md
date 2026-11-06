@@ -145,6 +145,35 @@ gradle.properties
   that is a website-repo problem, not an app problem; on-device, a WebView
   clearance + Kwik unpacking route is the planned first resolver step.
 
+## Thanks — especially Nuvio
+
+Anipull's polish owes a lot to open source, and at this point it would
+be dishonest not to say so plainly:
+
+- **[NuvioMobile](https://github.com/NuvioMedia/NuvioMobile)
+  (NuvioMedia, GPLv3)** — thank you, genuinely. The floating dock in
+  this app is adapted from Nuvio's `FloatingNavigationBar`:
+  the morph (track `48 + 16 × fraction`, padding `58 − 30 × fraction`),
+  the 60px scroll snap threshold, the tweened label fraction, and the
+  Haze glass bar. The home scroll structure is theirs too: a
+  `LazyColumn` of keyed, content-typed sections, each a `LazyRow` of
+  poster cards, plus the hero dots under Editor's Picks (8dp tall,
+  `8 + 24 × visibility` wide, alpha `0.35 + 0.57 × visibility`) and
+  the Nuvio-style Settings hub. NuvioMobile is GPLv3 — if Anipull
+  ever goes public with Nuvio-derived code in it, that code stays
+  under GPL-compatible terms, with this credit intact.
+- **[Haze](https://github.com/chrisbanes/haze) (Chris Banes)** — the
+  backdrop blur behind the translucent dock.
+- **[BitChord](https://github.com/kushagrasinghx/BitChord)** — the
+  hero poster spring (stiffness 195, critically damped) that the
+  home-to-detail transition is built on.
+- **AniLab** — the metadata API that makes browsing work at all.
+- **Outfit font (OFL)** — bundled in `res/font`.
+
+In short: Anipull's look is its own (near-black, pink, Outfit/SF),
+but its dock, its scroll, and its dots learned to move by watching
+Nuvio. Thanks, Nuvio team.
+
 ## License / use
 
 Personal project, private repo. Don't redistribute builds as your own.

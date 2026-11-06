@@ -1,3 +1,4 @@
+import java.util.Properties
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -12,19 +13,64 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
-        versionName = "1.8"
+        versionCode = 50
+        versionName = "1.9"
+    }
+
+    // 1.9-dev4.8.8-stablekey: STABLE release key, Route A.
+    // How the wiring works, in plain terms:
+    // - The build needs 4 things to sign: keystore file, alias,
+    //   keystore password, key password.
+    // - Locally those 4 things live ONLY in signing.properties,
+    //   a small text file in this app folder, on this VM only.
+    // - 1.9-dev5.4: GitHub Actions signs the same way, but from
+    //   environment variables instead (ANIPULL_KEYSTORE_FILE,
+    //   ANIPULL_KEY_ALIAS, ANIPULL_STORE_PASSWORD,
+    //   ANIPULL_KEY_PASSWORD), fed from encrypted repo secrets.
+    //   Env vars win when ALL four are set; otherwise the local
+    //   signing.properties path below is used as before.
+    // - build.gradle.kts below does NOT contain any password and
+    //   never logs one. It only says "if a signing source exists,
+    //   read it and use it; if none exists, fall back to the
+    //   debug key so a fresh checkout still builds for testing".
+    // - Pushes to GitHub use an explicit file list (push-files
+    //   --paths-file), and signing.properties + release.keystore
+    //   are NEVER on that list, so they can never leak into the
+    //   repo. The APK itself contains only the signature, never
+    //   the passwords.
+    val signingProps = Properties()
+    val signingPropsFile = file("signing.properties")
+    if (signingPropsFile.exists()) {
+        signingPropsFile.inputStream().use { signingProps.load(it) }
+    }
+    val envStoreFile = System.getenv("ANIPULL_KEYSTORE_FILE")
+    val envStorePassword = System.getenv("ANIPULL_STORE_PASSWORD")
+    val envKeyAlias = System.getenv("ANIPULL_KEY_ALIAS")
+    val envKeyPassword = System.getenv("ANIPULL_KEY_PASSWORD")
+    val hasEnvKey = !envStoreFile.isNullOrBlank() && !envStorePassword.isNullOrBlank() &&
+        !envKeyAlias.isNullOrBlank() && !envKeyPassword.isNullOrBlank()
+    val hasStableKey = hasEnvKey || signingProps.containsKey("storePassword")
+    if (hasStableKey) {
+        signingConfigs {
+            create("release") {
+                storeFile = if (hasEnvKey) file(envStoreFile) else file(signingProps.getProperty("storeFile"))
+                storePassword = if (hasEnvKey) envStorePassword else signingProps.getProperty("storePassword")
+                keyAlias = if (hasEnvKey) envKeyAlias else signingProps.getProperty("keyAlias")
+                keyPassword = if (hasEnvKey) envKeyPassword else signingProps.getProperty("keyPassword")
+            }
+        }
     }
 
     buildTypes {
         release {
-            // Release variant = no debuggable flag, no debug overhead.
-            // Signed with the same debug key as the stage-1 APK on purpose,
-            // so `adb install -r` updates in place. A Play Store release
-            // key is a later step, not this phone-test build.
-            isMinifyEnabled = false
+            // 1.9 stable: R8 on (minify + shrinkResources). Conservative
+            // proguard-rules.pro keeps only the manifest-reached entry
+            // points; Compose/Haze/AndroidX ship their own consumer rules.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             isDebuggable = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (hasStableKey) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
     }
     compileOptions {
@@ -56,5 +102,10 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.0")
+    // Haze 1.3.1, already in the local Gradle cache from the BitChord /
+    // ReChord build, so this resolves offline: real backdrop blur for
+    // the translucent dock, not a fake tint. Toggle in Settings.
+    implementation("dev.chrisbanes.haze:haze:1.3.1")
+    implementation("dev.chrisbanes.haze:haze-materials:1.3.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
