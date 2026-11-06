@@ -125,13 +125,13 @@ jobs:
           # updates.json. The checked-out repo already contains the
           # current updates.json, so read it before overwriting.
           if os.path.exists("updates.json"):
-                        try:
-                            with open("updates.json") as f:
-                                existing = json.load(f)
-                        if isinstance(existing, dict) and "stable" in existing:
-                            data["stable"] = existing["stable"]
-            except Exception:
-                pass
+              try:
+                  with open("updates.json") as f:
+                      existing = json.load(f)
+                  if isinstance(existing, dict) and "stable" in existing:
+                      data["stable"] = existing["stable"]
+              except Exception:
+                  pass
           data["dev"] = {
                   "versionCode": int("${{ steps.version.outputs.version_code }}"),
                   "versionName": "${{ steps.version.outputs.version_name }}",
