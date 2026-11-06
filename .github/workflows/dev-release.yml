@@ -119,16 +119,27 @@ jobs:
           if os.path.exists("release-notes.json"):
               with open("release-notes.json") as f:
                   notes = json.load(f)
-          data = {
-              "dev": {
+                    data = {}
+          # Preserve an existing "stable" entry (the 1.9 stable
+          # release) so a later dev push does not wipe it from
+          # updates.json. The checked-out repo already contains the
+          # current updates.json, so read it before overwriting.
+          if os.path.exists("updates.json"):
+                        try:
+                            with open("updates.json") as f:
+                                existing = json.load(f)
+                        if isinstance(existing, dict) and "stable" in existing:
+                            data["stable"] = existing["stable"]
+            except Exception:
+                pass
+          data["dev"] = {
                   "versionCode": int("${{ steps.version.outputs.version_code }}"),
                   "versionName": "${{ steps.version.outputs.version_name }}",
                   "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/${{ steps.version.outputs.version_name }}/anipull-${{ steps.version.outputs.version_name }}.apk",
                   "sha256": "${{ env.SHA256 }}",
                   "features": notes.get("features", []),
                   "fixes": notes.get("fixes", []),
-              }
-          }
+                        }
           with open("updates.json", "w") as f:
               json.dump(data, f, indent=2)
               f.write("\n")
