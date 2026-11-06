@@ -13,8 +13,8 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 49
-        versionName = "1.9-dev5.8"
+        versionCode = 50
+        versionName = "1.9"
     }
 
     // 1.9-dev4.8.8-stablekey: STABLE release key, Route A.
@@ -63,10 +63,12 @@ android {
 
     buildTypes {
         release {
-            // Release variant = no debuggable flag, no debug overhead.
-            // Signed with the stable release key when present,
-            // otherwise the debug key (fresh checkout fallback).
-            isMinifyEnabled = false
+            // 1.9 stable: R8 on (minify + shrinkResources). Conservative
+            // proguard-rules.pro keeps only the manifest-reached entry
+            // points; Compose/Haze/AndroidX ship their own consumer rules.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             isDebuggable = false
             signingConfig = if (hasStableKey) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
         }
