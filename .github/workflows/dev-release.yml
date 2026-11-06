@@ -64,13 +64,17 @@ jobs:
           printf '%s' "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/anipull-release.keystore
           chmod 600 /tmp/anipull-release.keystore
 
+      # gradlew loses its execute bit when pushed via the GitHub
+      # API, so chmod it here before running it.
       - name: Build release APK
         env:
           ANIPULL_KEYSTORE_FILE: /tmp/anipull-release.keystore
           ANIPULL_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           ANIPULL_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           ANIPULL_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
-        run: ./gradlew assembleRelease --no-daemon
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
 
       - name: Verify stable-key signature (fail if not 0b9c4b02...)
         run: |
