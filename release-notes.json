@@ -1,8 +1,1 @@
-{
-  "features": [
-    "Version bump only — test build to exercise the 5.5 updater"
-  ],
-  "fixes": [
-    "No code changes in this build"
-  ]
-}
+{"features":["Update changelog card redesigned — count pills, no arrows, both sections expanded"],"fixes":[]}

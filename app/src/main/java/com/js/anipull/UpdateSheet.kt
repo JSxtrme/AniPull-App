@@ -91,6 +91,13 @@ import java.io.File
 // NOT the screenshot's amber). Both present: New
 // first and expanded, Fixes collapsed. Only one present: just
 // that section, expanded. Both empty: no changelog card at all.
+// 1.9-dev5.7: JS took back the New-only default after the 5.6
+// test — BOTH sections start expanded now, and the chevron is
+// gone (the count pill on the right edge carries the number,
+// like the screenshot); sections with more than 5 entries show
+// the first 5 plus a "Show all (N)" row. No sub-heading or
+// explainer text in the sheet — that line only ever existed in
+// the chat preview, never in the app.
 // 1.9-dev5.2, sheet: the sheet MUST open fully extended —
 // ModalBottomSheet's default skipPartiallyExpanded = false
 // opens it at the ~50% partially-expanded anchor, which is
@@ -142,10 +149,14 @@ private fun BugIcon(tint: Color, modifier: Modifier = Modifier) {
     }
 }
 
-// 1.9-dev5.5: one collapsible changelog section — icon in a
-// tinted square, title, count badge, chevron; items as bullet
-// rows, only when expanded. Header is a real button for
-// accessibility (role + expand/collapse label).
+// 1.9-dev5.7: collapsible changelog section — icon in a
+// tinted square, title, prominent count pill on the right edge;
+// items as bullet rows, only when expanded. NO chevron/arrow
+// (JS, 5.6 test: remove the arrows, the pill carries the count
+// like the ReVanced screenshot). Header is a real button for
+// accessibility (role + expand/collapse label). Sections with
+// more than 5 entries show the first 5 plus a "Show all (N)"
+// row; "Show less" collapses back to 5.
 @Composable
 private fun ChangelogSection(
     title: String,
@@ -156,6 +167,7 @@ private fun ChangelogSection(
     expanded: Boolean,
     onToggle: () -> Unit,
 ) {
+    var showAll by remember { mutableStateOf(false) }
     Column {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -175,25 +187,31 @@ private fun ChangelogSection(
             ) { icon() }
             Spacer(Modifier.width(10.dp))
             Text(title, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
-            Spacer(Modifier.width(8.dp))
+            Spacer(Modifier.weight(1f))
             Box(
                 modifier = Modifier.clip(RoundedCornerShape(999.dp))
-                    .background(accent.copy(alpha = 0.15f)).padding(horizontal = 8.dp, vertical = 2.dp),
+                    .background(accent.copy(alpha = 0.15f)).padding(horizontal = 12.dp, vertical = 5.dp),
             ) {
-                Text(count.toString(), color = accent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text(count.toString(), color = accent, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             }
-            Spacer(Modifier.weight(1f))
-            Text(
-                if (expanded) "⌄" else "›",
-                color = Muted, fontSize = 18.sp, fontWeight = FontWeight.Bold,
-            )
         }
         if (expanded) {
+            val shown = if (items.size > 5 && !showAll) items.take(5) else items
             Column(
                 modifier = Modifier.padding(start = 42.dp, top = 2.dp, bottom = 4.dp),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                items.forEach { Text("•  $it", color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp) }
+                shown.forEach { Text("•  $it", color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp) }
+            }
+            if (items.size > 5) {
+                Text(
+                    if (showAll) "Show less" else "Show all (${items.size})",
+                    color = accent, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable(role = Role.Button, onClick = { showAll = !showAll })
+                        .padding(start = 42.dp, top = 6.dp, bottom = 4.dp),
+                )
             }
         }
     }
@@ -211,12 +229,13 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
     // — i.e. the first 64KB chunk arrived. Until then the
     // progress card shows "Connecting…" instead of 0%.
     var downloadStarted by remember { mutableStateOf(false) }
-    // 1.9-dev5.5: changelog expansion. Both lists present: New
-    // expanded, Fixes collapsed. Only one present: that one
-    // expanded. (The sections themselves are only rendered when
-    // their list is non-empty; both empty renders no card.)
+    // 1.9-dev5.7: changelog expansion. BOTH sections start
+    // expanded (JS took back the New-only default after the 5.6
+    // test). Only one present: that one expanded. (The sections
+    // themselves are only rendered when their list is non-empty;
+    // both empty renders no card.)
     var newExpanded by remember { mutableStateOf(info.features.isNotEmpty()) }
-    var fixesExpanded by remember { mutableStateOf(info.features.isEmpty() && info.fixes.isNotEmpty()) }
+    var fixesExpanded by remember { mutableStateOf(info.fixes.isNotEmpty()) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     // 1.9-dev5.2: the sheet opens fully extended (see header
     // comment) — the default partially-expanded state cut the
@@ -404,6 +423,7 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
             // (New features / Bug Fixes), scrollable INSIDE the
             // sheet while header and buttons stay pinned. Only
             // non-empty sections render; both empty = no card.
+            // 1.9-dev5.7: both sections start expanded, no chevron.
             if (info.features.isNotEmpty() || info.fixes.isNotEmpty()) {
                 Box(
                     modifier = Modifier.weight(1f, fill = false).fillMaxWidth()
