@@ -1,8 +1,8 @@
 {
   "features": [
-    "Update changelog now has New features and Bug Fixes dropdowns"
+    "Version bump only — test build to exercise the 5.5 updater"
   ],
   "fixes": [
-    "Updater no longer sits at 0% while the download starts — it shows “Connecting…” until the first bytes arrive"
+    "No code changes in this build"
   ]
 }

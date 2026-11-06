@@ -1,3 +1,8 @@
+## 1.9-dev5.6 (2026-11-06, versionCode 47) — Version bump only, to test the 5.5 updater
+
+No code changes except the version strings. 5.5 contains the updater polish (the "Connecting…" state while a download starts, and the New features / Bug Fixes changelog dropdowns), but those live in the updater code of the version you are updating FROM — so they can only be exercised by updating FROM 5.5 to a newer build. This build exists only to give 5.5 something to update to. JS test, on 5.5 via the updater: sheet offers 1.9-dev5.6, changelog shows "New features" expanded with its count badge and "Bug Fixes" collapsed with its count badge, tapping a header expands/collapses it; tap Download & Install -> card shows "Connecting…" (not "Downloaded 0.0 MB / ? — 0%") until bytes arrive, then the Downloaded X/Y — N% progress; Android dialog -> reopen = 5.6, About shows 1.9-dev5.6.
+Signed stable key, in-place over 5.5.
+
 ## 1.9-dev5.5 (2026-11-06, versionCode 46) — Updater "Connecting…" state + changelog dropdowns
 
 JS phone test on 5.4: "shows dev5.4 perfectly, that's green" — the Actions pipeline is proven end to end (5.3 -> 5.4 via the updater, stable-key signed, in place). Two updater polish items from that test, both built here:
