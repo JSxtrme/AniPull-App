@@ -2,7 +2,9 @@ package com.js.anipull
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,9 +36,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -48,14 +54,43 @@ import java.io.File
 // (spotlight on the sheet), drag handle on top, header + buttons
 // pinned, changelog card scrollable INSIDE the sheet. Flow:
 // sheet on home entry -> Download & Install -> button flips to
-// "Downloading..." (greyed) + progress card "Downloaded X MB /
-// Y MB — N%" -> 100% "Installing..." -> Android's own
-// "Do you want to update this app?" dialog -> Update -> app
-// closes, reopen = updated. NO silent auto-update.
+// "Downloading..." (greyed) + progress card "Connecting…" while
+// the connection + GitHub redirect resolve, then "Downloaded
+// X MB / Y MB — N%" once bytes arrive -> 100% "Installing..."
+// -> Android's own "Do you want to update this app?" dialog
+// -> Update -> app closes, reopen = updated. NO silent
+// auto-update.
 // "Later" snoozes that versionCode (auto-check won't re-show it
 // this install); a plain dismiss (scrim/back) just hides it for
 // this launch. Manual "Check for updates" in About ignores the
 // snooze.
+// 1.9-dev5.2, sheet: the sheet MUST open fully extended —
+// ModalBottomSheet's default skipPartiallyExpanded = false
+// opens it at the ~50% partially-expanded anchor, which is
+// shorter than this sheet's 0.55-height content, so the
+// changelog card and the buttons were cut off at the bottom
+// until the user dragged it up (JS screenshot, 5.1).
+// skipPartiallyExpanded = true opens it at the expanded
+// anchor, i.e. the full intended height, buttons visible.
+// 1.9-dev5.5, connecting state: the progress card used to show
+// "Downloaded 0.0 MB / ? — 0%" for 2-3s after tapping
+// Download & Install — the APK URL is a github.com release
+// link, so HttpURLConnection follows a 302 to a second host
+// before the first byte arrives, and onProgress only fires
+// once a 64KB chunk is read. The 10 MB file itself downloads
+// in <1s, so the stall is all connection setup, not speed.
+// The card now shows "Connecting…" (indeterminate bar) until
+// the first onProgress callback fires, and only then the
+// Downloaded X/Y — N% text. Nothing else about the flow
+// changed.
+// 1.9-dev5.5, changelog sections: the flat What's new / Bug
+// fixes list is now two collapsible sections (ReVanced-style
+// pattern, Anipull's own colours and icons): "New features"
+// (the app's own star vector, pink) and "Bug Fixes" (a bug
+// glyph drawn in the app's simple line style, Anipull teal —
+// NOT the screenshot's amber). Both present: New
+// first and expanded, Fixes collapsed. Only one present: just
+// that section, expanded. Both empty: no changelog card at all.
 // 1.9-dev5.2, sheet: the sheet MUST open fully extended —
 // ModalBottomSheet's default skipPartiallyExpanded = false
 // opens it at the ~50% partially-expanded anchor, which is
@@ -82,6 +117,88 @@ private enum class UpdatePhase { Idle, Downloading, Installing }
 private fun fmtMB(bytes: Long): String =
     if (bytes < 0) "?" else String.format("%.1f MB", bytes / 1024.0 / 1024.0)
 
+// 1.9-dev5.5: small bug glyph, drawn in code — there is no bug
+// vector in res/drawable, and the section icons must stay
+// inside this file's push set. Stroke-drawn beetle: oval body,
+// centre split, three legs per side, two antennae.
+@Composable
+private fun BugIcon(tint: Color, modifier: Modifier = Modifier) {
+    Canvas(modifier = modifier) {
+        val w = size.width
+        val h = size.height
+        val stroke = Stroke(width = w * 0.09f, cap = StrokeCap.Round)
+        // Body: oval, head at the top.
+        drawOval(tint, topLeft = Offset(w * 0.28f, h * 0.22f), size = androidx.compose.ui.geometry.Size(w * 0.44f, h * 0.68f), style = stroke)
+        // Centre split down the body.
+        drawLine(tint, Offset(w * 0.5f, h * 0.24f), Offset(w * 0.5f, h * 0.88f), strokeWidth = w * 0.07f, cap = StrokeCap.Round)
+        // Legs, three per side.
+        listOf(0.34f, 0.52f, 0.70f).forEach { y ->
+            drawLine(tint, Offset(w * 0.30f, h * y), Offset(w * 0.04f, h * (y - 0.10f)), strokeWidth = w * 0.08f, cap = StrokeCap.Round)
+            drawLine(tint, Offset(w * 0.70f, h * y), Offset(w * 0.96f, h * (y - 0.10f)), strokeWidth = w * 0.08f, cap = StrokeCap.Round)
+        }
+        // Antennae.
+        drawLine(tint, Offset(w * 0.42f, h * 0.24f), Offset(w * 0.32f, h * 0.06f), strokeWidth = w * 0.08f, cap = StrokeCap.Round)
+        drawLine(tint, Offset(w * 0.58f, h * 0.24f), Offset(w * 0.68f, h * 0.06f), strokeWidth = w * 0.08f, cap = StrokeCap.Round)
+    }
+}
+
+// 1.9-dev5.5: one collapsible changelog section — icon in a
+// tinted square, title, count badge, chevron; items as bullet
+// rows, only when expanded. Header is a real button for
+// accessibility (role + expand/collapse label).
+@Composable
+private fun ChangelogSection(
+    title: String,
+    count: Int,
+    accent: Color,
+    icon: @Composable () -> Unit,
+    items: List<String>,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    Column {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+                .clip(RoundedCornerShape(10.dp))
+                .clickable(
+                    role = Role.Button,
+                    onClickLabel = if (expanded) "Collapse $title" else "Expand $title",
+                    onClick = onToggle,
+                )
+                .padding(vertical = 6.dp),
+        ) {
+            Box(
+                modifier = Modifier.size(32.dp).clip(RoundedCornerShape(10.dp))
+                    .background(accent.copy(alpha = 0.15f)),
+                contentAlignment = Alignment.Center,
+            ) { icon() }
+            Spacer(Modifier.width(10.dp))
+            Text(title, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
+            Spacer(Modifier.width(8.dp))
+            Box(
+                modifier = Modifier.clip(RoundedCornerShape(999.dp))
+                    .background(accent.copy(alpha = 0.15f)).padding(horizontal = 8.dp, vertical = 2.dp),
+            ) {
+                Text(count.toString(), color = accent, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+            Spacer(Modifier.weight(1f))
+            Text(
+                if (expanded) "⌄" else "›",
+                color = Muted, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+            )
+        }
+        if (expanded) {
+            Column(
+                modifier = Modifier.padding(start = 42.dp, top = 2.dp, bottom = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                items.forEach { Text("•  $it", color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp) }
+            }
+        }
+    }
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Unit, onDismiss: () -> Unit) {
@@ -90,6 +207,16 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
     var phase by remember { mutableStateOf(UpdatePhase.Idle) }
     var downloaded by remember { mutableStateOf(0L) }
     var total by remember { mutableStateOf(-1L) }
+    // 1.9-dev5.5: true once the first onProgress callback fires
+    // — i.e. the first 64KB chunk arrived. Until then the
+    // progress card shows "Connecting…" instead of 0%.
+    var downloadStarted by remember { mutableStateOf(false) }
+    // 1.9-dev5.5: changelog expansion. Both lists present: New
+    // expanded, Fixes collapsed. Only one present: that one
+    // expanded. (The sections themselves are only rendered when
+    // their list is non-empty; both empty renders no card.)
+    var newExpanded by remember { mutableStateOf(info.features.isNotEmpty()) }
+    var fixesExpanded by remember { mutableStateOf(info.features.isEmpty() && info.fixes.isNotEmpty()) }
     var errorMsg by remember { mutableStateOf<String?>(null) }
     // 1.9-dev5.2: the sheet opens fully extended (see header
     // comment) — the default partially-expanded state cut the
@@ -203,8 +330,9 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
         errorMsg = null
         downloaded = 0L
         total = -1L
+        downloadStarted = false
         scope.launch {
-            val file = downloadUpdate(context, info) { d, t -> downloaded = d; total = t }
+            val file = downloadUpdate(context, info) { d, t -> downloaded = d; total = t; downloadStarted = true }
             if (file == null) {
                 phase = UpdatePhase.Idle
                 errorMsg = "Download failed — check your connection and try again."
@@ -272,24 +400,46 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
                 }
             }
             Spacer(Modifier.height(14.dp))
-            // What's New card — scrollable INSIDE the sheet while
-            // header and buttons stay pinned.
-            Box(
-                modifier = Modifier.weight(1f, fill = false).fillMaxWidth()
-                    .clip(RoundedCornerShape(16.dp)).background(Bg).padding(14.dp),
-            ) {
-                Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (info.features.isNotEmpty()) {
-                        Text("What's new", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        info.features.forEach { Text("•  $it", color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp) }
-                    }
-                    if (info.fixes.isNotEmpty()) {
-                        if (info.features.isNotEmpty()) Spacer(Modifier.height(8.dp))
-                        Text("Bug fixes", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-                        info.fixes.forEach { Text("•  $it", color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp) }
-                    }
-                    if (info.features.isEmpty() && info.fixes.isEmpty()) {
-                        Text("See the changelog on GitHub for what's in this build.", color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp)
+            // 1.9-dev5.5: changelog as two collapsible sections
+            // (New features / Bug Fixes), scrollable INSIDE the
+            // sheet while header and buttons stay pinned. Only
+            // non-empty sections render; both empty = no card.
+            if (info.features.isNotEmpty() || info.fixes.isNotEmpty()) {
+                Box(
+                    modifier = Modifier.weight(1f, fill = false).fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp)).background(Bg).padding(14.dp),
+                ) {
+                    Column(modifier = Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        if (info.features.isNotEmpty()) {
+                            ChangelogSection(
+                                title = "New features",
+                                count = info.features.size,
+                                accent = Pink,
+                                icon = {
+                                    androidx.compose.foundation.Image(
+                                        painter = painterResource(R.drawable.ic_star),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp),
+                                        colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
+                                    )
+                                },
+                                items = info.features,
+                                expanded = newExpanded,
+                                onToggle = { newExpanded = !newExpanded },
+                            )
+                        }
+                        if (info.fixes.isNotEmpty()) {
+                            if (info.features.isNotEmpty()) Spacer(Modifier.height(8.dp))
+                            ChangelogSection(
+                                title = "Bug Fixes",
+                                count = info.fixes.size,
+                                accent = Teal,
+                                icon = { BugIcon(tint = Teal, modifier = Modifier.size(18.dp)) },
+                                items = info.fixes,
+                                expanded = fixesExpanded,
+                                onToggle = { fixesExpanded = !fixesExpanded },
+                            )
+                        }
                     }
                 }
             }
@@ -303,18 +453,32 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
                         .padding(14.dp),
                 ) {
                     val pct = if (total > 0) (downloaded * 100 / total).toInt() else 0
+                    // 1.9-dev5.5: while the connection + redirect
+                    // resolve, no byte has arrived yet — show
+                    // "Connecting…" instead of "Downloaded 0.0 MB
+                    // / ? — 0%". The Downloaded text only appears
+                    // once the first chunk lands (downloadStarted).
                     Text(
                         if (phase == UpdatePhase.Installing) "Installing... 100%"
+                        else if (!downloadStarted) "Connecting…"
                         else "Downloaded ${fmtMB(downloaded)} / ${fmtMB(total)} — $pct%",
                         color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                     )
                     Spacer(Modifier.height(10.dp))
-                    LinearProgressIndicator(
-                        progress = { if (phase == UpdatePhase.Installing) 1f else if (total > 0) downloaded.toFloat() / total else 0f },
-                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(999.dp)),
-                        color = Pink,
-                        trackColor = if (ThemeState.lightMode) Color.Black.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.12f),
-                    )
+                    if (phase == UpdatePhase.Downloading && !downloadStarted) {
+                        LinearProgressIndicator(
+                            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(999.dp)),
+                            color = Pink,
+                            trackColor = if (ThemeState.lightMode) Color.Black.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.12f),
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { if (phase == UpdatePhase.Installing) 1f else if (total > 0) downloaded.toFloat() / total else 0f },
+                            modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(999.dp)),
+                            color = Pink,
+                            trackColor = if (ThemeState.lightMode) Color.Black.copy(alpha = 0.08f) else Color.White.copy(alpha = 0.12f),
+                        )
+                    }
                 }
             }
             if (errorMsg != null) {
