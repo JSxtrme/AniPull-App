@@ -1,3 +1,8 @@
+## 1.9-dev5.8 (2026-11-06, versionCode 49) — Version bump only, to see the 5.7 redesigned card
+
+No code changes except the version strings. 5.7 redesigned the updater changelog card (count pills on the right, no arrows, both sections expanded by default, "Show all (N)" row past 5 entries), but that code lives in the updater of the version you are updating FROM — so it can only be seen by updating FROM 5.7 to a newer build. This build exists only to give 5.7 something to update to. JS test, on 5.7 via the updater: sheet offers 1.9-dev5.8, changelog shows "New features" and "Bug Fixes" BOTH expanded, each with its count pill on the right and NO arrows; tapping a header collapses/expands it; tap Download & Install -> card shows "Connecting…" until bytes arrive, then the Downloaded X/Y — N% progress; Android dialog -> reopen = 5.8, About shows 1.9-dev5.8.
+Signed stable key, in-place over 5.7.
+
 ## 1.9-dev5.7 (2026-11-06, versionCode 48) — Changelog card redesign (confirmed in chat first)
 
 JS tested 5.5 -> 5.6 and disliked the changelog card: "the update popup card ain't looking good, remove the arrows and add the number of changes like this image" (ReVanced screenshot). He also asked that the redesign be shown to him in chat first and confirmed there instead of guessed again — an HTML preview of the card was shown and he CONFIRMED it with two changes: (1) no sub-heading/explainer text in the app (the preview's "Tap a section header..." line was preview-only; the app sheet never had it and still doesn't), (2) BOTH sections expanded by default — he takes back the earlier rule (New expanded, Bug Fixes collapsed).
