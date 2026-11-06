@@ -37,7 +37,15 @@ import java.security.MessageDigest
 // faked, and JS tests the real flow against the next published
 // build.
 
-const val UPDATE_JSON_URL = "https://anipull.vercel.app/updates.json"
+// 1.9-dev5.4: the version JSON moved from the website repo to
+// the app repo itself, so one push to dev/1.9 carries both the
+// code and the update entry — no second repo, no Vercel redeploy
+// wait. Primary source is the raw file on dev/1.9; the old Vercel
+// URL is kept ONLY as a fallback while 5.3-and-earlier builds
+// (which fetch Vercel only) are still in use. 5.4+ fetches raw
+// first and falls back to Vercel if raw fails or 404s.
+const val UPDATE_JSON_URL = "https://raw.githubusercontent.com/JSxtrme/AniPull-App/dev/1.9/updates.json"
+const val UPDATE_JSON_URL_LEGACY = "https://anipull.vercel.app/updates.json"
 
 data class UpdateInfo(
     val versionCode: Int,
@@ -79,44 +87,99 @@ fun setUpdateChannel(context: Context, channel: String) {
     context.getSharedPreferences("anipull_settings", Context.MODE_PRIVATE).edit().putString("update_channel", channel).apply()
 }
 
-suspend fun checkForUpdate(context: Context, channel: String = updateChannel(context)): UpdateCheckResult = withContext(Dispatchers.IO) {
-    try {
-        val conn = (URL(UPDATE_JSON_URL).openConnection() as HttpURLConnection).apply {
+/** Fetches the version JSON from one URL. Ok(text) on HTTP
+ *  200, NotFound on 404, ServerError on any other code,
+ *  NetworkError when the request itself fails. */
+private sealed interface FetchResult {
+    class Ok(val text: String) : FetchResult
+    object NotFound : FetchResult
+    class ServerError(val code: Int) : FetchResult
+    object NetworkError : FetchResult
+}
+
+private fun fetchUpdateJson(url: String): FetchResult {
+    var conn: HttpURLConnection? = null
+    return try {
+        conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8000
             readTimeout = 8000
             setRequestProperty("Accept", "application/json")
         }
-        val code = conn.responseCode
-        // 404 = the JSON isn't published yet (no update to offer).
-        // Any other non-200 is a server problem, not "up to date".
-        if (code == 404) return@withContext UpdateCheckResult.UpToDate
-        if (code != 200) return@withContext UpdateCheckResult.Failed("Server returned HTTP $code")
-        val text = conn.inputStream.bufferedReader().use { it.readText() }
-        conn.disconnect()
-        val root = JSONObject(text)
-        if (!root.has(channel)) return@withContext UpdateCheckResult.UpToDate
-        val obj = root.getJSONObject(channel)
-        val versionCode = obj.optInt("versionCode", 0)
-        if (versionCode <= 0 || versionCode <= installedVersionCode(context)) return@withContext UpdateCheckResult.UpToDate
-        val apkUrl = obj.optString("apkUrl", "")
-        if (apkUrl.isBlank()) return@withContext UpdateCheckResult.UpToDate
-        fun strList(key: String): List<String> {
-            val arr = obj.optJSONArray(key) ?: return emptyList()
-            return List(arr.length()) { arr.optString(it) }.filter { it.isNotBlank() }
+        when (val code = conn.responseCode) {
+            200 -> FetchResult.Ok(conn.inputStream.bufferedReader().use { it.readText() })
+            404 -> FetchResult.NotFound
+            else -> FetchResult.ServerError(code)
         }
-        var features = strList("features")
-        var fixes = strList("fixes")
-        if (features.isEmpty() && fixes.isEmpty()) features = strList("changelog")
-        UpdateCheckResult.Available(
-            UpdateInfo(
-                versionCode = versionCode,
-                versionName = obj.optString("versionName", ""),
-                apkUrl = apkUrl,
-                sha256 = obj.optString("sha256", null)?.takeIf { it.isNotBlank() },
-                features = features,
-                fixes = fixes,
-            )
+    } catch (_: UnknownHostException) {
+        FetchResult.NetworkError
+    } catch (_: IOException) {
+        FetchResult.NetworkError
+    } catch (_: Exception) {
+        FetchResult.ServerError(-1)
+    } finally {
+        conn?.disconnect()
+    }
+}
+
+/** Parses one fetched version JSON for the given channel. */
+private fun parseUpdateJson(text: String, channel: String, context: Context): UpdateCheckResult {
+    val root = JSONObject(text)
+    if (!root.has(channel)) return UpdateCheckResult.UpToDate
+    val obj = root.getJSONObject(channel)
+    val versionCode = obj.optInt("versionCode", 0)
+    if (versionCode <= 0 || versionCode <= installedVersionCode(context)) return UpdateCheckResult.UpToDate
+    val apkUrl = obj.optString("apkUrl", "")
+    if (apkUrl.isBlank()) return UpdateCheckResult.UpToDate
+    fun strList(key: String): List<String> {
+        val arr = obj.optJSONArray(key) ?: return emptyList()
+        return List(arr.length()) { arr.optString(it) }.filter { it.isNotBlank() }
+    }
+    var features = strList("features")
+    var fixes = strList("fixes")
+    if (features.isEmpty() && fixes.isEmpty()) features = strList("changelog")
+    return UpdateCheckResult.Available(
+        UpdateInfo(
+            versionCode = versionCode,
+            versionName = obj.optString("versionName", ""),
+            apkUrl = apkUrl,
+            sha256 = obj.optString("sha256", null)?.takeIf { it.isNotBlank() },
+            features = features,
+            fixes = fixes,
         )
+    )
+}
+
+suspend fun checkForUpdate(context: Context, channel: String = updateChannel(context)): UpdateCheckResult = withContext(Dispatchers.IO) {
+    try {
+        // 1.9-dev5.4: try the app-repo raw JSON first, fall back
+        // to the Vercel copy if raw fails or 404s. A 404 on BOTH
+        // means the JSON isn't published yet (no update to offer).
+        // Any other non-200 is a server problem, not "up to date".
+        when (val primary = fetchUpdateJson(UPDATE_JSON_URL)) {
+            is FetchResult.Ok -> return@withContext parseUpdateJson(primary.text, channel, context)
+            is FetchResult.ServerError -> {
+                when (val legacy = fetchUpdateJson(UPDATE_JSON_URL_LEGACY)) {
+                    is FetchResult.Ok -> return@withContext parseUpdateJson(legacy.text, channel, context)
+                    is FetchResult.NotFound -> return@withContext UpdateCheckResult.UpToDate
+                    is FetchResult.ServerError -> return@withContext UpdateCheckResult.Failed("Server returned HTTP ${primary.code}")
+                    is FetchResult.NetworkError -> return@withContext UpdateCheckResult.NoNetwork
+                }
+            }
+            is FetchResult.NotFound -> {
+                when (val legacy = fetchUpdateJson(UPDATE_JSON_URL_LEGACY)) {
+                    is FetchResult.Ok -> return@withContext parseUpdateJson(legacy.text, channel, context)
+                    is FetchResult.NotFound -> return@withContext UpdateCheckResult.UpToDate
+                    is FetchResult.ServerError -> return@withContext UpdateCheckResult.Failed("Server returned HTTP ${legacy.code}")
+                    is FetchResult.NetworkError -> return@withContext UpdateCheckResult.NoNetwork
+                }
+            }
+            is FetchResult.NetworkError -> {
+                when (val legacy = fetchUpdateJson(UPDATE_JSON_URL_LEGACY)) {
+                    is FetchResult.Ok -> return@withContext parseUpdateJson(legacy.text, channel, context)
+                    else -> return@withContext UpdateCheckResult.NoNetwork
+                }
+            }
+        }
     } catch (_: UnknownHostException) { UpdateCheckResult.NoNetwork }
     catch (_: IOException) { UpdateCheckResult.NoNetwork }
     catch (e: Exception) { UpdateCheckResult.Failed(e.message ?: "Check failed") }

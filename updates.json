@@ -1,0 +1,15 @@
+{
+  "dev": {
+    "versionCode": 45,
+    "versionName": "1.9-dev5.4",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/1.9-dev5.4/anipull-1.9-dev5.4.apk",
+    "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "features": [
+      "GitHub Actions automation — builds, prereleases and updates.json are automatic now",
+      "Updater fetches updates.json from the app repo itself, no Vercel copy needed"
+    ],
+    "fixes": [
+      "No more manual prerelease or updates.json push per build"
+    ]
+  }
+}

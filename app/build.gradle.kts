@@ -13,20 +13,26 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 44
-        versionName = "1.9-dev5.3"
+        versionCode = 45
+        versionName = "1.9-dev5.4"
     }
 
     // 1.9-dev4.8.8-stablekey: STABLE release key, Route A.
     // How the wiring works, in plain terms:
     // - The build needs 4 things to sign: keystore file, alias,
     //   keystore password, key password.
-    // - Those 4 things live ONLY in signing.properties, a small
-    //   text file in this app folder, on this VM only.
-    // - build.gradle.kts below does NOT contain any password.
-    //   It only says "if signing.properties exists, read it and
-    //   use it; if it doesn't exist, fall back to the debug key
-    //   so a fresh checkout still builds for testing".
+    // - Locally those 4 things live ONLY in signing.properties,
+    //   a small text file in this app folder, on this VM only.
+    // - 1.9-dev5.4: GitHub Actions signs the same way, but from
+    //   environment variables instead (ANIPULL_KEYSTORE_FILE,
+    //   ANIPULL_KEY_ALIAS, ANIPULL_STORE_PASSWORD,
+    //   ANIPULL_KEY_PASSWORD), fed from encrypted repo secrets.
+    //   Env vars win when ALL four are set; otherwise the local
+    //   signing.properties path below is used as before.
+    // - build.gradle.kts below does NOT contain any password and
+    //   never logs one. It only says "if a signing source exists,
+    //   read it and use it; if none exists, fall back to the
+    //   debug key so a fresh checkout still builds for testing".
     // - Pushes to GitHub use an explicit file list (push-files
     //   --paths-file), and signing.properties + release.keystore
     //   are NEVER on that list, so they can never leak into the
@@ -37,14 +43,20 @@ android {
     if (signingPropsFile.exists()) {
         signingPropsFile.inputStream().use { signingProps.load(it) }
     }
-    val hasStableKey = signingProps.containsKey("storePassword")
+    val envStoreFile = System.getenv("ANIPULL_KEYSTORE_FILE")
+    val envStorePassword = System.getenv("ANIPULL_STORE_PASSWORD")
+    val envKeyAlias = System.getenv("ANIPULL_KEY_ALIAS")
+    val envKeyPassword = System.getenv("ANIPULL_KEY_PASSWORD")
+    val hasEnvKey = !envStoreFile.isNullOrBlank() && !envStorePassword.isNullOrBlank() &&
+        !envKeyAlias.isNullOrBlank() && !envKeyPassword.isNullOrBlank()
+    val hasStableKey = hasEnvKey || signingProps.containsKey("storePassword")
     if (hasStableKey) {
         signingConfigs {
             create("release") {
-                storeFile = file(signingProps.getProperty("storeFile"))
-                storePassword = signingProps.getProperty("storePassword")
-                keyAlias = signingProps.getProperty("keyAlias")
-                keyPassword = signingProps.getProperty("keyPassword")
+                storeFile = if (hasEnvKey) file(envStoreFile) else file(signingProps.getProperty("storeFile"))
+                storePassword = if (hasEnvKey) envStorePassword else signingProps.getProperty("storePassword")
+                keyAlias = if (hasEnvKey) envKeyAlias else signingProps.getProperty("keyAlias")
+                keyPassword = if (hasEnvKey) envKeyPassword else signingProps.getProperty("keyPassword")
             }
         }
     }
