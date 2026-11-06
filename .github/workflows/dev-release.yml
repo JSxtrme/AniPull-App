@@ -41,6 +41,9 @@ jobs:
       # ubuntu runner already has an Android SDK preinstalled, so
       # use it directly and install only the packages this project
       # needs (platform 37, build-tools 37.0.0, platform-tools).
+      # NOTE: the platform package name MUST include the minor
+      # version ".0" — "platforms;android-37" does not exist and
+      # sdkmanager reports "Failed to find package".
       - name: Set up Android SDK
         run: |
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
@@ -48,7 +51,7 @@ jobs:
           echo "/usr/local/lib/android/sdk/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
           echo "/usr/local/lib/android/sdk/platform-tools" >> "$GITHUB_PATH"
           yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses
-          /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-37" "build-tools;37.0.0"
+          /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager "platform-tools" "platforms;android-37.0" "build-tools;37.0.0"
 
       - name: Read version from build.gradle.kts
         id: version
