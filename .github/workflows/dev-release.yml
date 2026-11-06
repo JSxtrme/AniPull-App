@@ -91,13 +91,18 @@ jobs:
           TAG="${{ steps.version.outputs.version_name }}"
           # Idempotent: a re-run deletes a same-tag prerelease first
           # instead of creating a duplicate.
+          # gh's "file#name" syntax only sets a label, it does NOT rename
+          # the asset — the release asset stayed app-release.apk while
+          # updates.json pointed at anipull-$TAG.apk (404). Copy to the
+          # wanted filename first, then upload that file plainly.
+          cp "$APK" "anipull-$TAG.apk"
           gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
           gh release create "$TAG" \
             --prerelease \
             --target dev/1.9 \
             --title "$TAG" \
             --notes "1.9-$TAG — dev test build, built and published automatically by GitHub Actions. Signed with the stable release key; updates in place over the previous dev build." \
-            "$APK#anipull-$TAG.apk"
+            "anipull-$TAG.apk"
 
       - name: Update updates.json and push it back
         env:
