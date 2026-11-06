@@ -1,14 +1,12 @@
 {
   "dev": {
-    "versionCode": 47,
-    "versionName": "1.9-dev5.6",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/1.9-dev5.6/anipull-1.9-dev5.6.apk",
-    "sha256": "ec9d398da68d2ec72c61ce8b802411e8db35a4246be08a177b11ca8040ab0729",
+    "versionCode": 48,
+    "versionName": "1.9-dev5.7",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/1.9-dev5.7/anipull-1.9-dev5.7.apk",
+    "sha256": "c3b51b753a6468278e63cd70b914ed3fce7b51b5b23edbc9b06672380a82c6db",
     "features": [
-      "Version bump only \u2014 test build to exercise the 5.5 updater"
+      "Update changelog card redesigned \u2014 count pills, no arrows, both sections expanded"
     ],
-    "fixes": [
-      "No code changes in this build"
-    ]
+    "fixes": []
   }
 }
