@@ -109,20 +109,24 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python3 - << 'PY'
-          import json
+          import json, os
+          # Changelog text comes from release-notes.json at the repo
+          # root ({"features": [...], "fixes": [...]}), edited with
+          # each dev build. Hardcoding it here meant every build
+          # shipped the same stale 5.4 text — the 5.5 sheet would
+          # have shown Actions copy instead of its real changes.
+          notes = {"features": [], "fixes": []}
+          if os.path.exists("release-notes.json"):
+              with open("release-notes.json") as f:
+                  notes = json.load(f)
           data = {
               "dev": {
                   "versionCode": int("${{ steps.version.outputs.version_code }}"),
                   "versionName": "${{ steps.version.outputs.version_name }}",
                   "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/${{ steps.version.outputs.version_name }}/anipull-${{ steps.version.outputs.version_name }}.apk",
                   "sha256": "${{ env.SHA256 }}",
-                  "features": [
-                      "GitHub Actions automation — builds, prereleases and updates.json are automatic now",
-                      "Updater fetches updates.json from the app repo itself, no Vercel copy needed",
-                  ],
-                  "fixes": [
-                      "No more manual prerelease or updates.json push per build",
-                  ],
+                  "features": notes.get("features", []),
+                  "fixes": notes.get("fixes", []),
               }
           }
           with open("updates.json", "w") as f:
