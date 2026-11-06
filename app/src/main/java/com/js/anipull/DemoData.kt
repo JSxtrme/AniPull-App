@@ -46,10 +46,3 @@ fun episodesFor(title: DemoTitle, season: Int): List<Int> {
     return (1..title.episodes).toList()
 }
 
-fun watchOrderFor(title: DemoTitle): List<String>? = when {
-    title.title.startsWith("Frieren") ->
-        listOf("Season 1", "Season 2")
-    title.title == "Attack on Titan" ->
-        listOf("Attack on Titan (watch-order guide in the web demo)")
-    else -> null
-}

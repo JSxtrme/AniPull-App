@@ -39,7 +39,6 @@ data class ApiTitle(
     val genres: String?,
     val status: String?,
     val episodes: Int?,
-    val seasons: List<String> = emptyList(),
 )
 
 data class HomeSection(val name: String, val titles: List<ApiTitle>)
@@ -84,13 +83,6 @@ private fun cleanSectionName(raw: String): String =
     raw.replace("\n", " ").replace("\\s+".toRegex(), " ").trim()
 
 private fun postToApi(obj: JSONObject): ApiTitle {
-    val seasons = mutableListOf<String>()
-    val arr = obj.optJSONArray("seasons")
-    if (arr != null) {
-        for (i in 0 until arr.length()) {
-            arr.optJSONObject(i)?.optString("title")?.takeIf { it.isNotBlank() }?.let { seasons += it }
-        }
-    }
     return ApiTitle(
         id = obj.optLong("id", 0),
         title = obj.optString("title", "").ifBlank { "Untitled" },
@@ -102,7 +94,6 @@ private fun postToApi(obj: JSONObject): ApiTitle {
         genres = obj.optString("genres").takeIf { it.isNotBlank() },
         status = obj.optString("status").takeIf { it.isNotBlank() },
         episodes = null,
-        seasons = seasons,
     )
 }
 
@@ -142,12 +133,8 @@ private fun ApiTitle.toJson(): JSONObject = JSONObject().apply {
     put("score", score ?: JSONObject.NULL); put("overview", overview ?: JSONObject.NULL)
     put("genres", genres ?: JSONObject.NULL); put("status", status ?: JSONObject.NULL)
     put("episodes", episodes ?: JSONObject.NULL)
-    put("seasons", JSONArray(seasons))
 }
 private fun JSONObject.toApiTitle(): ApiTitle {
-    val seasons = mutableListOf<String>()
-    val arr = optJSONArray("seasons")
-    if (arr != null) for (i in 0 until arr.length()) arr.optString(i)?.let { seasons += it }
     return ApiTitle(
         id = optLong("id", 0), title = optString("title", ""),
         poster = optString("poster").takeIf { it.isNotBlank() },
@@ -158,7 +145,6 @@ private fun JSONObject.toApiTitle(): ApiTitle {
         genres = optString("genres").takeIf { it.isNotBlank() },
         status = optString("status").takeIf { it.isNotBlank() },
         episodes = if (isNull("episodes")) null else optInt("episodes"),
-        seasons = seasons,
     )
 }
 fun saveHomeCache(context: Context, data: HomeData) {

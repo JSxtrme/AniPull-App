@@ -1,3 +1,15 @@
+## 2.0-dev1.2 (2026-11-07, versionCode 53) — watch order removed, duplicate-key crash fixed
+
+JS's phone test of dev1.1 found two problems in the watch-order section, and both trace to the same root cause: AniLab has no seasons/relations data, so the row was guessed — hardcoded Frieren/AoT fallback lists plus AniLab search on generic strings like "Season 1", which returns wrong titles (it showed "K: Return of Kings" on every anime). JS's call: if the correct watch order can't be pulled from anywhere, don't show anything there. So the section is removed entirely — no placeholder, no "coming soon", the detail page flows as if it was never there. AniList relations would be a real source, but AniList integration was never approved, so nothing new was added. The same guessed labels also caused the crash: the row keyed Lazy items by season label, and a title with two "Side Story" entries crashed Compose with a duplicate-key IllegalArgumentException (title-specific — only titles whose list has duplicate labels crashed). The section and its keys are gone, and every other Lazy list in the app was audited for the same bug class (see fixes). R8 + shrinkResources stay on; no engine or clearance changes.
+
+### New features (0)
+
+### Bug Fixes (3)
+
+- Watch-order section removed from the detail page — it showed wrong data (AniLab has no seasons/relations data, so it guessed from hardcoded lists and generic searches), so it is gone entirely instead of showing fake titles
+- Crash fixed — opening a detail whose watch-order list had two entries with the same label (e.g. "Side Story" twice) crashed with a duplicate Lazy key; the section and its label-based keys are removed
+- Lazy list key audit — every other LazyColumn/LazyRow items() call now keys on a unique id (title id, job id, or map key); no other label-based duplicate-key risk found
+
 ## 2.0-dev1.1 (2026-11-07, versionCode 52) — watch order, like the catalogs
 
 JS's clarification: the watch-order row should be exactly like the home catalog rows — a horizontal scrollable row that depicts the watch order (5 seasons → S1 in slot 1, S2 in slot 2, and so on). Dev1.0 shipped it with a snap fling and non-tappable cards by mistake; this build fixes both. The row now free-scrolls with the catalogs' default fling (no snap), and each card is a real catalog card (PosterCard): tap opens that title's detail through the same openTitle path with a "watchorder-<id>" shared-element slot, so the poster flight and back behaviour match the catalog rows; download button and hold popup work too. Ordering is strict list order end to end — title.seasons comes from the AniLab JSON array in index order (no sort anywhere), the Frieren/AoT fallbacks are literal ordered lists, and LazyRow renders them as-is. R8 + shrinkResources stay on; no engine or clearance changes.
