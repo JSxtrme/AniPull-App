@@ -1,0 +1,8 @@
+{
+  "features": [
+    "Update changelog now has New features and Bug Fixes dropdowns"
+  ],
+  "fixes": [
+    "Updater no longer sits at 0% while the download starts — it shows “Connecting…” until the first bytes arrive"
+  ]
+}
