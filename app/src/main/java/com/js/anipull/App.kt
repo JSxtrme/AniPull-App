@@ -42,7 +42,6 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
-import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.ui.unit.toSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -2660,6 +2659,8 @@ fun AnipullAppInner() {
                             onPull = { sheetFor = it },
                             isSaved = savedTitles.any { it.id == targetScreen.id },
                             onSaveToggle = { toggleSave(targetScreen) },
+                            onOpenTitle = { t, slot -> openTitle(t, slot) },
+                            onCardLongPress = { onCardLongPress(it) },
                         )
                     }
                 }
@@ -3727,8 +3728,15 @@ private fun EpisodeList(
     }
 }
 
+// 2.0-dev1.1: watch-order cards are catalog cards now — the
+// same PosterCard, the same tap path (openTitle with a
+// "watchorder-<id>" slot, so the shared-element flight and the
+// back behaviour match the catalog rows exactly), the same
+// download button and hold popup. A card only becomes a PosterCard
+// once its title resolves; before that it is the old placeholder
+// (skeleton while loading, title-only if nothing was found).
 @Composable
-private fun WatchOrderCard(entry: String) {
+private fun WatchOrderCard(entry: String, onOpen: (ApiTitle, String) -> Unit, onDownloadClick: ((ApiTitle) -> Unit)? = null, onCardLongPress: (ApiTitle) -> Unit = {}) {
     var resolved by remember(entry) { mutableStateOf<ApiTitle?>(null) }
     var attempted by remember(entry) { mutableStateOf(false) }
     LaunchedEffect(entry) {
@@ -3736,27 +3744,36 @@ private fun WatchOrderCard(entry: String) {
         resolved = results.firstOrNull { it.poster != null } ?: results.firstOrNull()
         attempted = true
     }
-    Column(modifier = Modifier.width(104.dp)) {
-        Box(
-            modifier = Modifier.size(width = 104.dp, height = 156.dp).clip(RoundedCornerShape(12.dp)).background(Card),
-            contentAlignment = Alignment.Center,
-        ) {
-            val poster = resolved?.poster
-            if (poster != null) {
-                PosterImage(poster, Modifier.fillMaxSize(), with(LocalDensity.current) { 104.dp.toPx().toInt() })
-            } else if (attempted) {
-                // No poster found: title-only card, never a fake image.
-                Text(entry, color = Muted, fontSize = 12.sp, textAlign = TextAlign.Center, maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(8.dp))
+    val title = resolved
+    if (title != null) {
+        PosterCard(
+            title,
+            onClick = { onOpen(title, "watchorder-${title.id}") },
+            onDownloadClick = onDownloadClick,
+            cardWidth = 104.dp,
+            slot = "watchorder-${title.id}",
+            onLongClick = { onCardLongPress(title) },
+        )
+    } else {
+        Column(modifier = Modifier.width(104.dp)) {
+            Box(
+                modifier = Modifier.size(width = 104.dp, height = 156.dp).clip(RoundedCornerShape(12.dp)).background(Card),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (attempted) {
+                    // No poster found: title-only card, never a fake image.
+                    Text(entry, color = Muted, fontSize = 12.sp, textAlign = TextAlign.Center, maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(8.dp))
+                }
+                // While loading: bare Card skeleton box, nothing else.
             }
-            // While loading: bare Card skeleton box, nothing else.
+            Spacer(Modifier.height(8.dp))
+            Text(entry, color = TextMain, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }
-        Spacer(Modifier.height(8.dp))
-        Text(entry, color = TextMain, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
 }
 
 @Composable
-fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null, onPosterImageBounds: ((Rect) -> Unit)? = null) {
+fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null, onPosterImageBounds: ((Rect) -> Unit)? = null, onOpenTitle: (ApiTitle, String) -> Unit = { _, _ -> }, onCardLongPress: (ApiTitle) -> Unit = {}) {
     val context = LocalContext.current
     // 2.0-dev1.0: episode rows enqueue directly at the saved quality.
     val qualityPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
@@ -3791,7 +3808,6 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
         else if (title.title == "Attack on Titan" && title.episodes != null) listOf("Attack on Titan (watch-order guide in the web demo)")
         else title.seasons.takeIf { it.isNotEmpty() }
     val watchRowState = rememberLazyListState()
-    val watchFling = rememberSnapFlingBehavior(watchRowState)
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -3884,12 +3900,25 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
                 Spacer(Modifier.height(16.dp))
                 Text("Watch order", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
+                // 2.0-dev1.1: free scroll, exactly like the catalog
+                // rows — the snap fling from dev1.0 is gone.
                 LazyRow(
                     state = watchRowState,
-                    flingBehavior = watchFling,
                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
-                    items(watchOrder, key = { it }) { entry -> WatchOrderCard(entry) }
+                    // Rendered strictly in watch-order list order
+                    // (S1 first, S2 second, ...). No sort, no
+                    // shuffle: the list arrives in watch order from
+                    // title.seasons (AniLab JSON order) or the
+                    // ordered fallbacks, and LazyRow keeps it.
+                    items(watchOrder, key = { it }) { entry ->
+                        WatchOrderCard(
+                            entry,
+                            onOpen = onOpenTitle,
+                            onDownloadClick = { onPull(it) },
+                            onCardLongPress = onCardLongPress,
+                        )
+                    }
                 }
                 Spacer(Modifier.height(24.dp))
             }

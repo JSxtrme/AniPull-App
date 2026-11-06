@@ -1,3 +1,17 @@
+## 2.0-dev1.1 (2026-11-07, versionCode 52) — watch order, like the catalogs
+
+JS's clarification: the watch-order row should be exactly like the home catalog rows — a horizontal scrollable row that depicts the watch order (5 seasons → S1 in slot 1, S2 in slot 2, and so on). Dev1.0 shipped it with a snap fling and non-tappable cards by mistake; this build fixes both. The row now free-scrolls with the catalogs' default fling (no snap), and each card is a real catalog card (PosterCard): tap opens that title's detail through the same openTitle path with a "watchorder-<id>" shared-element slot, so the poster flight and back behaviour match the catalog rows; download button and hold popup work too. Ordering is strict list order end to end — title.seasons comes from the AniLab JSON array in index order (no sort anywhere), the Frieren/AoT fallbacks are literal ordered lists, and LazyRow renders them as-is. R8 + shrinkResources stay on; no engine or clearance changes.
+
+### New features (2)
+
+- Watch-order cards are tappable — tapping a card opens that title's detail page with the same shared-element poster flight as the catalog cards
+- Watch-order cards are catalog cards now — rating pill, 1080p pill, download button and hold popup, just like the home rows
+
+### Bug Fixes (2)
+
+- Watch-order row no longer snaps on flick — it free-scrolls exactly like the catalog rows
+- Watch-order row renders strictly in watch order (S1 first, S2 second, and so on) — no re-ordering anywhere in the row
+
 ## 2.0-dev1.0 (2026-11-06, versionCode 51) — first 2.0 dev build
 
 Downloads land officially, in stages. This build is the engine + UI foundation: the Pahe episode source is built behind a clean seam (search / releases / play-page parse, Kwik JsPacker, pahe.win → Kwik → direct mp4, HLS fallback), but it takes an already-obtained clearance cookie as input and never solves a challenge itself — with no clearance available, the episode section shows an honest "source connection pending" state, never fake episodes. The HLS engine (pure Kotlin, AES-128, per-segment resume, MediaExtractor/MediaMuxer remux) and the download engine (queue, parallel episodes, true pause/resume, foreground service + notifications) are fully working and do not depend on clearance. Verified: HLS playlist parser + AES decrypt + JsPacker unpack checked 15/15 on the JVM against real playlists/fixtures; the full HLS download + remux loop is verified by code inspection only (the VM's Java network gate blocks a live end-to-end run) — JS's phone test is the runtime proof. Queued HLS jobs resolve their links at download start (m3u8 links expire in 3–5 min); a job that waits minutes will fail with "link expired — retry". R8 + shrinkResources stay on.
