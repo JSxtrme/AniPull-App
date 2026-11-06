@@ -1,14 +1,14 @@
 {
   "dev": {
-    "versionCode": 46,
-    "versionName": "1.9-dev5.5",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/1.9-dev5.5/anipull-1.9-dev5.5.apk",
-    "sha256": "57794d8527d00267803df64d1be7afc02b246bd4a29ede266d140280b597f359",
+    "versionCode": 47,
+    "versionName": "1.9-dev5.6",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/1.9-dev5.6/anipull-1.9-dev5.6.apk",
+    "sha256": "ec9d398da68d2ec72c61ce8b802411e8db35a4246be08a177b11ca8040ab0729",
     "features": [
-      "Update changelog now has New features and Bug Fixes dropdowns"
+      "Version bump only \u2014 test build to exercise the 5.5 updater"
     ],
     "fixes": [
-      "Updater no longer sits at 0% while the download starts \u2014 it shows \u201cConnecting\u2026\u201d until the first bytes arrive"
+      "No code changes in this build"
     ]
   }
 }
