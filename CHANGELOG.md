@@ -1,3 +1,27 @@
+## 2.0-dev1.0 (2026-11-06, versionCode 51) — first 2.0 dev build
+
+Downloads land officially, in stages. This build is the engine + UI foundation: the Pahe episode source is built behind a clean seam (search / releases / play-page parse, Kwik JsPacker, pahe.win → Kwik → direct mp4, HLS fallback), but it takes an already-obtained clearance cookie as input and never solves a challenge itself — with no clearance available, the episode section shows an honest "source connection pending" state, never fake episodes. The HLS engine (pure Kotlin, AES-128, per-segment resume, MediaExtractor/MediaMuxer remux) and the download engine (queue, parallel episodes, true pause/resume, foreground service + notifications) are fully working and do not depend on clearance. Verified: HLS playlist parser + AES decrypt + JsPacker unpack checked 15/15 on the JVM against real playlists/fixtures; the full HLS download + remux loop is verified by code inspection only (the VM's Java network gate blocks a live end-to-end run) — JS's phone test is the runtime proof. Queued HLS jobs resolve their links at download start (m3u8 links expire in 3–5 min); a job that waits minutes will fail with "link expired — retry". R8 + shrinkResources stay on.
+
+### New features (9)
+
+- Episode list in detail pages — episodes now load from a real episode source (AnimePahe parsing built in); while the source connection is still pending the section says so honestly instead of showing fake rows
+- Watch order is now a horizontal poster line — swipe through the series in order; short orders just fit, with no scroll hint
+- Downloads tab is real — active downloads with progress, MB/s, Pause and Cancel; completed downloads with file size, Open and Delete
+- Library Downloaded section is real — completed downloads grouped by title with episode counts and a Download more action
+- Download sheet wired — quality chips 360/480/720/1080, Sub/Dub toggle, per-episode download and Download All, with real progress once started
+- HLS download engine, pure Kotlin — AES-128 segment decrypt, parallel segment downloads, per-segment resume (a retry only fetches missing segments), and a real MediaExtractor/MediaMuxer remux to .mp4 — no ffmpeg, no raw TS concat
+- Download engine — queue with parallel episodes from your Downloads setting, true pause/resume (HTTP Range for direct MP4s), foreground service with per-episode progress notifications + MB/s + Pause/Cancel and a grouped summary
+- Direct MP4 downloads — Referer header and Range resume from the resolved link
+- Manual 'Check for updates' now shows a centered success popup with an animated checkmark when you're on the latest version
+
+### Bug Fixes (5)
+
+- Detail pages no longer show invented episode rows or the Frieren demo episode counts
+- Watch order is no longer a numbered text list
+- Downloads tab no longer shows an empty-state placeholder when downloads exist
+- The download sheet no longer shows 'Copy-all-links' or 'Not wired yet' — episode downloads enqueue for real
+- Download buttons on cards, rows and the carousel now open the download sheet instead of toasting 'Not wired yet'
+
 ## 1.9 (2026-11-06, versionCode 50) — Stable
 
 The 1.9 dev line, cleaned up and shipped: every dev build from dev2 through dev5.8, deduplicated, audited against the full changelog (10 missing items restored, 5 half-covered lines completed — see STABLE-1.9-CHANGELOG-DRAFT.md v2). Optimised for stable: R8 enabled (minify + shrinkResources, conservative proguard-rules.pro keeping only the manifest-reached entry points), APK 10,181,235 bytes (dev5.8, no R8) -> 3,698,868 bytes (1.9 stable, R8) — 6,482,367 bytes saved (63.7%). Dex 21.65 MB raw / 7.42 MB compressed -> 2.56 MB raw / 1.27 MB compressed (single dex now, was two); resources.arsc 430,116 -> 125,608 bytes (shrinkResources); SF Pro font (2.33 MB) and both onboarding wallpapers unchanged — the font is now the largest entry at 43% of the APK. Signed with the stable release key, updates in place over 1.8 and over every 1.9 dev build (versionCode 50 > 49). Default update channel is now Stable for fresh installs (clean versionName, no -dev suffix); dev users on 5.8 update to this the same way.

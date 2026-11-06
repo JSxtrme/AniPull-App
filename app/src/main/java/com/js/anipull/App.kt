@@ -33,6 +33,8 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -40,6 +42,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.snapping.rememberSnapFlingBehavior
 import androidx.compose.ui.unit.toSize
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -105,6 +108,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -551,7 +555,7 @@ fun boundsTransformFor(durationMs: Int): BoundsTransform = BoundsTransform { ini
 
 @Composable
 @OptIn(ExperimentalSharedTransitionApi::class)
-fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseHiddenId: Long? = null, reverseFade: Float = 1f, slot: String? = null, onLongClick: (() -> Unit)? = null) {
+fun PosterCard(title: ApiTitle, onClick: () -> Unit, onDownloadClick: ((ApiTitle) -> Unit)? = null, cardWidth: Dp = 118.dp, onBounds: ((Rect) -> Unit)? = null, onPosterBounds: ((Rect) -> Unit)? = null, reportBoundsOnPlace: Boolean = false, reverseHiddenId: Long? = null, reverseFade: Float = 1f, slot: String? = null, onLongClick: (() -> Unit)? = null) {
     val cardHeight = cardWidth * 3 / 2
     // 1.9-dev4.8.2 scroll optimisation + full-card hero: bounds are
     // NO LONGER reported by onGloballyPositioned, which fires on
@@ -757,7 +761,7 @@ fun PosterCard(title: ApiTitle, onClick: () -> Unit, notWired: (() -> Unit)? = n
                     .size(36.dp)
                     .clip(RoundedCornerShape(11.dp))
                     .background(Color.Black.copy(alpha = 0.55f))
-                    .clickable { notWired?.invoke() },
+                    .clickable { onDownloadClick?.invoke(title) },
                 contentAlignment = Alignment.Center,
             ) {
                 androidx.compose.foundation.Image(
@@ -884,7 +888,7 @@ fun SearchSkeletonGrid() {
 }
 
 @Composable
-fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: (() -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, scrollStore: MutableMap<String, Pair<Int, Int>>? = null, onLongPress: ((ApiTitle) -> Unit)? = null) {
+fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, onDownloadClick: ((ApiTitle) -> Unit)? = null, iconRes: Int? = null, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, scrollStore: MutableMap<String, Pair<Int, Int>>? = null, onLongPress: ((ApiTitle) -> Unit)? = null) {
     // 4.9 fix 2: LazyRow state lived inside PosterRow, so when home
     // was disposed during a detail (AnimatedContent replaces home
     // with detail), the row state died with it and on back the row
@@ -927,7 +931,7 @@ fun PosterRow(heading: String, tags: List<RowTag>, titles: List<ApiTitle>, onOpe
         }
         Spacer(Modifier.height(12.dp))
         LazyRow(state = rowState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it, "${heading}-${it.id}") }, notWired, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade, slot = "${heading}-${it.id}", onLongClick = { onLongPress?.invoke(it) }) }
+            items(titles, key = { it.id }) { PosterCard(it, { onOpen(it, "${heading}-${it.id}") }, onDownloadClick, onBounds = { rect -> onBounds?.invoke(it, rect) }, reverseHiddenId = reverseHiddenId, reverseFade = reverseFade, slot = "${heading}-${it.id}", onLongClick = { onLongPress?.invoke(it) }) }
         }
     }
 }
@@ -952,7 +956,7 @@ fun CarouselDot(selected: Boolean, onClick: () -> Unit) {
 
 @Composable
 @OptIn(ExperimentalSharedTransitionApi::class)
-fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, notWired: () -> Unit, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, initialPage: Int = -1, onPageChange: ((Int) -> Unit)? = null, onLongPress: ((ApiTitle) -> Unit)? = null) {
+fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Unit, onDownloadClick: ((ApiTitle) -> Unit)? = null, autoScroll: Boolean = true, onBounds: ((ApiTitle, Rect) -> Unit)? = null, reverseHiddenId: Long? = null, reverseFade: Float = 1f, initialPage: Int = -1, onPageChange: ((Int) -> Unit)? = null, onLongPress: ((ApiTitle) -> Unit)? = null) {
     // 1.9-dev4.8: Editor's pick is now Editor's PICKS, a 5-item
     // carousel, and the description lines are GONE altogether (JS's
     // call) — title + type pill + buttons only, over the poster.
@@ -1175,7 +1179,7 @@ fun EditorsPickCarousel(picks: List<ApiTitle>, onOpen: (ApiTitle, String) -> Uni
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
                         Button(
-                            onClick = notWired,
+                            onClick = { onDownloadClick?.invoke(pick) },
                             colors = ButtonDefaults.buttonColors(containerColor = Color.White),
                             contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 20.dp, vertical = 11.dp),
                         ) {
@@ -1937,9 +1941,6 @@ fun AnipullAppInner() {
     // instead of closing search. Back still works in two steps
     // exactly as before: the IME eats the first back (keyboard
     // closes), the second back runs closeSearch() to Home.
-    val notWired: () -> Unit = {
-        Toast.makeText(context, "Not wired yet — downloads come after the AniLab stage", Toast.LENGTH_SHORT).show()
-    }
 
     // System back: sheet first, then settings/downloads/library,
     // then DETAIL -> home, then SEARCH -> home (1.9-dev4.7: search
@@ -2376,7 +2377,7 @@ fun AnipullAppInner() {
                                 results.chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t, "search-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "search-${t.id}", onLongClick = { onCardLongPress(t) })
+                                            PosterCard(t, onClick = { openTitle(t, "search-${t.id}") }, onDownloadClick = { sheetFor = it }, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "search-${t.id}", onLongClick = { onCardLongPress(t) })
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -2406,7 +2407,7 @@ fun AnipullAppInner() {
                                 cachedTitles.take(12).chunked(2).forEach { pair ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         pair.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t, "cached-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "cached-${t.id}", onLongClick = { onCardLongPress(t) })
+                                            PosterCard(t, onClick = { openTitle(t, "cached-${t.id}") }, onDownloadClick = { sheetFor = it }, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "cached-${t.id}", onLongClick = { onCardLongPress(t) })
                                         }
                                         if (pair.size == 1) Spacer(Modifier.width(cardW))
                                     }
@@ -2418,7 +2419,7 @@ fun AnipullAppInner() {
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
-                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { t, slot -> openTitle(t, slot) }, notWired, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
+                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { t, slot -> openTitle(t, slot) }, { sheetFor = it }, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
                 }
                 // 1.9-dev5.0 QOL 3: Show Editor's Picks toggle — off
                 // hides the whole carousel item, not just its motion.
@@ -2437,7 +2438,7 @@ fun AnipullAppInner() {
                         Spacer(Modifier.height(12.dp))
                         val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
                             .distinctBy { it.id }.take(5)
-                        EditorsPickCarousel(picks, { t, slot -> openTitle(t, slot, isCarousel = true) }, notWired, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null && !pageTransitioning, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, initialPage = carouselPage, onPageChange = { carouselPage = it }, onLongPress = { onCardLongPress(it) })
+                        EditorsPickCarousel(picks, { t, slot -> openTitle(t, slot, isCarousel = true) }, { sheetFor = it }, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null && !pageTransitioning, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, initialPage = carouselPage, onPageChange = { carouselPage = it }, onLongPress = { onCardLongPress(it) })
                     }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
@@ -2453,7 +2454,7 @@ fun AnipullAppInner() {
                         "Top 10 Month" -> R.drawable.ic_trophy
                         else -> null
                     }
-                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
+                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, { sheetFor = it }, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
                 }
             } else if (homeFailed) {
                 // 1.9-dev2: failed load = skeletons + retry, never demo
@@ -2495,7 +2496,7 @@ fun AnipullAppInner() {
             // They load progressively in the background, like home rows.
             if (!searchMode && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
-                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, notWired, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
+                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, { sheetFor = it }, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
                 }
             }
             // 1.9-dev4.8: Explore — after all catalogs, a grid (not a
@@ -2560,7 +2561,7 @@ fun AnipullAppInner() {
                                 shownExplore.chunked(exploreCols).forEach { trio ->
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         trio.forEach { t ->
-                                            PosterCard(t, onClick = { openTitle(t, "explore-${t.id}") }, notWired = notWired, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "explore-${t.id}", onLongClick = { onCardLongPress(t) })
+                                            PosterCard(t, onClick = { openTitle(t, "explore-${t.id}") }, onDownloadClick = { sheetFor = it }, cardWidth = cardW, onBounds = { rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, slot = "explore-${t.id}", onLongClick = { onCardLongPress(t) })
                                         }
                                         repeat(exploreCols - trio.size) { Spacer(Modifier.width(cardW)) }
                                     }
@@ -2670,7 +2671,7 @@ fun AnipullAppInner() {
     // no pendingTitle — that whole mechanism was the snap source.
 
     sheetFor?.let { title ->
-        DownloadSheet(title = title, onDismiss = { sheetFor = null }, notWired = notWired)
+        DownloadSheet(title = title, onDismiss = { sheetFor = null })
     }
     // 1.9-dev5.0 QOL 1: hold popup. Exactly 3 actions, nothing else.
     holdFor?.let { title ->
@@ -2957,13 +2958,51 @@ fun LibraryScreen(
                 }
             }
         } else {
-            Text("Nothing downloaded yet.", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Text(
-                "Downloads land officially in 2.0. When they do, titles you pull will show up here with how many episodes are on your device — for example, “2 eps downloaded” — and a Download more action back to the detail page.",
-                color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp,
-            )
-            Spacer(Modifier.height(100.dp))
+            // 2.0-dev1.0: real completed jobs, grouped by title.
+            // libJobs is only read so this list refreshes live as
+            // jobs finish; the rows come from completedJobs().
+            val libCtx = LocalContext.current
+            val libJobs by DownloadEngine.jobs.collectAsState()
+            val downloaded = remember(libJobs) { DownloadEngine.completedJobs(libCtx) }
+            val grouped = downloaded.groupBy { it.animeTitle }
+            if (grouped.isEmpty()) {
+                Text("Nothing downloaded yet.", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Pull an episode from its detail page and it will show up here, grouped by title.",
+                    color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp,
+                )
+                Spacer(Modifier.height(100.dp))
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(grouped.entries.toList(), key = { it.key }) { (animeTitle, jobsForTitle) ->
+                        val first = jobsForTitle.first()
+                        // Prefer the real saved title (full metadata +
+                        // id) so Download more lands on the true
+                        // detail page; otherwise rebuild a minimal
+                        // title from the job, as demoToApi does.
+                        val target = saved.firstOrNull { it.title == animeTitle }
+                            ?: ApiTitle(id = -animeTitle.hashCode().toLong(), title = animeTitle, poster = first.poster, type = null, year = null, score = null, overview = null, genres = null, status = null, episodes = null)
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(16.dp)).padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Box(modifier = Modifier.size(width = 48.dp, height = 72.dp).clip(RoundedCornerShape(8.dp))) {
+                                PosterImage(first.poster, Modifier.fillMaxSize(), with(LocalDensity.current) { 48.dp.toPx().toInt() })
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(animeTitle, color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                                Spacer(Modifier.height(4.dp))
+                                Text("${jobsForTitle.size} eps downloaded", color = Muted, fontSize = 13.sp)
+                                Spacer(Modifier.height(8.dp))
+                                Text("Download more", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { onOpen(target, "library-${target.id}") })
+                            }
+                        }
+                    }
+                    item { Spacer(Modifier.height(100.dp)) }
+                }
+            }
         }
     }
 }
@@ -3256,8 +3295,14 @@ fun OnboardingScreen(onFinish: () -> Unit) {
 
 @Composable
 fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
-    // The download queue lives here once the resolver lands. Until then
-    // this is an honest empty state, not a fake list.
+    // 2.0-dev1.0: real jobs from DownloadEngine. Active jobs show
+    // live progress + pause/resume/cancel; completed jobs show size
+    // + Open/Delete. The notification preview below is unchanged —
+    // it still tests Notifications.kt, not the engine.
+    val context = LocalContext.current
+    val jobs by DownloadEngine.jobs.collectAsState()
+    val active = jobs.filter { it.state == JobState.QUEUED || it.state == JobState.DOWNLOADING || it.state == JobState.PAUSED || it.state == JobState.FAILED }
+    val completed = DownloadEngine.completedJobs(context)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -3265,50 +3310,79 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
             .statusBarsPadding()
             .navigationBarsPadding()
             .padding(horizontal = 16.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Row(modifier = Modifier.fillMaxWidth()) {
             BackPill(onBack = onBack)
         }
-        Spacer(Modifier.height(80.dp))
-        Box(
-            modifier = Modifier
-                .size(64.dp)
-                .clip(RoundedCornerShape(18.dp))
-                .background(Card)
-                .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(18.dp)),
-            contentAlignment = Alignment.Center,
-        ) {
-            androidx.compose.foundation.Image(
-                painter = painterResource(R.drawable.ic_download),
-                contentDescription = null,
-                modifier = Modifier.size(28.dp),
-                colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
-            )
-        }
         Spacer(Modifier.height(16.dp))
-        Text("Downloads is empty", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-        Spacer(Modifier.height(8.dp))
-        Text(
-            "Nothing downloaded yet — pull an episode and it will show up here, with progress, pause and resume.",
-            color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp, textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(24.dp))
-        Box(
-            modifier = Modifier
-                .clip(RoundedCornerShape(999.dp))
-                .background(Pink)
-                .clickable(onClick = onBrowse)
-                .padding(horizontal = 20.dp, vertical = 11.dp),
-            contentAlignment = Alignment.Center,
-        ) { Text("Browse anime", color = OnAccent, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
+        Text("Downloads", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
+        Spacer(Modifier.height(4.dp))
+        Text("Episodes you pull, with live progress.", color = Muted, fontSize = 13.sp)
+        Spacer(Modifier.height(16.dp))
+        if (active.isEmpty() && completed.isEmpty()) {
+            Column(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .clip(RoundedCornerShape(18.dp))
+                        .background(Card)
+                        .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(18.dp)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    androidx.compose.foundation.Image(
+                        painter = painterResource(R.drawable.ic_download),
+                        contentDescription = null,
+                        modifier = Modifier.size(28.dp),
+                        colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink),
+                    )
+                }
+                Spacer(Modifier.height(16.dp))
+                Text("Downloads is empty", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Nothing downloaded yet — pull an episode and it will show up here, with progress, pause and resume.",
+                    color = Muted, fontSize = 13.5.sp, lineHeight = 19.sp, textAlign = TextAlign.Center,
+                )
+                Spacer(Modifier.height(24.dp))
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(Pink)
+                        .clickable(onClick = onBrowse)
+                        .padding(horizontal = 20.dp, vertical = 11.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text("Browse anime", color = OnAccent, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (active.isNotEmpty()) {
+                    item { Text("Active", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont) }
+                    items(active, key = { it.id }) { job -> DownloadJobRow(job) }
+                }
+                if (completed.isNotEmpty()) {
+                    item {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Completed", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
+                    }
+                    items(completed, key = { it.id }) { job -> CompletedJobRow(job) }
+                }
+                item { Spacer(Modifier.height(8.dp)) }
+            }
+        }
         // 1.9-dev4.8.1: download notification DESIGN, previewable now.
-        // Real downloads land in 2.0, but this posts the exact
-        // notification that design specifies (see Notifications.kt):
-        // low-importance Downloads channel, per-episode progress +
-        // MB/s + Pause/Cancel, then a completion ping to Downloads.
-        // Pause/Cancel in the shade really pause/cancel this preview
-        // via DownloadActionReceiver, they are not dead buttons.
+        // This posts the exact notification the design specifies
+        // (see Notifications.kt): low-importance Downloads channel,
+        // per-episode progress + MB/s + Pause/Cancel, then a
+        // completion ping to Downloads. Pause/Cancel in the shade
+        // really pause/cancel this preview via
+        // DownloadActionReceiver, they are not dead buttons.
         Spacer(Modifier.height(16.dp))
         val dlCtx = LocalContext.current
         val dlScope = rememberCoroutineScope()
@@ -3352,7 +3426,110 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
             Text(previewMsg!!, color = Muted, fontSize = 13.sp, textAlign = TextAlign.Center)
         }
         Spacer(Modifier.height(8.dp))
-        Text("Sample only — real downloads land in 2.0.", color = Faint, fontSize = 12.sp, textAlign = TextAlign.Center)
+        Text("Sample only — this button just previews the notification.", color = Faint, fontSize = 12.sp, textAlign = TextAlign.Center)
+        Spacer(Modifier.height(16.dp))
+    }
+}
+
+private fun formatBytes(bytes: Long): String = when {
+    bytes <= 0L -> "—"
+    bytes >= 1024L * 1024 * 1024 -> "%.2f GB".format(bytes / (1024.0 * 1024 * 1024))
+    bytes >= 1024L * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))
+    bytes >= 1024L -> "%.0f KB".format(bytes / 1024.0)
+    else -> "$bytes B"
+}
+
+@Composable
+private fun JobChip(label: String) {
+    Box(
+        modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink.copy(alpha = 0.2f)).padding(horizontal = 8.dp, vertical = 3.dp),
+    ) { Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+}
+
+@Composable
+private fun DownloadJobRow(job: DownloadJob) {
+    val progress by animateFloatAsState(
+        targetValue = (job.progress / 100f).coerceIn(0f, 1f),
+        animationSpec = tween(300),
+        label = "dlProgress",
+    )
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Card)
+            .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(16.dp))
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(modifier = Modifier.size(width = 48.dp, height = 72.dp).clip(RoundedCornerShape(8.dp))) {
+            PosterImage(job.poster, Modifier.fillMaxSize(), with(LocalDensity.current) { 48.dp.toPx().toInt() })
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text("${job.animeTitle} — Episode ${job.episodeNumber}", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                JobChip("${job.quality}p")
+                JobChip(job.audio)
+            }
+            Spacer(Modifier.height(8.dp))
+            Box(modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(999.dp)).background(Line)) {
+                Box(modifier = Modifier.fillMaxWidth(progress).height(6.dp).clip(RoundedCornerShape(999.dp)).background(Pink))
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                when (job.state) {
+                    JobState.DOWNLOADING -> "${job.progress}% · ${"%.1f".format(job.speedMBps)} MB/s"
+                    JobState.PAUSED -> "Paused · ${job.progress}%"
+                    JobState.QUEUED -> "Queued…"
+                    JobState.FAILED -> job.error ?: "Failed"
+                    else -> "${job.progress}%"
+                },
+                color = if (job.state == JobState.FAILED) Color(0xFFFF3B30) else Muted,
+                fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                if (job.state == JobState.PAUSED) Text("Resume", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.resume(job.id) })
+                else if (job.state == JobState.DOWNLOADING || job.state == JobState.QUEUED) Text("Pause", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.pause(job.id) })
+                Text("Cancel", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.cancel(job.id) })
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompletedJobRow(job: DownloadJob) {
+    val context = LocalContext.current
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Card)
+            .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(16.dp))
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(modifier = Modifier.size(width = 48.dp, height = 72.dp).clip(RoundedCornerShape(8.dp))) {
+            PosterImage(job.poster, Modifier.fillMaxSize(), with(LocalDensity.current) { 48.dp.toPx().toInt() })
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text("${job.animeTitle} — Episode ${job.episodeNumber}", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(4.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                JobChip("${job.quality}p")
+                JobChip(job.audio)
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(formatBytes(if (job.totalBytes > 0L) job.totalBytes else job.downloadedBytes), color = Muted, fontSize = 12.sp)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                Text("Open", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.openFile(context, job) })
+                Text("Delete", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.deleteCompleted(context, job.id) })
+            }
+        }
     }
 }
 
@@ -3397,9 +3574,193 @@ fun BackPill(onBack: () -> Unit) {
     }
 }
 
+// 2.0-dev1.0: real episode loading, shared by DetailScreen and
+// DownloadSheet. One EpisodeSource, no clearance cookie in this
+// build — the UI never obtains one, so the source reports
+// SourcePending honestly until the connection lands. No fake
+// episodes, counts, durations or progress anywhere.
+private suspend fun resolveAndEnqueue(
+    context: android.content.Context,
+    title: ApiTitle,
+    episode: EpisodeInfo,
+    quality: String,
+): String? {
+    val link = try {
+        EpisodeSources.pahe(clearanceCookie = null).resolveDownload(episode, quality)
+    } catch (e: Exception) {
+        ResolvedLink.Failed(e.message ?: "Couldn't resolve this episode.")
+    }
+    return when (link) {
+        is ResolvedLink.Failed -> link.message
+        else -> { DownloadEngine.enqueue(context, title, episode, quality, link); null }
+    }
+}
+
+@Composable
+private fun EpisodeList(
+    title: ApiTitle,
+    quality: String,
+    audioFilter: String?,
+    onLoaded: ((List<EpisodeInfo>) -> Unit)? = null,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val source = remember(title.id) { EpisodeSources.pahe(clearanceCookie = null) }
+    var result by remember(title.id) { mutableStateOf<EpisodeResult?>(null) }
+    var reloadKey by remember(title.id) { mutableStateOf(0) }
+    var resolving by remember(title.id) { mutableStateOf(setOf<Int>()) }
+    var rowErrors by remember(title.id) { mutableStateOf(mapOf<Int, String>()) }
+    val jobs by DownloadEngine.jobs.collectAsState()
+    LaunchedEffect(title.id, reloadKey) {
+        result = null
+        rowErrors = emptyMap()
+        result = source.loadEpisodes(title)
+    }
+    // Shown list: audio filter applies when it matches something,
+    // otherwise the full list (never hide episodes on a guess).
+    // Engine audio codes are "jpn" (sub) / "eng" (dub); the sheet
+    // toggle speaks "Sub"/"Dub", so translate before filtering.
+    val loaded = result as? EpisodeResult.Loaded
+    val audioCode = when (audioFilter) { "Sub" -> "jpn"; "Dub" -> "eng"; else -> audioFilter }
+    val shownEpisodes = when {
+        loaded == null -> null
+        audioCode == null -> loaded.episodes
+        else -> loaded.episodes.filter { it.audio.equals(audioCode, ignoreCase = true) }.takeIf { it.isNotEmpty() } ?: loaded.episodes
+    }
+    LaunchedEffect(result, audioFilter) {
+        val eps = shownEpisodes ?: return@LaunchedEffect
+        onLoaded?.invoke(eps)
+    }
+    when (val r = result) {
+        null -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            repeat(3) {
+                Box(modifier = Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(12.dp)).background(Card))
+            }
+        }
+        EpisodeResult.SourcePending -> Text(
+            "Episode list unavailable — the source connection is still pending. Episodes will load from AnimePahe once it lands; nothing is faked here.",
+            color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
+        )
+        is EpisodeResult.Failed -> Column {
+            Text(r.message, color = Color(0xFFFF3B30), fontSize = 13.sp, lineHeight = 19.sp)
+            Spacer(Modifier.height(8.dp))
+            Box(
+                modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, Pink, RoundedCornerShape(999.dp))
+                    .clickable { reloadKey += 1 }.padding(horizontal = 16.dp, vertical = 9.dp),
+            ) { Text("Retry", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+        }
+        is EpisodeResult.Loaded -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("via ${source.sourceName}", color = Teal, fontSize = 12.sp)
+            if (r.incomplete) Text("List may be incomplete.", color = Teal, fontSize = 12.sp)
+            val episodes = shownEpisodes ?: emptyList()
+            if (episodes.isEmpty()) {
+                Text("No episodes in this list.", color = Muted, fontSize = 13.sp)
+            }
+            episodes.forEach { ep ->
+                // Match the exact audio variant: Sub and Dub of one
+                // episode are separate jobs (engine ids include the
+                // audio code), so number alone would conflate them.
+                val jobAudio = if (ep.audio.equals("eng", ignoreCase = true)) "Dub" else "Sub"
+                val job = jobs.firstOrNull { it.animeTitle == title.title && it.episodeNumber == ep.number && it.audio.equals(jobAudio, ignoreCase = true) }
+                Column(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Card).padding(12.dp),
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                ep.title ?: "Episode ${ep.number}",
+                                color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                                maxLines = 1, overflow = TextOverflow.Ellipsis,
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                                if (ep.title != null) Text("Episode ${ep.number}", color = Muted, fontSize = 12.sp)
+                                if (ep.duration != null) Text(ep.duration, color = Muted, fontSize = 12.sp)
+                                Box(
+                                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink.copy(alpha = 0.2f)).padding(horizontal = 8.dp, vertical = 3.dp),
+                                ) { Text(when (ep.audio.lowercase()) { "jpn" -> "Sub"; "eng" -> "Dub"; else -> ep.audio }, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        if (job != null) {
+                            Text(
+                                when (job.state) {
+                                    JobState.COMPLETED -> "Downloaded"
+                                    JobState.DOWNLOADING -> "${job.progress}%"
+                                    JobState.PAUSED -> "Paused"
+                                    JobState.QUEUED -> "Queued"
+                                    JobState.FAILED -> "Failed"
+                                    JobState.CANCELLED -> "Cancelled"
+                                },
+                                color = if (job.state == JobState.COMPLETED) Teal else Muted,
+                                fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                            )
+                        } else if (resolving.contains(ep.number)) {
+                            Text("Resolving…", color = Muted, fontSize = 13.sp)
+                        } else {
+                            Text(
+                                "Pull ↓", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable {
+                                    scope.launch {
+                                        resolving = resolving + ep.number
+                                        rowErrors = rowErrors - ep.number
+                                        val err = resolveAndEnqueue(context, title, ep, quality)
+                                        resolving = resolving - ep.number
+                                        if (err != null) rowErrors = rowErrors + (ep.number to err)
+                                    }
+                                },
+                            )
+                        }
+                    }
+                    val rowError = rowErrors[ep.number]
+                    if (rowError != null) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(rowError, color = Color(0xFFFF3B30), fontSize = 12.sp, lineHeight = 17.sp)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun WatchOrderCard(entry: String) {
+    var resolved by remember(entry) { mutableStateOf<ApiTitle?>(null) }
+    var attempted by remember(entry) { mutableStateOf(false) }
+    LaunchedEffect(entry) {
+        val results = searchAniLab(entry)
+        resolved = results.firstOrNull { it.poster != null } ?: results.firstOrNull()
+        attempted = true
+    }
+    Column(modifier = Modifier.width(104.dp)) {
+        Box(
+            modifier = Modifier.size(width = 104.dp, height = 156.dp).clip(RoundedCornerShape(12.dp)).background(Card),
+            contentAlignment = Alignment.Center,
+        ) {
+            val poster = resolved?.poster
+            if (poster != null) {
+                PosterImage(poster, Modifier.fillMaxSize(), with(LocalDensity.current) { 104.dp.toPx().toInt() })
+            } else if (attempted) {
+                // No poster found: title-only card, never a fake image.
+                Text(entry, color = Muted, fontSize = 12.sp, textAlign = TextAlign.Center, maxLines = 4, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(8.dp))
+            }
+            // While loading: bare Card skeleton box, nothing else.
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(entry, color = TextMain, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
 @Composable
 fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null, onPosterImageBounds: ((Rect) -> Unit)? = null) {
-    var season by remember { mutableStateOf(1) }
+    val context = LocalContext.current
+    // 2.0-dev1.0: episode rows enqueue directly at the saved quality.
+    val qualityPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+        .getString("quality", "1080p")?.removeSuffix("p")?.takeIf { it.isNotBlank() } ?: "1080"
     var synExpanded by remember { mutableStateOf(false) }
     // 1.9-dev4.8 extra smoothness: without a hero, the detail fades
     // in over 300ms instead of appearing instantly; with a hero, the
@@ -3422,12 +3783,15 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
     // whole-screen 300ms detailAlpha fade from 4.8.8/4.8.15 stays,
     // as it did in the build JS just approved — this change only
     // removes the EXTRA info fade/slide on top of it.
-    val isFrierenDemo = title.title.startsWith("Frieren") && title.episodes != null
-    val episodes = if (isFrierenDemo && season == 2) emptyList()
-        else title.episodes?.let { (1..it).toList() }
-    val watchOrder = if (isFrierenDemo) listOf("Season 1", "Season 2")
+    // 2.0-dev1.0: the Frieren demo season switcher is gone — the real
+    // episode flow replaces it. Watch order keeps the same data
+    // source (title.seasons + the old fallbacks), only the rendering
+    // changes: a poster line instead of a numbered text list.
+    val watchOrder = if (title.title.startsWith("Frieren") && title.episodes != null) listOf("Season 1", "Season 2")
         else if (title.title == "Attack on Titan" && title.episodes != null) listOf("Attack on Titan (watch-order guide in the web demo)")
         else title.seasons.takeIf { it.isNotEmpty() }
+    val watchRowState = rememberLazyListState()
+    val watchFling = rememberSnapFlingBehavior(watchRowState)
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -3443,7 +3807,7 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
             Spacer(Modifier.height(16.dp))
             Row {
                 Box(modifier = Modifier.alpha(if (heroPosterHidden) 0f else 1f)) {
-                    PosterCard(title, onClick = {}, onBounds = onPosterBounds, onPosterBounds = onPosterImageBounds, reportBoundsOnPlace = true, slot = LocalSharedPosterKey.current ?: "detail-${title.id}")
+                    PosterCard(title, onClick = {}, onDownloadClick = { onPull(it) }, onBounds = onPosterBounds, onPosterBounds = onPosterImageBounds, reportBoundsOnPlace = true, slot = LocalSharedPosterKey.current ?: "detail-${title.id}")
                 }
                 Spacer(Modifier.width(16.dp))
                 // 1.9-dev4.8.8: shonenx-style — detail info flies
@@ -3463,7 +3827,6 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
                     if (title.score != null) Text("★ ${title.score}", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                     if (title.genres != null) Text(title.genres, color = TextMain, fontSize = 13.sp)
                     if (title.status != null) Text(title.status, color = Teal, fontSize = 13.sp)
-                    if (isFrierenDemo) Text("You are currently in Season $season", color = Lavender, fontSize = 13.sp)
                 }
             }
             Spacer(Modifier.height(12.dp))
@@ -3510,71 +3873,23 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
                 )
             }
         }
-        if (isFrierenDemo) {
-            item {
-                Spacer(Modifier.height(16.dp))
-                Text("Season", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(1, 2).forEach { s ->
-                        OutlinedButton(
-                            onClick = { season = s },
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (season == s) Pink else Color.Transparent,
-                                contentColor = Color.White,
-                            ),
-                        ) { Text("Season $s") }
-                    }
-                }
-                if (season == 2) {
-                    Spacer(Modifier.height(8.dp))
-                    Text("Season 2 episode count: TBD (as in the web demo).", color = Teal, fontSize = 13.sp)
-                }
-            }
-        }
         item {
             Spacer(Modifier.height(16.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text("Episodes", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                Text("via AnimePahe · healthy", color = Teal, fontSize = 12.sp)
-            }
+            Text("Episodes", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            when {
-                episodes == null -> Text(
-                    "AniLab gives metadata (title, poster, synopsis) but no episode list for this title yet — episode pull is the next stage, after this AniLab step.",
-                    color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
-                )
-                episodes.isEmpty() -> Text("No episodes yet for this season.", color = Muted, fontSize = 13.sp)
-                else -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    episodes.forEach { ep ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
-                                .background(Card)
-                                .padding(12.dp),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text("Episode $ep", color = TextMain, fontSize = 14.sp)
-                            Text("Pull ↓", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                                modifier = Modifier.clickable { onPull(title) })
-                        }
-                    }
-                }
-            }
+            EpisodeList(title = title, quality = qualityPref, audioFilter = null)
         }
         if (watchOrder != null) {
             item {
                 Spacer(Modifier.height(16.dp))
                 Text("Watch order", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
-                watchOrder.forEachIndexed { i, step ->
-                    Text("${i + 1}. $step", color = Muted, fontSize = 14.sp)
+                LazyRow(
+                    state = watchRowState,
+                    flingBehavior = watchFling,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    items(watchOrder, key = { it }) { entry -> WatchOrderCard(entry) }
                 }
                 Spacer(Modifier.height(24.dp))
             }
@@ -3680,14 +3995,21 @@ private fun HoldRow(iconRes: Int, label: String, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, notWired: () -> Unit) {
-    var quality by remember { mutableStateOf("720") }
-    var season by remember { mutableStateOf(1) }
-    val isFrierenDemo = title.title.startsWith("Frieren") && title.episodes != null
-    val episodes = if (isFrierenDemo && season == 2) emptyList()
-        else title.episodes?.let { (1..it).toList() }
+fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit) {
+    // 2.0-dev1.0: wired for real — quality chips + Sub/Dub toggle,
+    // per-episode rows from the same EpisodeSource load as the detail
+    // section, Download Season enqueues every loaded episode. The old
+    // copy-links button and the dead-end toast path are gone.
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val prefs = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+    var quality by remember { mutableStateOf(prefs.getString("quality", "1080p")?.removeSuffix("p")?.takeIf { it.isNotBlank() } ?: "1080") }
+    var audio by remember { mutableStateOf(prefs.getString("language", "Sub") ?: "Sub") }
+    var loadedEpisodes by remember { mutableStateOf<List<EpisodeInfo>?>(null) }
+    var seasonBusy by remember { mutableStateOf(false) }
+    var seasonError by remember { mutableStateOf<String?>(null) }
     ModalBottomSheet(onDismissRequest = onDismiss) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(16.dp).verticalScroll(rememberScrollState())) {
             Text(title.title, color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold)
             Text(title.overview ?: "Synopsis placeholder (demo).", color = Muted, fontSize = 13.sp)
             Spacer(Modifier.height(12.dp))
@@ -3704,51 +4026,49 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, notWired: () -> Unit) 
                     ) { Text("${q}p") }
                 }
             }
-            if (isFrierenDemo) {
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf(1, 2).forEach { s ->
-                        OutlinedButton(
-                            onClick = { season = s },
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                containerColor = if (season == s) Pink else Color.Transparent,
-                                contentColor = Color.White,
-                            ),
-                        ) { Text("Season $s") }
-                    }
+            Spacer(Modifier.height(12.dp))
+            Text("Audio", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("Sub", "Dub").forEach { a ->
+                    OutlinedButton(
+                        onClick = { audio = a },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (audio == a) Pink else Color.Transparent,
+                            contentColor = Color.White,
+                        ),
+                    ) { Text(a) }
                 }
             }
             Spacer(Modifier.height(12.dp))
             Button(
-                onClick = notWired,
+                onClick = {
+                    val eps = loadedEpisodes ?: return@Button
+                    if (seasonBusy) return@Button
+                    seasonBusy = true
+                    seasonError = null
+                    scope.launch {
+                        var firstError: String? = null
+                        for (ep in eps) {
+                            val err = resolveAndEnqueue(context, title, ep, quality)
+                            if (err != null && firstError == null) firstError = err
+                        }
+                        seasonError = firstError
+                        seasonBusy = false
+                    }
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = Pink),
                 modifier = Modifier.fillMaxWidth(),
-                enabled = episodes?.isNotEmpty() == true,
-            ) { Text("Download Season ($quality" + "p)", color = OnAccent, fontWeight = FontWeight.Bold) }
-            Spacer(Modifier.height(8.dp))
-            OutlinedButton(onClick = notWired, modifier = Modifier.fillMaxWidth()) {
-                Text("Copy-all-links", color = Color.White)
+                enabled = !loadedEpisodes.isNullOrEmpty() && !seasonBusy,
+            ) { Text(if (seasonBusy) "Resolving…" else "Download Season ($quality" + "p)", color = OnAccent, fontWeight = FontWeight.Bold) }
+            if (seasonError != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(seasonError!!, color = Color(0xFFFF3B30), fontSize = 13.sp, lineHeight = 19.sp)
             }
             Spacer(Modifier.height(12.dp))
             Text("Episodes", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(8.dp))
-            when {
-                episodes == null -> Text("Episode pull is the next stage — AniLab metadata only for now.", color = Muted, fontSize = 13.sp)
-                episodes.isEmpty() -> Text("Copy-all-links is blocked for Season 2 until its episode count is known (as in the web demo).", color = Muted, fontSize = 13.sp)
-                else -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    episodes.forEach { ep ->
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Text("Episode $ep · $quality" + "p", color = TextMain, fontSize = 14.sp)
-                            Text("Pull", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                                modifier = Modifier.clickable(onClick = notWired))
-                        }
-                    }
-                }
-            }
+            EpisodeList(title = title, quality = quality, audioFilter = audio, onLoaded = { loadedEpisodes = it })
             Spacer(Modifier.height(24.dp))
         }
     }

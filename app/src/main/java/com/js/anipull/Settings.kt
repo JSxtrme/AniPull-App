@@ -24,7 +24,20 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathMeasure
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.window.Dialog
 import kotlinx.coroutines.launch
 import androidx.compose.ui.graphics.graphicsLayer
 
@@ -124,7 +137,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("1.9 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("2.0-dev1.0 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -656,6 +669,71 @@ private fun ChannelOption(title: String, sub: String, selected: Boolean, onPick:
     }
 }
 
+// 2.0-dev1.0: manual "Check for updates" success popup. One Canvas
+// + Animatable, no new dependency: circle draws 0→1 (~400ms), then
+// the check path draws (~300ms), then a gentle pulse ring repeats.
+// The check Path is precomputed once in remember — nothing is
+// allocated per frame. reduceMotion draws the finished check statically.
+@Composable
+private fun AnimatedSuccessCheck() {
+    val density = LocalDensity.current
+    val radiusPx = with(density) { 28.dp.toPx() }
+    val strokePx = with(density) { 3.dp.toPx() }
+    val reduceMotion = ThemeState.reduceMotion
+    val circleTrim = remember { Animatable(if (reduceMotion) 1f else 0f) }
+    val checkTrim = remember { Animatable(if (reduceMotion) 1f else 0f) }
+    val checkPath = remember(density) {
+        Path().apply {
+            with(density) {
+                moveTo(22.dp.toPx(), 36.dp.toPx())
+                lineTo(32.dp.toPx(), 46.dp.toPx())
+                lineTo(50.dp.toPx(), 26.dp.toPx())
+            }
+        }
+    }
+    val pulse = rememberInfiniteTransition(label = "successPulse")
+    val pulseScale by pulse.animateFloat(
+        initialValue = 1f, targetValue = 1.6f,
+        animationSpec = infiniteRepeatable(animation = tween(1600), repeatMode = RepeatMode.Restart),
+        label = "successPulseScale",
+    )
+    LaunchedEffect(Unit) {
+        if (reduceMotion) return@LaunchedEffect
+        circleTrim.animateTo(1f, animationSpec = tween(400))
+        checkTrim.animateTo(1f, animationSpec = tween(300))
+    }
+    val measure = remember { PathMeasure() }
+    val segment = remember { Path() }
+    Canvas(modifier = Modifier.size(72.dp)) {
+        val center = Offset(size.width / 2f, size.height / 2f)
+        // Pulse ring, only once the check is fully drawn.
+        if (!reduceMotion && checkTrim.value >= 1f) {
+            val frac = (pulseScale - 1f) / 0.6f
+            drawCircle(
+                color = Pink.copy(alpha = 0.35f * (1f - frac)),
+                radius = radiusPx * pulseScale,
+                center = center,
+                style = Stroke(width = strokePx * 0.75f),
+            )
+        }
+        drawArc(
+            color = Pink,
+            startAngle = -90f,
+            sweepAngle = 360f * circleTrim.value,
+            useCenter = false,
+            topLeft = center - androidx.compose.ui.geometry.Offset(radiusPx, radiusPx),
+            size = androidx.compose.ui.geometry.Size(radiusPx * 2f, radiusPx * 2f),
+            style = Stroke(width = strokePx, cap = StrokeCap.Round),
+        )
+        if (checkTrim.value > 0f) {
+            measure.setPath(checkPath, false)
+            segment.reset()
+            measure.getSegment(0f, measure.length * checkTrim.value, segment)
+            drawPath(segment, color = Pink, style = Stroke(width = strokePx, cap = StrokeCap.Round, join = androidx.compose.ui.graphics.StrokeJoin.Round))
+        }
+    }
+}
+
 @Composable
 fun AboutPage() {
     val uriHandler = LocalUriHandler.current
@@ -664,7 +742,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("1.9 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("2.0-dev1.0 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")
@@ -683,6 +761,7 @@ fun AboutPage() {
         var channel by remember { mutableStateOf(updateChannel(ctx)) }
         var showChannelDialog by remember { mutableStateOf(false) }
         var checkMsg by remember { mutableStateOf<String?>(null) }
+        var showUpToDateDialog by remember { mutableStateOf(false) }
         var checking by remember { mutableStateOf(false) }
         // Manual check ignores the Later snooze — it always shows
         // the sheet when an update exists for this channel.
@@ -698,7 +777,7 @@ fun AboutPage() {
                 checking = false
                 when (result) {
                     is UpdateCheckResult.Available -> { checkMsg = null; manualUpdate = result.info }
-                    UpdateCheckResult.UpToDate -> checkMsg = "No updates available — you're on the latest build."
+                    UpdateCheckResult.UpToDate -> { checkMsg = null; showUpToDateDialog = true }
                     UpdateCheckResult.NoNetwork -> checkMsg = "Couldn't check for updates — check your connection and try again."
                     is UpdateCheckResult.Failed -> checkMsg = "Couldn't check for updates — ${result.message}"
                 }
@@ -735,6 +814,26 @@ fun AboutPage() {
         }
         manualUpdate?.let { info ->
             UpdateSheet(info = info, currentVersionName = installedVersionName(ctx), onLater = { manualUpdate = null }, onDismiss = { manualUpdate = null })
+        }
+        // 2.0-dev1.0: manual check only — the silent auto-check in
+        // App.kt never opens this. BACK / outside tap dismisses it
+        // (Dialog's onDismissRequest covers both). No buttons.
+        if (showUpToDateDialog) {
+            Dialog(onDismissRequest = { showUpToDateDialog = false }) {
+                Column(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(Card)
+                        .padding(horizontal = 24.dp, vertical = 28.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    AnimatedSuccessCheck()
+                    Spacer(Modifier.height(16.dp))
+                    Text("You're on the latest version", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont, textAlign = TextAlign.Center)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Anipull ${installedVersionName(ctx)}", color = Muted, fontSize = 13.sp, textAlign = TextAlign.Center)
+                }
+            }
         }
     }
     Spacer(Modifier.height(20.dp))
