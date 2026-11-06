@@ -1,0 +1,116 @@
+# Anipull dev release — GitHub Actions automation (1.9-dev5.4).
+# Every push to dev/1.9 (except the workflow's own updates.json
+# commit, which carries [skip ci]) builds the signed release APK,
+# creates a prerelease with the APK attached, and updates
+# updates.json in this repo — so the in-app updater picks the new
+# build up with no manual steps. Manual runs via workflow_dispatch.
+# Signing: the stable release key lives ONLY in encrypted repo
+# secrets (KEYSTORE_BASE64, KEYSTORE_PASSWORD, KEY_ALIAS,
+# KEY_PASSWORD). The workflow decodes it to a temp file, signs,
+# verifies the signer fingerprint is the stable key (0b9c4b02...),
+# and deletes the temp file afterwards. Secrets are never printed.
+# Never touches main, never creates a stable release.
+name: Dev release
+
+on:
+  push:
+    branches: [dev/1.9]
+    paths-ignore:
+      - updates.json
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Read version from build.gradle.kts
+        id: version
+        run: |
+          echo "version_code=$(grep -m1 'versionCode =' app/build.gradle.kts | grep -o '[0-9]*')" >> "$GITHUB_OUTPUT"
+          echo "version_name=$(grep -m1 'versionName =' app/build.gradle.kts | sed 's/.*"\([^"]*\)".*/\1/')" >> "$GITHUB_OUTPUT"
+
+      - name: Decode keystore
+        run: |
+          printf '%s' "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > /tmp/anipull-release.keystore
+          chmod 600 /tmp/anipull-release.keystore
+
+      - name: Build release APK
+        env:
+          ANIPULL_KEYSTORE_FILE: /tmp/anipull-release.keystore
+          ANIPULL_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          ANIPULL_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          ANIPULL_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Verify stable-key signature (fail if not 0b9c4b02...)
+        run: |
+          "$ANDROID_HOME/build-tools/37.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk | tee /tmp/certs.txt
+          grep -qi '0b9c4b025ec68d45da4487711b007d6754b60aa71b12db318e8123b10dd74b18' /tmp/certs.txt
+
+      - name: Compute SHA-256 and publish prerelease
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          APK=app/build/outputs/apk/release/app-release.apk
+          SHA=$(sha256sum "$APK" | cut -d' ' -f1)
+          echo "SHA256=$SHA" >> "$GITHUB_ENV"
+          TAG="${{ steps.version.outputs.version_name }}"
+          # Idempotent: a re-run deletes a same-tag prerelease first
+          # instead of creating a duplicate.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" \
+            --prerelease \
+            --target dev/1.9 \
+            --title "$TAG" \
+            --notes "1.9-$TAG — dev test build, built and published automatically by GitHub Actions. Signed with the stable release key; updates in place over the previous dev build." \
+            "$APK#anipull-$TAG.apk"
+
+      - name: Update updates.json and push it back
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python3 - << 'PY'
+          import json
+          data = {
+              "dev": {
+                  "versionCode": int("${{ steps.version.outputs.version_code }}"),
+                  "versionName": "${{ steps.version.outputs.version_name }}",
+                  "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/${{ steps.version.outputs.version_name }}/anipull-${{ steps.version.outputs.version_name }}.apk",
+                  "sha256": "${{ env.SHA256 }}",
+                  "features": [
+                      "GitHub Actions automation — builds, prereleases and updates.json are automatic now",
+                      "Updater fetches updates.json from the app repo itself, no Vercel copy needed",
+                  ],
+                  "fixes": [
+                      "No more manual prerelease or updates.json push per build",
+                  ],
+              }
+          }
+          with open("updates.json", "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+          PY
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add updates.json
+          git commit -m "[skip ci] updates.json: ${{ steps.version.outputs.version_name }} (versionCode ${{ steps.version.outputs.version_code }})" || echo "nothing to commit"
+          git push origin dev/1.9
+
+      - name: Delete temp keystore
+        if: always()
+        run: rm -f /tmp/anipull-release.keystore /tmp/certs.txt
