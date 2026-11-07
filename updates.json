@@ -69,15 +69,16 @@
     ]
   },
   "dev": {
-    "versionCode": 53,
-    "versionName": "2.0-dev1.2",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.2/anipull-2.0-dev1.2.apk",
-    "sha256": "e157a4dd97aeba037e349216e8573d43e889266d462fc74a220b249ffd3368e9",
-    "features": [],
+    "versionCode": 54,
+    "versionName": "2.0-dev1.3",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.3/anipull-2.0-dev1.3.apk",
+    "sha256": "21f3352098b87e38936e98237759720931288bd554f5713084af4440c788329d",
+    "features": [
+      "Cloudflare clearance is live \u2014 the episode list now loads from AnimePahe: when you open a detail page, the app solves the site's security check in a hidden browser view on your own phone and reuses that session for episode lists and downloads (no server, no account, nothing leaves the phone)",
+      "If the security check ever needs a tap, the app shows AnimePahe's own page once so you can tap the checkbox yourself, then carries on \u2014 instead of failing silently"
+    ],
     "fixes": [
-      "Watch-order section removed from the detail page \u2014 it showed wrong data (AniLab has no seasons/relations data, so it guessed from hardcoded lists and generic searches), so it is gone entirely instead of showing fake titles",
-      "Crash fixed \u2014 opening a detail whose watch-order list had two entries with the same label (e.g. \"Side Story\" twice) crashed with a duplicate Lazy key; the section and its label-based keys are removed",
-      "Lazy list key audit \u2014 every other LazyColumn/LazyRow items() call now keys on a unique id (title id, job id, or map key); no other label-based duplicate-key risk found"
+      "Downloads no longer fail with 'session not ready' when the Pahe session expired \u2014 the app silently re-solves the check before resolving a download, and Retry on a failed episode list drops the dead session and solves fresh"
     ]
   }
 }
