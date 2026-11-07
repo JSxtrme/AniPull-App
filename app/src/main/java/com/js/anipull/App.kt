@@ -1,5 +1,6 @@
 package com.js.anipull
 
+import android.app.Activity
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
@@ -128,6 +129,8 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -3574,18 +3577,28 @@ fun BackPill(onBack: () -> Unit) {
 }
 
 // 2.0-dev1.0: real episode loading, shared by DetailScreen and
-// DownloadSheet. One EpisodeSource, no clearance cookie in this
-// build — the UI never obtains one, so the source reports
-// SourcePending honestly until the connection lands. No fake
-// episodes, counts, durations or progress anywhere.
+// DownloadSheet. 2.0-dev1.3: the source now gets a real clearance —
+// CloudflareClearance solves Pahe's check in a hidden WebView on
+// the user's own phone when the episode source is first needed,
+// and the cookie + minting UA are replayed together. With no
+// clearance the source still reports SourcePending honestly.
+// No fake episodes, counts, durations or progress anywhere.
 private suspend fun resolveAndEnqueue(
     context: android.content.Context,
     title: ApiTitle,
     episode: EpisodeInfo,
     quality: String,
 ): String? {
+    // A clearance can expire between the list load and the tap, so
+    // re-ensure it here (stored-and-valid returns instantly, no
+    // WebView). If it cannot be obtained, resolveDownload reports
+    // its honest "not ready" failure — never a guessed link.
+    val clearance = when (val r = CloudflareClearance.ensureClearance(context as? Activity)) {
+        is ClearanceResult.Cleared -> r.clearance
+        else -> null
+    }
     val link = try {
-        EpisodeSources.pahe(clearanceCookie = null).resolveDownload(episode, quality)
+        EpisodeSources.pahe(clearance?.cookieValue, clearance?.userAgent).resolveDownload(episode, quality)
     } catch (e: Exception) {
         ResolvedLink.Failed(e.message ?: "Couldn't resolve this episode.")
     }
@@ -3604,15 +3617,33 @@ private fun EpisodeList(
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val source = remember(title.id) { EpisodeSources.pahe(clearanceCookie = null) }
+    // 2.0-dev1.3: the source is built AFTER clearance is ensured —
+    // the cookie + minting UA are replayed together. It is state (not
+    // remember-once) because the clearance can land after first
+    // composition. With no clearance the source stays cookie-less
+    // and reports SourcePending honestly.
+    var source by remember(title.id) { mutableStateOf<EpisodeSource>(EpisodeSources.pahe(null)) }
     var result by remember(title.id) { mutableStateOf<EpisodeResult?>(null) }
     var reloadKey by remember(title.id) { mutableStateOf(0) }
     var resolving by remember(title.id) { mutableStateOf(setOf<Int>()) }
     var rowErrors by remember(title.id) { mutableStateOf(mapOf<Int, String>()) }
+    var showClearanceDialog by remember(title.id) { mutableStateOf(false) }
     val jobs by DownloadEngine.jobs.collectAsState()
     LaunchedEffect(title.id, reloadKey) {
         result = null
         rowErrors = emptyMap()
+        showClearanceDialog = false
+        // Clearance is ensured when the episode source is first
+        // needed (this section), never at app launch. Stored-and-
+        // valid returns instantly; otherwise a hidden WebView solves
+        // the check on this phone, silently. If the check needs a
+        // human tap, the dialog below surfaces the page instead.
+        val clearance = when (val r = CloudflareClearance.ensureClearance(context as? Activity)) {
+            is ClearanceResult.Cleared -> r.clearance
+            ClearanceResult.NeedsUserAction -> { showClearanceDialog = true; null }
+            ClearanceResult.Failed -> null
+        }
+        source = EpisodeSources.pahe(clearance?.cookieValue, clearance?.userAgent)
         result = source.loadEpisodes(title)
     }
     // Shown list: audio filter applies when it matches something,
@@ -3645,7 +3676,11 @@ private fun EpisodeList(
             Spacer(Modifier.height(8.dp))
             Box(
                 modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, Pink, RoundedCornerShape(999.dp))
-                    .clickable { reloadKey += 1 }.padding(horizontal = 16.dp, vertical = 9.dp),
+                    // 2.0-dev1.3: the previous clearance evidently did
+                    // not work (or Pahe voided it), so drop it before
+                    // retrying — the reload re-solves fresh instead of
+                    // trusting a dead session again.
+                    .clickable { CloudflareClearance.clearStored(context); reloadKey += 1 }.padding(horizontal = 16.dp, vertical = 9.dp),
             ) { Text("Retry", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
         }
         is EpisodeResult.Loaded -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -3721,6 +3756,68 @@ private fun EpisodeList(
                         Text(rowError, color = Color(0xFFFF3B30), fontSize = 12.sp, lineHeight = 17.sp)
                     }
                 }
+            }
+        }
+    }
+    // 2.0-dev1.3: the check needed a human tap — show the page
+    // itself once so the user can tap the checkbox, then Done.
+    if (showClearanceDialog) {
+        ClearanceWebViewDialog(
+            onDone = {
+                showClearanceDialog = false
+                // Harvest whatever the visible WebView's session now
+                // holds; if it cleared, reload the list with it.
+                if (CloudflareClearance.persistFromStore(context)) reloadKey += 1
+            },
+            onCancel = { showClearanceDialog = false },
+        )
+    }
+}
+
+// 2.0-dev1.3: visible WebView fallback, shown ONLY when the hidden
+// solve timed out on a challenge that needs a human tap (Turnstile
+// checkbox). The user sees AnimePahe's own page, taps the checkbox
+// if one appears, then Done — the app harvests the session cookie
+// from the native store and never asks again until it expires.
+// Back / outside-tap / Cancel all dismiss without claiming success.
+@Composable
+private fun ClearanceWebViewDialog(onDone: () -> Unit, onCancel: () -> Unit) {
+    Dialog(onDismissRequest = onCancel) {
+        Column(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(20.dp),
+        ) {
+            Text("One quick check", color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
+            Spacer(Modifier.height(8.dp))
+            Text(
+                "AnimePahe wants to make sure you're human before showing episodes. Tap the checkbox below if one appears, then tap Done.",
+                color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
+            )
+            Spacer(Modifier.height(12.dp))
+            AndroidView(
+                factory = { ctx ->
+                    CloudflareClearance.createPaheWebView(ctx).apply { loadUrl("https://animepahe.pw/") }
+                },
+                onRelease = { webView ->
+                    try { webView.stopLoading() } catch (_: Exception) { }
+                    try { webView.destroy() } catch (_: Exception) { }
+                },
+                modifier = Modifier.fillMaxWidth().height(380.dp).clip(RoundedCornerShape(12.dp)).background(Color.Black),
+            )
+            Spacer(Modifier.height(16.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Box(
+                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).border(1.dp, Pink, RoundedCornerShape(999.dp))
+                        .clickable(onClick = onCancel).padding(vertical = 11.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text("Cancel", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                Box(
+                    modifier = Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).background(Pink)
+                        .clickable(onClick = onDone).padding(vertical = 11.dp),
+                    contentAlignment = Alignment.Center,
+                ) { Text("Done", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
             }
         }
     }

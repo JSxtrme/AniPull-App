@@ -1,3 +1,16 @@
+## 2.0-dev1.3 (2026-11-07, versionCode 54) — Cloudflare clearance lands, episode lists go live
+
+The one blocked piece of 2.0 is in: the episode list now actually loads from AnimePahe. When you open a detail page, the app solves Pahe's security check in a hidden WebView on your own phone (the Mihon/kotatsu pattern from the resolver research) and reuses the cf_clearance session cookie + the WebView's User-Agent for the API calls — no server, no account, nothing leaves the phone. Clearance lasts ~15 minutes and re-solves silently when it expires; if the check ever needs a human tap (Turnstile checkbox), the app shows AnimePahe's own page once so you can tap it, instead of failing silently. Downloads re-ensure the session before resolving, so an expired session no longer fails with "session not ready", and Retry on a failed list drops the dead session and solves fresh. If clearance cannot be obtained at all, the episode section keeps its honest pending/error state — still no fake episodes. Verified by code inspection + build only: the VM's datacenter IP gets a flat 403 from Pahe, so it cannot test the solve itself — JS's phone test (his residential IP gets the solvable challenge, proven by the Chrome test) is the runtime proof. R8 + shrinkResources stay on; no engine changes beyond the clearance wiring, no new API/source, no AniList.
+
+### New features (2)
+
+- Cloudflare clearance is live — the episode list now loads from AnimePahe: when you open a detail page, the app solves the site's security check in a hidden browser view on your own phone and reuses that session for episode lists and downloads (no server, no account, nothing leaves the phone)
+- If the security check ever needs a tap, the app shows AnimePahe's own page once so you can tap the checkbox yourself, then carries on — instead of failing silently
+
+### Bug Fixes (1)
+
+- Downloads no longer fail with 'session not ready' when the Pahe session expired — the app silently re-solves the check before resolving a download, and Retry on a failed episode list drops the dead session and solves fresh
+
 ## 2.0-dev1.2 (2026-11-07, versionCode 53) — watch order removed, duplicate-key crash fixed
 
 JS's phone test of dev1.1 found two problems in the watch-order section, and both trace to the same root cause: AniLab has no seasons/relations data, so the row was guessed — hardcoded Frieren/AoT fallback lists plus AniLab search on generic strings like "Season 1", which returns wrong titles (it showed "K: Return of Kings" on every anime). JS's call: if the correct watch order can't be pulled from anywhere, don't show anything there. So the section is removed entirely — no placeholder, no "coming soon", the detail page flows as if it was never there. AniList relations would be a real source, but AniList integration was never approved, so nothing new was added. The same guessed labels also caused the crash: the row keyed Lazy items by season label, and a title with two "Side Story" entries crashed Compose with a duplicate-key IllegalArgumentException (title-specific — only titles whose list has duplicate labels crashed). The section and its keys are gone, and every other Lazy list in the app was audited for the same bug class (see fixes). R8 + shrinkResources stay on; no engine or clearance changes.

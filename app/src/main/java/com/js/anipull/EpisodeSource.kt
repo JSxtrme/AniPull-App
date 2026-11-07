@@ -51,7 +51,12 @@ object EpisodeSources {
     // session already holds, passed in as a plain string. Null =
     // no clearance available -> the source reports SourcePending
     // and makes no network call at all.
-    fun pahe(clearanceCookie: String?): EpisodeSource = PaheEpisodeSource(clearanceCookie)
+    // userAgent: the WebView User-Agent that minted the clearance.
+    // A clearance is void if replayed with a different UA than the
+    // one that minted it, so the minting UA must be replayed with
+    // the cookie (research §8.1). Null -> the default browser UA.
+    fun pahe(clearanceCookie: String?, userAgent: String? = null): EpisodeSource =
+        PaheEpisodeSource(clearanceCookie, userAgent)
 }
 
 // --- Shared HTTP plumbing for the engine (PaheResolver, HlsDownloader).

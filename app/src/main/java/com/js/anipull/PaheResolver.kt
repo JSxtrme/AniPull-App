@@ -16,7 +16,10 @@ import java.net.URLEncoder
 // String and only ever replays it as a Cookie header. With a null
 // cookie it returns SourcePending / Failed WITHOUT any network call.
 
-internal class PaheEpisodeSource(private val clearanceCookie: String?) : EpisodeSource {
+internal class PaheEpisodeSource(
+    private val clearanceCookie: String?,
+    private val clearanceUa: String? = null,
+) : EpisodeSource {
     override val sourceName: String = "AnimePahe"
 
     companion object {
@@ -42,6 +45,10 @@ internal class PaheEpisodeSource(private val clearanceCookie: String?) : Episode
         clearanceCookie?.takeIf { it.isNotBlank() }?.let { raw ->
             headers["Cookie"] = if (raw.contains("cf_clearance=")) raw else "cf_clearance=$raw"
         }
+        // Replay with the exact UA that minted the clearance — a
+        // clearance replayed under a different UA is void. EngineHttp
+        // applies this map after its default UA, so it overrides it.
+        clearanceUa?.takeIf { it.isNotBlank() }?.let { headers["User-Agent"] = it }
         headers.putAll(extra)
         return headers
     }
