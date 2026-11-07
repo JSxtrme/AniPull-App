@@ -13,8 +13,17 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 55
-        versionName = "2.0-dev1.4"
+        versionCode = 56
+        versionName = "2.0-dev1.5"
+        // 2.0-dev1.5: Cronet ships a native lib per ABI (~7 MB for
+        // arm64, ~4 MB for armv7, ~7 MB each for x86/x86_64). Only
+        // real-phone ABIs are packaged — x86/x86_64 are emulators
+        // and Chromebooks, and every phone this app is for is
+        // arm64 (JS's Nothing Phone 2a included). Without this the
+        // APK would carry ~26 MB of native libs.
+        ndk {
+            abiFilters += listOf("arm64-v8a", "armeabi-v7a")
+        }
     }
 
     // 1.9-dev4.8.8-stablekey: STABLE release key, Route A.
@@ -102,6 +111,28 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.0")
+    // 2.0-dev1.5: Cronet (Chromium network stack) for the Pahe
+    // engine path — the replayed clearance needs Chrome's TLS
+    // fingerprint, which HttpURLConnection cannot present (see
+    // CronetHttp.kt). Vendored AARs (api + common + embedded
+    // 141.7340.3) because this VM's Java tooling cannot download
+    // from Google Maven; the Maven-coordinate form is
+    // implementation("org.chromium.net:cronet-embedded:141.7340.3")
+    // etc. — same version, one line each, once local Gradle
+    // downloads work.
+    implementation(files("libs/cronet-api-141.7340.3.aar"))
+    implementation(files("libs/cronet-common-141.7340.3.aar"))
+    implementation(files("libs/cronet-embedded-141.7340.3.aar"))
+    // Transitive deps of the three Cronet AARs (from their POMs).
+    // files() deps do not resolve transitives, so they are vendored
+    // explicitly: cronet-shared holds CronetLogger/CronetManifest,
+    // httpengine-native-provider holds HttpEngineNativeProvider,
+    // protobuf-javalite is needed by the proto classes in
+    // cronet-common, jsr305 by the @Nonnull annotations.
+    implementation(files("libs/cronet-shared-141.7340.3.aar"))
+    implementation(files("libs/httpengine-native-provider-141.7340.3.aar"))
+    implementation(files("libs/protobuf-javalite-3.22.3.jar"))
+    implementation(files("libs/jsr305-3.0.1.jar"))
     // Haze 1.3.1, already in the local Gradle cache from the BitChord /
     // ReChord build, so this resolves offline: real backdrop blur for
     // the translucent dock, not a fake tint. Toggle in Settings.

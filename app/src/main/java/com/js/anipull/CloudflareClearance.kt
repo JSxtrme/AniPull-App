@@ -209,14 +209,30 @@ object CloudflareClearance {
                 try { webView.destroy() } catch (_: Exception) { }
                 return@withContext ClearanceResult.Failed
             }
-            // 1x1, invisible, but ATTACHED to the window — an
-            // unattached WebView throttles JS timers and the
-            // challenge may never complete.
-            val params = ViewGroup.LayoutParams(1, 1)
-            webView.visibility = View.INVISIBLE
+            // 2.0-dev1.5: the solve WebView is FULL-SIZE and VISIBLE,
+            // added BEHIND the app's own UI (decor index 0) — never
+            // 1x1 and never INVISIBLE. JS's phone probe (2026-11-08)
+            // proved the old 1x1 invisible view NEVER completes the
+            // challenge on its own: full 30 s poll, title stuck at
+            // "Just a moment...", no cookie harvested. A 1x1
+            // invisible WebView is throttled by Android (timers
+            // paused, renderer stalled) and too small for the
+            // challenge to lay out in — the check cannot run in it.
+            // Full-size + VISIBLE + attached runs it like a real
+            // browser tab; behind the UI means the user still sees
+            // the normal detail page (skeletons, then episodes)
+            // while it solves. If the challenge needs a tap, this
+            // still times out and the visible dialog takes over —
+            // the sizing fixes a stalled automatic check, it does
+            // not (and cannot) tap a checkbox by itself.
+            val params = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+            )
+            webView.visibility = View.VISIBLE
             var result: ClearanceResult = ClearanceResult.Failed
             try {
-                decor.addView(webView, params)
+                decor.addView(webView, 0, params)
                 CookieManager.getInstance().setAcceptCookie(true)
                 webView.loadUrl(PAHE_URL)
                 val deadline = System.currentTimeMillis() + SOLVE_TIMEOUT_MS

@@ -3593,6 +3593,10 @@ private suspend fun resolveAndEnqueue(
     // re-ensure it here (stored-and-valid returns instantly, no
     // WebView). If it cannot be obtained, resolveDownload reports
     // its honest "not ready" failure — never a guessed link.
+    // 2.0-dev1.5: Cronet needs the app context registered before
+    // the first Pahe call (MainActivity does this at launch; this
+    // is the belt-and-braces copy for the download path).
+    CronetHttp.setContext(context)
     val clearance = when (val r = CloudflareClearance.ensureClearance(context as? Activity)) {
         is ClearanceResult.Cleared -> r.clearance
         else -> null
@@ -3656,6 +3660,11 @@ private fun EpisodeList(
         rowErrors = emptyMap()
         showClearanceDialog = false
         kotlinx.coroutines.delay(transitionMs.toLong() + 100L)
+        // 2.0-dev1.5: register the app context for Cronet before
+        // the first Pahe call (MainActivity does this too — this is
+        // the belt-and-braces copy, in case the detail opens before
+        // onCreate's registration somehow runs).
+        CronetHttp.setContext(context)
         // 2.0-dev1.4: hard 45s bound on the whole load (clearance
         // solve + fetch). Before, a stuck solve or a slow host
         // retry chain could hold the section on skeletons for
@@ -3667,14 +3676,27 @@ private fun EpisodeList(
             // valid returns instantly; otherwise a hidden WebView solves
             // the check on this phone, silently. If the check needs a
             // human tap, the dialog below surfaces the page instead.
+            // 2.0-dev1.5 stage (a): if the solve itself failed, say
+            // so — no cookie was harvested at all. That is a
+            // different failure from a harvested cookie being
+            // rejected (stage b, the "session didn't stick" error
+            // from the resolver) or Pahe answering with no match
+            // (stage c, the resolver's no-match error). The next
+            // phone report can now pinpoint the stage from the
+            // words alone.
+            var solveFailed = false
             val clearance = when (val r = CloudflareClearance.ensureClearance(context as? Activity)) {
                 is ClearanceResult.Cleared -> r.clearance
                 ClearanceResult.NeedsUserAction -> { showClearanceDialog = true; null }
-                ClearanceResult.Failed -> null
+                ClearanceResult.Failed -> { solveFailed = true; null }
             }
             val src = EpisodeSources.pahe(clearance?.cookieValue, clearance?.userAgent)
             source = src
-            src.loadEpisodes(title)
+            if (solveFailed) {
+                EpisodeResult.Failed("No Pahe session was saved — the security check couldn't be solved on this phone, so no cookie was harvested. Tap Retry.")
+            } else {
+                src.loadEpisodes(title)
+            }
         } ?: EpisodeResult.Failed("Episode list timed out — tap Retry.")
     }
     // Shown list: audio filter applies when it matches something,

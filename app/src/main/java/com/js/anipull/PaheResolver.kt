@@ -46,7 +46,7 @@ internal class PaheEpisodeSource(
             headers["Cookie"] = if (raw.contains("cf_clearance=")) raw else "cf_clearance=$raw"
         }
         // Replay with the exact UA that minted the clearance — a
-        // clearance replayed under a different UA is void. EngineHttp
+        // clearance replayed under a different UA is void. CronetHttp
         // applies this map after its default UA, so it overrides it.
         clearanceUa?.takeIf { it.isNotBlank() }?.let { headers["User-Agent"] = it }
         headers.putAll(extra)
@@ -56,21 +56,28 @@ internal class PaheEpisodeSource(
     private suspend fun paheGet(path: String): HttpResponse? = withContext(Dispatchers.IO) {
         // Try hosts in order; a 403/empty body on one host is not
         // proof the API is down — the next host may answer.
+        // 2.0-dev1.5: return the LAST response a host actually gave
+        // (even a 403), not null, when every host answered with
+        // something — the caller can then tell a rejected session
+        // (challenge HTML / 403) from no answer at all (network
+        // down). Null now means only "no host answered".
+        var lastResp: HttpResponse? = null
         for (host in PAHE_HOSTS) {
             pace()
             try {
-                val resp = EngineHttp.requestWithRetry(
+                val resp = CronetHttp.requestWithRetry(
                     url = "https://$host$path",
                     headers = cookieHeaders(mapOf("Referer" to "https://$host/")),
                     timeoutMs = 8000,
                     followRedirects = true,
                 )
                 if (resp.code == 200 && resp.bytes.isNotEmpty()) return@withContext resp
+                lastResp = resp
             } catch (_: Exception) {
                 // Next host.
             }
         }
-        null
+        lastResp
     }
 
     private fun normalize(title: String): String =
@@ -332,7 +339,7 @@ internal class PaheEpisodeSource(
         for (url in candidates) {
             pace()
             try {
-                val resp = EngineHttp.requestWithRetry(
+                val resp = CronetHttp.requestWithRetry(
                     url = url,
                     headers = cookieHeaders(mapOf("Referer" to "https://animepahe.pw/")),
                     timeoutMs = 15_000,
@@ -381,7 +388,7 @@ internal class PaheEpisodeSource(
         val paheHost = PAHE_HOSTS.first()
         val winResp = try {
             pace()
-            EngineHttp.requestWithRetry(
+            CronetHttp.requestWithRetry(
                 url = paheWinUrl,
                 headers = cookieHeaders(mapOf("Referer" to "https://$paheHost/")),
                 timeoutMs = 10_000,
@@ -415,7 +422,7 @@ internal class PaheEpisodeSource(
         delay(2000) // ~2s human-like pause before the form POST.
         val postResp = try {
             pace()
-            EngineHttp.requestWithRetry(
+            CronetHttp.requestWithRetry(
                 url = postUrl,
                 method = "POST",
                 headers = cookieHeaders(
