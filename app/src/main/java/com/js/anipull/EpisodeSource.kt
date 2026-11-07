@@ -185,3 +185,15 @@ internal fun friendlyDownloadError(e: Exception): String = when (e) {
     is java.io.IOException -> e.message?.takeIf { it.isNotBlank() } ?: "Download failed — tap Retry."
     else -> "Download failed — tap Retry."
 }
+
+// 2.0-dev1.4: the episode LIST has its own mapper. The list load
+// used to reuse the download one, so a failed list told the user
+// "Download failed" — wrong action, wrong words. List failures
+// speak about the list.
+internal fun friendlyEpisodeListError(e: Exception): String = when (e) {
+    is java.net.SocketTimeoutException -> "Couldn't load the episode list — connection timed out. Tap Retry."
+    is java.net.UnknownHostException -> "Couldn't load the episode list — no connection. Tap Retry."
+    is org.json.JSONException -> "Couldn't read the episode list from Pahe — tap Retry."
+    is java.io.IOException -> e.message?.takeIf { it.isNotBlank() } ?: "Couldn't load the episode list — tap Retry."
+    else -> "Couldn't load the episode list — tap Retry."
+}

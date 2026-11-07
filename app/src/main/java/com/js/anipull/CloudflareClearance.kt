@@ -10,6 +10,8 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 // 2.0-dev1.3 CLEARANCE — on-device WebView clearance + cf_clearance
@@ -110,21 +112,30 @@ object CloudflareClearance {
             ?.removePrefix("cf_clearance=")?.takeIf { it.isNotBlank() }
     }
 
-    // After a VISIBLE WebView solve (user tapped the checkbox),
-    // harvest whatever the store now holds and persist it.
-    // Returns true if a fresh clearance was stored.
-    fun persistFromStore(context: Context): Boolean {
-        val value = readCookieFromStore() ?: return false
-        val ua = lastSeenUa ?: return false
-        save(context, Clearance(value, ua, System.currentTimeMillis()))
-        return true
+    // 2.0-dev1.4: the ONLY correct harvest check. A clearance counts
+    // as solved only when BOTH hold: the page is a real (non-
+    // challenge) page AND a cf_clearance cookie is in the store.
+    // Harvesting on the cookie alone is what broke Done in dev1.3
+    // — the user tapped Done while Cloudflare was still verifying,
+    // and the store held a stale/dead cookie (or none), so the next
+    // API call got the challenge page back and the list failed with
+    // a misleading "Download failed". Never harvest without this.
+    fun solvedClearance(webView: WebView): Clearance? {
+        val title = try { webView.title ?: "" } catch (_: Exception) { "" }
+        if (title.isBlank() || isChallengeTitle(title)) return null
+        val cookie = readCookieFromStore() ?: return null
+        val ua = try { webView.settings.userAgentString } catch (_: Exception) { null }?.takeIf { it.isNotBlank() } ?: return null
+        return Clearance(cookie, ua, System.currentTimeMillis())
     }
 
-    // The UA of the most recent WebView that loaded Pahe. The visible
-    // dialog's WebView sets this; the hidden solve reads its own UA
-    // directly. Only ever the app's own WebView UA, never a spoof.
-    @Volatile
-    private var lastSeenUa: String? = null
+    // Persist a clearance that was verified solved in a visible
+    // WebView (the check dialog). False = the check has not
+    // finished yet — the caller must NOT close the dialog.
+    fun persistSolved(webView: WebView, context: Context): Boolean {
+        val clearance = solvedClearance(webView) ?: return false
+        save(context, clearance)
+        return true
+    }
 
     // One shared WebView factory: real browser defaults, JS on (the
     // challenge needs it), DOM storage on, NO custom UA (the minted
@@ -144,7 +155,6 @@ object CloudflareClearance {
                 return null // pass through — never intercept during a challenge
             }
         }
-        lastSeenUa = webView.settings.userAgentString
         return webView
     }
 
@@ -166,11 +176,22 @@ object CloudflareClearance {
     // the main thread; safe to call from any coroutine. Returns
     // Failed (never throws) when there is no Activity to host the
     // WebView or the solve cannot complete.
+    // 2.0-dev1.4: concurrent ensures (detail section + download
+    // sheet) used to start TWO hidden solves at once — two WebViews
+    // hammering the challenge, racing the cookie store, and
+    // doubling the lag. One solve at a time now: a caller that
+    // arrives mid-solve waits and shares the result.
+    private val ensureMutex = Mutex()
+
     suspend fun ensureClearance(activity: Activity?): ClearanceResult {
         val ctx = activity ?: return ClearanceResult.Failed
         if (activity.isFinishing || activity.isDestroyed) return ClearanceResult.Failed
         loadStored(ctx)?.let { return ClearanceResult.Cleared(it) }
-        return solveHidden(activity)
+        return ensureMutex.withLock {
+            // Another caller may have stored one while we waited.
+            loadStored(ctx)?.let { return@withLock ClearanceResult.Cleared(it) }
+            solveHidden(activity)
+        }
     }
 
     private suspend fun solveHidden(activity: Activity): ClearanceResult {

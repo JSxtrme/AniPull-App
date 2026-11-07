@@ -82,7 +82,15 @@ internal class PaheEpisodeSource(
             val q = URLEncoder.encode(title.title, "UTF-8").replace("+", "%20")
             val searchResp = paheGet("/api?m=search&l=8&q=$q")
                 ?: return EpisodeResult.Failed("Pahe did not answer — the source may be down or the session expired.")
-            val data = JSONObject(searchResp.text).optJSONArray("data")
+            // 2.0-dev1.4: a challenge page is HTML with a 200 status —
+            // parsing it as JSON threw, and the list failed with a
+            // misleading "Download failed". A non-JSON answer means
+            // the session was rejected: say so honestly.
+            val searchBody = searchResp.text
+            if (!searchBody.trimStart().startsWith("{")) {
+                return EpisodeResult.Failed("Pahe is still showing its security check — the session didn't stick. Tap Retry to solve it again.")
+            }
+            val data = JSONObject(searchBody).optJSONArray("data")
                 ?: return EpisodeResult.Failed("Pahe search returned no results for \"${title.title}\".")
             val want = normalize(title.title)
             var bestSession: String? = null
@@ -120,6 +128,11 @@ internal class PaheEpisodeSource(
                     incomplete = true
                     break
                 }
+                // 2.0-dev1.4: same challenge-HTML guard as search —
+                // the session can die mid-list.
+                if (!resp.text.trimStart().startsWith("{")) {
+                    return EpisodeResult.Failed("Pahe is still showing its security check — the session didn't stick. Tap Retry to solve it again.")
+                }
                 try {
                     val root = JSONObject(resp.text)
                     lastPage = root.optInt("last_page", page)
@@ -146,7 +159,7 @@ internal class PaheEpisodeSource(
             episodes.sortBy { it.number }
             EpisodeResult.Loaded(episodes, incomplete)
         } catch (e: Exception) {
-            EpisodeResult.Failed(friendlyDownloadError(e))
+            EpisodeResult.Failed(friendlyEpisodeListError(e))
         }
     }
 

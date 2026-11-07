@@ -3608,6 +3608,22 @@ private suspend fun resolveAndEnqueue(
     }
 }
 
+// 2.0-dev1.4: hard bound on one episode-list attempt (clearance
+// solve + fetch). Past it, the section shows a timeout error with
+// Retry — never skeletons forever.
+// 2.0-dev1.4: one Retry pill for the episode section, shared by
+// the pending and failed states (it used to be inline in Failed
+// only, and pending was a dead end with no way to re-attempt).
+private const val EPISODE_LOAD_TIMEOUT_MS = 45_000L
+
+@Composable
+private fun RetryPill(onRetry: () -> Unit) {
+    Box(
+        modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, Pink, RoundedCornerShape(999.dp))
+            .clickable(onClick = onRetry).padding(horizontal = 16.dp, vertical = 9.dp),
+    ) { Text("Retry", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+}
+
 @Composable
 private fun EpisodeList(
     title: ApiTitle,
@@ -3629,22 +3645,37 @@ private fun EpisodeList(
     var rowErrors by remember(title.id) { mutableStateOf(mapOf<Int, String>()) }
     var showClearanceDialog by remember(title.id) { mutableStateOf(false) }
     val jobs by DownloadEngine.jobs.collectAsState()
+    // 2.0-dev1.4: let the poster flight land BEFORE creating a
+    // WebView. The first WebView init in a process is slow on the
+    // main thread, and it used to run mid-transition — that is why
+    // the flyout sometimes didn't play on the first tap (dev1.3
+    // regression). The episode load starts right after landing.
+    val transitionMs = LocalTransitionDurationMs.current
     LaunchedEffect(title.id, reloadKey) {
         result = null
         rowErrors = emptyMap()
         showClearanceDialog = false
-        // Clearance is ensured when the episode source is first
-        // needed (this section), never at app launch. Stored-and-
-        // valid returns instantly; otherwise a hidden WebView solves
-        // the check on this phone, silently. If the check needs a
-        // human tap, the dialog below surfaces the page instead.
-        val clearance = when (val r = CloudflareClearance.ensureClearance(context as? Activity)) {
-            is ClearanceResult.Cleared -> r.clearance
-            ClearanceResult.NeedsUserAction -> { showClearanceDialog = true; null }
-            ClearanceResult.Failed -> null
-        }
-        source = EpisodeSources.pahe(clearance?.cookieValue, clearance?.userAgent)
-        result = source.loadEpisodes(title)
+        kotlinx.coroutines.delay(transitionMs.toLong() + 100L)
+        // 2.0-dev1.4: hard 45s bound on the whole load (clearance
+        // solve + fetch). Before, a stuck solve or a slow host
+        // retry chain could hold the section on skeletons for
+        // minutes; now every path ends in rows, an honest error,
+        // or the check dialog — never skeletons forever.
+        result = kotlinx.coroutines.withTimeoutOrNull(EPISODE_LOAD_TIMEOUT_MS) {
+            // Clearance is ensured when the episode source is first
+            // needed (this section), never at app launch. Stored-and-
+            // valid returns instantly; otherwise a hidden WebView solves
+            // the check on this phone, silently. If the check needs a
+            // human tap, the dialog below surfaces the page instead.
+            val clearance = when (val r = CloudflareClearance.ensureClearance(context as? Activity)) {
+                is ClearanceResult.Cleared -> r.clearance
+                ClearanceResult.NeedsUserAction -> { showClearanceDialog = true; null }
+                ClearanceResult.Failed -> null
+            }
+            val src = EpisodeSources.pahe(clearance?.cookieValue, clearance?.userAgent)
+            source = src
+            src.loadEpisodes(title)
+        } ?: EpisodeResult.Failed("Episode list timed out — tap Retry.")
     }
     // Shown list: audio filter applies when it matches something,
     // otherwise the full list (never hide episodes on a guess).
@@ -3667,21 +3698,24 @@ private fun EpisodeList(
                 Box(modifier = Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(12.dp)).background(Card))
             }
         }
-        EpisodeResult.SourcePending -> Text(
-            "Episode list unavailable — the source connection is still pending. Episodes will load from AnimePahe once it lands; nothing is faked here.",
-            color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
-        )
+        EpisodeResult.SourcePending -> Column {
+            Text(
+                "Episode list unavailable — the source connection is still pending. Episodes will load from AnimePahe once it lands; nothing is faked here.",
+                color = Muted, fontSize = 13.sp, lineHeight = 19.sp,
+            )
+            Spacer(Modifier.height(8.dp))
+            // 2.0-dev1.4: pending used to be a dead end (no Retry).
+            // It re-attempts the whole chain — solve, then fetch.
+            RetryPill { reloadKey += 1 }
+        }
         is EpisodeResult.Failed -> Column {
             Text(r.message, color = Color(0xFFFF3B30), fontSize = 13.sp, lineHeight = 19.sp)
             Spacer(Modifier.height(8.dp))
-            Box(
-                modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, Pink, RoundedCornerShape(999.dp))
-                    // 2.0-dev1.3: the previous clearance evidently did
-                    // not work (or Pahe voided it), so drop it before
-                    // retrying — the reload re-solves fresh instead of
-                    // trusting a dead session again.
-                    .clickable { CloudflareClearance.clearStored(context); reloadKey += 1 }.padding(horizontal = 16.dp, vertical = 9.dp),
-            ) { Text("Retry", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+            // 2.0-dev1.3: the previous clearance evidently did
+            // not work (or Pahe voided it), so drop it before
+            // retrying — the reload re-solves fresh instead of
+            // trusting a dead session again.
+            RetryPill { CloudflareClearance.clearStored(context); reloadKey += 1 }
         }
         is EpisodeResult.Loaded -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("via ${source.sourceName}", color = Teal, fontSize = 12.sp)
@@ -3763,12 +3797,11 @@ private fun EpisodeList(
     // itself once so the user can tap the checkbox, then Done.
     if (showClearanceDialog) {
         ClearanceWebViewDialog(
-            onDone = {
-                showClearanceDialog = false
-                // Harvest whatever the visible WebView's session now
-                // holds; if it cleared, reload the list with it.
-                if (CloudflareClearance.persistFromStore(context)) reloadKey += 1
-            },
+            // 2.0-dev1.4: the dialog itself verifies the check
+            // passed and persists the session before calling Done
+            // — Done now always means "reload with a working
+            // session", never a blind harvest.
+            onDone = { showClearanceDialog = false; reloadKey += 1 },
             onCancel = { showClearanceDialog = false },
         )
     }
@@ -3782,6 +3815,32 @@ private fun EpisodeList(
 // Back / outside-tap / Cancel all dismiss without claiming success.
 @Composable
 private fun ClearanceWebViewDialog(onDone: () -> Unit, onCancel: () -> Unit) {
+    // 2.0-dev1.4: Done used to harvest blind — the user could tap
+    // it while Cloudflare was still verifying, and the app would
+    // reload with a dead session and fail again (the Retry loop
+    // JS hit on mobile data, where the check is interactive every
+    // time). Now the dialog verifies the check actually passed
+    // before finishing: it auto-completes the moment the page is
+    // real and the cookie is set, and Done refuses to close while
+    // the check is still running.
+    val context = LocalContext.current
+    val webViewHolder = remember { arrayOf<android.webkit.WebView?>(null) }
+    var hint by remember { mutableStateOf<String?>(null) }
+    var finished by remember { mutableStateOf(false) }
+    fun tryFinish(): Boolean {
+        if (finished) return true
+        val webView = webViewHolder[0] ?: return false
+        if (!CloudflareClearance.persistSolved(webView, context)) return false
+        finished = true
+        onDone()
+        return true
+    }
+    LaunchedEffect(Unit) {
+        while (!finished) {
+            kotlinx.coroutines.delay(500)
+            if (tryFinish()) break
+        }
+    }
     Dialog(onDismissRequest = onCancel) {
         Column(
             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(20.dp),
@@ -3795,14 +3854,19 @@ private fun ClearanceWebViewDialog(onDone: () -> Unit, onCancel: () -> Unit) {
             Spacer(Modifier.height(12.dp))
             AndroidView(
                 factory = { ctx ->
-                    CloudflareClearance.createPaheWebView(ctx).apply { loadUrl("https://animepahe.pw/") }
+                    CloudflareClearance.createPaheWebView(ctx).apply { webViewHolder[0] = this; loadUrl("https://animepahe.pw/") }
                 },
                 onRelease = { webView ->
+                    webViewHolder[0] = null
                     try { webView.stopLoading() } catch (_: Exception) { }
                     try { webView.destroy() } catch (_: Exception) { }
                 },
                 modifier = Modifier.fillMaxWidth().height(380.dp).clip(RoundedCornerShape(12.dp)).background(Color.Black),
             )
+            if (hint != null) {
+                Spacer(Modifier.height(12.dp))
+                Text(hint!!, color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            }
             Spacer(Modifier.height(16.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -3815,7 +3879,7 @@ private fun ClearanceWebViewDialog(onDone: () -> Unit, onCancel: () -> Unit) {
                 ) { Text("Cancel", color = Pink, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
                 Box(
                     modifier = Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).background(Pink)
-                        .clickable(onClick = onDone).padding(vertical = 11.dp),
+                        .clickable { if (!tryFinish()) hint = "Still checking — wait for the checkbox to finish, then tap Done." }.padding(vertical = 11.dp),
                     contentAlignment = Alignment.Center,
                 ) { Text("Done", color = Color.White, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
             }
