@@ -69,21 +69,18 @@
     ]
   },
   "dev": {
-    "versionCode": 55,
-    "versionName": "2.0-dev1.4",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.4/anipull-2.0-dev1.4.apk",
-    "sha256": "aa7337ff82b1892181c508adae27ed36f1a4d8afc38b1b94f458aa7b593203af",
+    "versionCode": 56,
+    "versionName": "2.0-dev1.5",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.5/anipull-2.0-dev1.5.apk",
+    "sha256": "bcffe47aaa298313661e32b580f98904cfd4e1bcb6657bbff954be591e5bc63a",
     "features": [
-      "The 'One quick check' dialog now finishes by itself the moment the security check passes \u2014 and the Done button won't close it while the check is still running, so a tap can no longer grab a dead session",
-      "The episode list shows a Retry button even when the source is still pending, instead of leaving you stuck"
+      "Pahe requests now go through Cronet \u2014 Chromium's own network stack, the same one as the WebView that solves the security check \u2014 so the session cookie is replayed with Chrome's TLS fingerprint instead of Java's",
+      "Episode-list errors now say which stage failed: no session was saved at all, a saved session was rejected, or Pahe answered but nothing matched \u2014 so the next report pinpoints the failure from the words alone"
     ],
     "fixes": [
-      "Fixed the episode list hanging on skeletons forever \u2014 every load now ends within 45 seconds in episodes, an honest error, or the check dialog",
-      "Fixed Done never producing a working session \u2014 the dialog now verifies the check actually passed before saving the session, and the list detects a rejected session instead of failing with a misleading error",
-      "Fixed episode-list errors saying 'Download failed' \u2014 they now say the list couldn't load",
-      "Fixed the poster flyout sometimes not playing on the first tap \u2014 the app no longer starts the security check while the transition is still running",
-      "Fixed the detail page and the download sheet solving the security check twice at once",
-      "Fixed the download sheet showing a stale 'source pending' state \u2014 it now shares the same session as the detail page"
+      "Fixed the hidden security check never finishing on its own \u2014 the 1x1 invisible solve view is throttled by Android and too small for the challenge to run in; it now solves full-size behind the app's UI",
+      "Fixed the session never sticking after the checkbox tap \u2014 the replayed calls used Java's TLS fingerprint, which Cloudflare can reject even with a valid cookie; they now use Cronet, the same Chromium stack that minted the clearance",
+      "Fixed a rejected session being reported as 'Pahe did not answer' \u2014 the list now tells a rejected session apart from the source being down"
     ]
   }
 }
