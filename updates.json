@@ -69,16 +69,21 @@
     ]
   },
   "dev": {
-    "versionCode": 54,
-    "versionName": "2.0-dev1.3",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.3/anipull-2.0-dev1.3.apk",
-    "sha256": "21f3352098b87e38936e98237759720931288bd554f5713084af4440c788329d",
+    "versionCode": 55,
+    "versionName": "2.0-dev1.4",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.4/anipull-2.0-dev1.4.apk",
+    "sha256": "aa7337ff82b1892181c508adae27ed36f1a4d8afc38b1b94f458aa7b593203af",
     "features": [
-      "Cloudflare clearance is live \u2014 the episode list now loads from AnimePahe: when you open a detail page, the app solves the site's security check in a hidden browser view on your own phone and reuses that session for episode lists and downloads (no server, no account, nothing leaves the phone)",
-      "If the security check ever needs a tap, the app shows AnimePahe's own page once so you can tap the checkbox yourself, then carries on \u2014 instead of failing silently"
+      "The 'One quick check' dialog now finishes by itself the moment the security check passes \u2014 and the Done button won't close it while the check is still running, so a tap can no longer grab a dead session",
+      "The episode list shows a Retry button even when the source is still pending, instead of leaving you stuck"
     ],
     "fixes": [
-      "Downloads no longer fail with 'session not ready' when the Pahe session expired \u2014 the app silently re-solves the check before resolving a download, and Retry on a failed episode list drops the dead session and solves fresh"
+      "Fixed the episode list hanging on skeletons forever \u2014 every load now ends within 45 seconds in episodes, an honest error, or the check dialog",
+      "Fixed Done never producing a working session \u2014 the dialog now verifies the check actually passed before saving the session, and the list detects a rejected session instead of failing with a misleading error",
+      "Fixed episode-list errors saying 'Download failed' \u2014 they now say the list couldn't load",
+      "Fixed the poster flyout sometimes not playing on the first tap \u2014 the app no longer starts the security check while the transition is still running",
+      "Fixed the detail page and the download sheet solving the security check twice at once",
+      "Fixed the download sheet showing a stale 'source pending' state \u2014 it now shares the same session as the detail page"
     ]
   }
 }
