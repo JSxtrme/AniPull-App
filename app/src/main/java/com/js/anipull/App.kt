@@ -3479,8 +3479,11 @@ private fun DownloadJobRow(job: DownloadJob) {
                 Box(modifier = Modifier.fillMaxWidth(progress).height(6.dp).clip(RoundedCornerShape(999.dp)).background(Pink))
             }
             Spacer(Modifier.height(6.dp))
+            // 2.0-dev1.7: the resolving server, at a glance, for
+            // active jobs — alongside progress/error. FAILED keeps
+            // its error text too.
             Text(
-                when (job.state) {
+                (if (job.serverNumber in 1..9) "Server ${job.serverNumber} · " else "") + when (job.state) {
                     JobState.DOWNLOADING -> "${job.progress}% · ${"%.1f".format(job.speedMBps)} MB/s"
                     JobState.PAUSED -> "Paused · ${job.progress}%"
                     JobState.QUEUED -> "Queued…"
@@ -3594,10 +3597,13 @@ private fun preferredServerNumber(context: android.content.Context): Int =
         .getInt("preferred_server", 0)
 
 // Candidate order: the preferred server first (when one is picked),
-// then the rest in priority order 1..9. 0 = Auto.
-private fun candidateServerNumbers(preferred: Int): List<Int> {
-    val all = (1..9).toList()
-    return if (preferred in 1..9) listOf(preferred) + all.filter { it != preferred } else all
+// then the rest in the user's Sources priority order (default
+// 1..9 — easiest/reliable first, clearance-gated server 3 lower).
+// 0 = Auto. The persisted order comes from ServerRegistry, so
+// Settings and the failover chain can never drift apart.
+private fun candidateServerNumbers(context: android.content.Context, preferred: Int): List<Int> {
+    val ordered = ServerRegistry.orderedNumbers(context)
+    return if (preferred in 1..9) listOf(preferred) + ordered.filter { it != preferred } else ordered
 }
 
 private fun serverChoiceLabel(number: Int): String =
@@ -3640,7 +3646,7 @@ private suspend fun loadFallbackEpisodes(
     onNeedsClearance: () -> Unit,
 ): Pair<EpisodeResult, Int?> {
     CronetHttp.setContext(context)
-    val numbers = candidateServerNumbers(preferredServer)
+    val numbers = candidateServerNumbers(context, preferredServer)
     val clearance = paheClearanceIfNeeded(context, 3 in numbers)
     var firstError: String? = null
     var sawPending = false
@@ -3680,6 +3686,8 @@ private suspend fun resolveAndEnqueue(
     anilistId: Long? = null,
     fromMediaIndex: Boolean = false,
     listServer: Int? = null, // server that served the fallback list, tried first
+    wifiOverride: Boolean = false, // true = an explicit per-episode confirm consented to any network
+    onAttempt: ((Int) -> Unit)? = null, // fires with each server number as it is tried
 ): ResolveOutcome {
     // A clearance can expire between the list load and the tap, so
     // re-ensure it here (stored-and-valid returns instantly, no
@@ -3688,36 +3696,42 @@ private suspend fun resolveAndEnqueue(
     // launch; this is the belt-and-braces copy for the download path).
     CronetHttp.setContext(context)
     val preferred = serverOverride ?: preferredServerNumber(context)
-    val numbers = candidateServerNumbers(preferred).let { ordered ->
+    val numbers = candidateServerNumbers(context, preferred).let { ordered ->
         if (listServer != null) listOf(listServer) + ordered.filter { it != listServer } else ordered
     }
     val clearance = paheClearanceIfNeeded(context, 3 in numbers)
     val candidates = numbers.mapNotNull { ServerRegistry.build(it, clearance.cookie, clearance.userAgent) }
     if (candidates.isEmpty()) return ResolveOutcome.Error("No server available — tap Retry.")
-    val link = try {
+    // 2.0-dev1.7: resolveWithFailover returns ResolvedDownload —
+    // the link PLUS the winning server (null when all failed).
+    // onAttempt is passed through so the UI can show live progress
+    // ("Resolving… · Server N"); the serving server's direct
+    // resolveDownload is also an attempt, so it fires too.
+    val resolved: ResolvedDownload = try {
         if (fromMediaIndex) {
             // Media-index rows carry no sessions — NEVER resolveDownload
             // with empty sessions. Resolve by (series + episode number)
             // with failover across the chain.
-            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality)
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
         } else if (listServer != null) {
             // The server that served this list resolves its own
             // episode the old way first; anything else fails over
             // to resolveEpisode across the whole chain (including
             // the serving server, by episode number).
             val serving = candidates.firstOrNull { it.serverNumber == listServer }
+            if (serving != null) onAttempt?.invoke(listServer)
             val first = serving?.let {
                 try { it.resolveDownload(episode, quality) } catch (e: Exception) { ResolvedLink.Failed(friendlyDownloadError(e)) }
             }
-            if (first != null && first !is ResolvedLink.Failed) first
-            else MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality)
+            if (first != null && first !is ResolvedLink.Failed) ResolvedDownload(first, listServer)
+            else MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
         } else {
-            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality)
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
         }
     } catch (e: Exception) {
-        ResolvedLink.Failed(friendlyDownloadError(e))
+        ResolvedDownload(ResolvedLink.Failed(friendlyDownloadError(e)), null)
     }
-    return when (link) {
+    return when (val link = resolved.link) {
         is ResolvedLink.Failed -> {
             // The whole chain failed and a human check is still
             // pending for server 3 — solving it may unlock that
@@ -3725,7 +3739,12 @@ private suspend fun resolveAndEnqueue(
             if (clearance.needsUserAction) ResolveOutcome.NeedsClearance
             else ResolveOutcome.Error(link.message)
         }
-        else -> { DownloadEngine.enqueue(context, title, episode, quality, link); ResolveOutcome.Enqueued }
+        else -> {
+            // The winning server rides on the job so Downloads can
+            // show it ("Server N") at a glance.
+            DownloadEngine.enqueue(context, title, episode, quality, link, serverNumber = resolved.serverNumber ?: 0, wifiOverride = wifiOverride)
+            ResolveOutcome.Enqueued
+        }
     }
 }
 
@@ -3743,6 +3762,110 @@ private fun RetryPill(onRetry: () -> Unit) {
         modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, Pink, RoundedCornerShape(999.dp))
             .clickable(onClick = onRetry).padding(horizontal = 16.dp, vertical = 9.dp),
     ) { Text("Retry", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+}
+
+// 2.0-dev1.7: tap feedback — a short toast when a download is
+// confirmed/enqueued (and when a resolve fails, carrying the
+// message). Toasts must post on the main thread; callers run in
+// Main-scope coroutines, but the Handler post makes that a
+// guarantee rather than an assumption.
+private fun showToast(context: android.content.Context, message: String) {
+    android.os.Handler(android.os.Looper.getMainLooper()).post {
+        Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+    }
+}
+
+// 2.0-dev1.7: per-episode confirm sheet — tapping an episode
+// row / grid cell NO LONGER downloads immediately. It opens this
+// sheet instead: episode title + "Episode N", Quality chips
+// (360/480/720/1080), Sub/Dub, and a Server row (Auto / Server
+// 1..9), all pre-selected from the caller's current choices (the
+// Settings prefs in detail, the DownloadSheet's own chips inside
+// the sheet). Only the confirm button pulls. Chip patterns reuse
+// DownloadSheet's OutlinedButton rows; no source names anywhere —
+// servers are "Server N" only, as everywhere else.
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun EpisodeDownloadSheet(
+    row: EpisodeRow,
+    title: ApiTitle,
+    initialQuality: String, // "1080" etc, no "p" suffix
+    initialAudio: String, // "Sub" / "Dub"
+    initialServer: Int, // 0 = Auto
+    onDismiss: () -> Unit,
+    onConfirm: (quality: String, audio: String, server: Int) -> Unit,
+) {
+    var quality by remember(row.number) { mutableStateOf(initialQuality) }
+    var audio by remember(row.number) { mutableStateOf(initialAudio) }
+    var server by remember(row.number) { mutableStateOf(initialServer) }
+    Dialog(onDismissRequest = onDismiss) {
+        Column(
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(20.dp),
+        ) {
+            Text(
+                row.title ?: "Episode ${row.number}",
+                color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont,
+                maxLines = 2, overflow = TextOverflow.Ellipsis,
+            )
+            if (row.title != null) {
+                Spacer(Modifier.height(4.dp))
+                Text("Episode ${row.number}", color = Muted, fontSize = 13.sp)
+            }
+            Spacer(Modifier.height(16.dp))
+            Text("Quality", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("360", "480", "720", "1080").forEach { q ->
+                    OutlinedButton(
+                        onClick = { quality = q },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (quality == q) Pink else Color.Transparent,
+                            contentColor = Color.White,
+                        ),
+                    ) { Text("${q}p") }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("Audio", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf("Sub", "Dub").forEach { a ->
+                    OutlinedButton(
+                        onClick = { audio = a },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (audio == a) Pink else Color.Transparent,
+                            contentColor = Color.White,
+                        ),
+                    ) { Text(a) }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+            Text("Server", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                (listOf(0 to "Auto") + (1..9).map { it to "Server $it" }).forEach { (n, label) ->
+                    OutlinedButton(
+                        onClick = { server = n },
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (server == n) Pink else Color.Transparent,
+                            contentColor = Color.White,
+                        ),
+                    ) { Text(label) }
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                if (server == 0) "Auto tries servers in order until one works." else serverChoiceLabel(server),
+                color = Muted, fontSize = 12.sp,
+            )
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = { onConfirm(quality, audio, server) },
+                colors = ButtonDefaults.buttonColors(containerColor = Pink),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text("Download Episode ${row.number}", color = OnAccent, fontWeight = FontWeight.Bold) }
+        }
+    }
 }
 
 // One row for both list kinds. Media-index rows carry no sessions
@@ -3769,6 +3892,7 @@ private data class PendingPull(
     val anilistId: Long?,
     val fromMediaIndex: Boolean,
     val listServer: Int?,
+    val wifiOverride: Boolean = false,
 )
 
 @Composable
@@ -3795,6 +3919,17 @@ private fun EpisodeList(
     var fallbackServer by remember(title.id) { mutableStateOf<Int?>(null) }
     var reloadKey by remember(title.id) { mutableStateOf(0) }
     var resolving by remember(title.id) { mutableStateOf(setOf<Int>()) }
+    // 2.0-dev1.7: which server the in-flight resolve is currently
+    // trying, per episode — drives "Resolving… · Server N" on the
+    // row/cell. Cleared when the pull finishes.
+    var resolvingServer by remember(title.id) { mutableStateOf(mapOf<Int, Int>()) }
+    // 2.0-dev1.7: AniList episode-count fallback (third step, after
+    // the media index AND the server list both come up empty).
+    var anilistResult by remember(title.id) { mutableStateOf<AniListCount?>(null) }
+    // 2.0-dev1.7: long-press multi-select (episode numbers) + the
+    // per-episode confirm sheet. A tap never downloads directly.
+    var selected by remember(title.id) { mutableStateOf(setOf<Int>()) }
+    var confirmRow by remember(title.id) { mutableStateOf<EpisodeRow?>(null) }
     var rowErrors by remember(title.id) { mutableStateOf(mapOf<Int, String>()) }
     var showClearanceDialog by remember(title.id) { mutableStateOf(false) }
     var pendingPull by remember(title.id) { mutableStateOf<PendingPull?>(null) }
@@ -3813,6 +3948,10 @@ private fun EpisodeList(
         mediaResult = null
         fallbackResult = null
         fallbackServer = null
+        anilistResult = null
+        resolvingServer = emptyMap()
+        selected = emptySet()
+        confirmRow = null
         rowErrors = emptyMap()
         showClearanceDialog = false
         pendingPull = null
@@ -3842,6 +3981,24 @@ private fun EpisodeList(
             } ?: (EpisodeResult.Failed("Episode list timed out — tap Retry.") to null)
             fallbackResult = res
             fallbackServer = server
+            // 2.0-dev1.7: third step — the server list ALSO came up
+            // empty (Failed / SourcePending with no list / Loaded
+            // with an empty list). Ask AniList for the episode
+            // count only; on Count the UI builds bare numbered
+            // rows (no titles/stills). On NotFound/Failed the
+            // honest error + Retry below stays.
+            val fallbackExhausted = res is EpisodeResult.Failed ||
+                res is EpisodeResult.SourcePending ||
+                (res as? EpisodeResult.Loaded)?.episodes.isNullOrEmpty() == true
+            if (fallbackExhausted) {
+                anilistResult = kotlinx.coroutines.withTimeoutOrNull(EPISODE_LOAD_TIMEOUT_MS) {
+                    try {
+                        AniList.episodeCount(context, title)
+                    } catch (e: Exception) {
+                        AniListCount.Failed(e.message ?: "Couldn't load the episode list — tap Retry.")
+                    }
+                } ?: AniListCount.Failed("Episode list timed out — tap Retry.")
+            }
         }
     }
     // Unified rows. Media-index rows are synthetic EpisodeInfos
@@ -3853,6 +4010,8 @@ private fun EpisodeList(
     val mediaLoaded = mediaResult as? MediaIndexResult.Loaded
     val fallbackLoaded = fallbackResult as? EpisodeResult.Loaded
     val mediaFailed = mediaResult as? MediaIndexResult.Failed
+    // 2.0-dev1.7: AniList count fallback (see the load chain above).
+    val anilistCount = anilistResult as? AniListCount.Count
     val rows: List<EpisodeRow>? = when {
         mediaLoaded != null -> mediaLoaded.episodes.map { me ->
             EpisodeRow(
@@ -3862,7 +4021,7 @@ private fun EpisodeList(
                 info = EpisodeInfo(me.number, me.title, me.duration, pullAudio, fansub = null, episodeSession = "", animeSession = ""),
             )
         }
-        fallbackLoaded != null -> {
+        fallbackLoaded != null && fallbackLoaded.episodes.isNotEmpty() -> {
             val filterCode = audioFilter?.let { audioCode(it) }
             val eps = if (filterCode == null) fallbackLoaded.episodes
                 else fallbackLoaded.episodes.filter { it.audio.equals(filterCode, ignoreCase = true) }.takeIf { it.isNotEmpty() } ?: fallbackLoaded.episodes
@@ -3874,38 +4033,131 @@ private fun EpisodeList(
                 )
             }
         }
+        // 2.0-dev1.7: bare numbered rows from the AniList count —
+        // no titles, durations or stills. fromMediaIndex = true so
+        // downloads resolve by episode number through the existing
+        // decoupled path (synthetic EpisodeInfo, empty sessions).
+        anilistCount != null -> (1..anilistCount.aired).map { n ->
+            EpisodeRow(
+                number = n, title = null, duration = null,
+                audio = pullAudio, still = null, fromMediaIndex = true,
+                anilistId = anilistCount.anilistId,
+                info = EpisodeInfo(n, null, null, pullAudio, fansub = null, episodeSession = "", animeSession = ""),
+            )
+        }
         else -> null
     }
-    LaunchedEffect(mediaResult, fallbackResult, audioFilter, pullAudio) {
+    LaunchedEffect(mediaResult, fallbackResult, anilistResult, audioFilter, pullAudio) {
         val eps = rows ?: return@LaunchedEffect
         onLoaded?.invoke(eps.map { it.info })
-        onListMeta?.invoke(mediaLoaded?.anilistId, mediaLoaded != null, fallbackServer)
+        // Bare rows carry the AniList id too, so the season loop
+        // resolves them by number like media-index rows.
+        val bareAnilistId = anilistCount?.anilistId
+        onListMeta?.invoke(mediaLoaded?.anilistId ?: bareAnilistId, mediaLoaded != null || bareAnilistId != null, fallbackServer)
     }
-    // One pull path for list rows, grid cells and the retry after
-    // Done — the sheet season loop goes through resolveAndEnqueue
-    // directly, with the same server override.
-    fun pull(row: EpisodeRow) {
+    // One pull path for list rows, grid cells, the multi-select
+    // batch and the retry after Done — the sheet season loop goes
+    // through resolveAndEnqueue directly, with the same server
+    // override. runPull owns the resolving/resolvingServer/error/
+    // clearance bookkeeping; callers add their own toasts.
+    suspend fun runPull(
+        episode: EpisodeInfo,
+        anilistId: Long?,
+        fromMediaIndex: Boolean,
+        listServer: Int?,
+        quality: String,
+        serverOverride: Int?,
+        wifiOverride: Boolean,
+        showDialogOnClearance: Boolean = true,
+    ): ResolveOutcome {
+        resolving = resolving + episode.number
+        rowErrors = rowErrors - episode.number
+        val outcome = resolveAndEnqueue(
+            context, title, episode, quality,
+            serverOverride = serverOverride,
+            anilistId = anilistId,
+            fromMediaIndex = fromMediaIndex,
+            listServer = listServer,
+            wifiOverride = wifiOverride,
+            onAttempt = { n -> resolvingServer = resolvingServer + (episode.number to n) },
+        )
+        resolving = resolving - episode.number
+        resolvingServer = resolvingServer - episode.number
+        when (outcome) {
+            ResolveOutcome.Enqueued -> Unit
+            is ResolveOutcome.Error -> rowErrors = rowErrors + (episode.number to outcome.message)
+            ResolveOutcome.NeedsClearance -> {
+                pendingPull = PendingPull(episode, quality, serverOverride, anilistId, fromMediaIndex, listServer, wifiOverride)
+                if (showDialogOnClearance) showClearanceDialog = true
+            }
+        }
+        return outcome
+    }
+    // 2.0-dev1.7: a single confirmed episode — explicit per-episode
+    // consent, so it may run on any network (wifiOverride = true).
+    // The confirm sheet's choices override the list defaults; the
+    // audio choice is baked into a copy of the EpisodeInfo because
+    // the resolve path reads episode.audio.
+    fun pull(row: EpisodeRow, qualityOverride: String? = null, audioOverride: String? = null, serverChoiceOverride: Int? = null) {
         scope.launch {
-            resolving = resolving + row.number
-            rowErrors = rowErrors - row.number
-            val outcome = resolveAndEnqueue(
-                context, title, row.info, quality,
-                serverOverride = serverOverride,
-                anilistId = row.anilistId,
-                fromMediaIndex = row.fromMediaIndex,
-                listServer = if (row.fromMediaIndex) null else fallbackServer,
+            val ep = if (audioOverride != null) row.info.copy(audio = audioCode(audioOverride)) else row.info
+            val outcome = runPull(
+                ep, row.anilistId, row.fromMediaIndex,
+                if (row.fromMediaIndex) null else fallbackServer,
+                qualityOverride ?: quality,
+                serverChoiceOverride ?: serverOverride,
+                wifiOverride = true,
             )
-            resolving = resolving - row.number
             when (outcome) {
-                ResolveOutcome.Enqueued -> Unit
-                is ResolveOutcome.Error -> rowErrors = rowErrors + (row.number to outcome.message)
-                ResolveOutcome.NeedsClearance -> {
-                    pendingPull = PendingPull(row.info, quality, serverOverride, row.anilistId, row.fromMediaIndex, if (row.fromMediaIndex) null else fallbackServer)
-                    showClearanceDialog = true
-                }
+                ResolveOutcome.Enqueued -> showToast(context, "Downloading Episode ${row.number}")
+                is ResolveOutcome.Error -> showToast(context, outcome.message)
+                ResolveOutcome.NeedsClearance -> Unit
             }
         }
     }
+    // 2.0-dev1.7: multi-select batch — every selected episode with
+    // the Settings-default quality/audio/server, one toast at the
+    // end, then the selection clears. Single-episode download is
+    // the acceptance bar for this build; the batch is wired and
+    // its phone testing comes later.
+    fun downloadSelected() {
+        val chosen = rows?.filter { selected.contains(it.number) } ?: return
+        if (chosen.isEmpty()) return
+        val q = prefs.getString("quality", "1080p")?.removeSuffix("p")?.takeIf { it.isNotBlank() } ?: "1080"
+        val a = prefs.getString("language", "Sub") ?: "Sub"
+        val s = preferredServerNumber(context)
+        scope.launch {
+            var ok = 0
+            var firstError: String? = null
+            for (row in chosen) {
+                val outcome = runPull(
+                    row.info.copy(audio = audioCode(a)), row.anilistId, row.fromMediaIndex,
+                    if (row.fromMediaIndex) null else fallbackServer,
+                    q, s, wifiOverride = true,
+                )
+                when (outcome) {
+                    ResolveOutcome.Enqueued -> ok++
+                    is ResolveOutcome.Error -> if (firstError == null) firstError = outcome.message
+                    ResolveOutcome.NeedsClearance -> break
+                }
+            }
+            selected = emptySet()
+            if (ok > 0) showToast(context, "Downloading $ok episode${if (ok == 1) "" else "s"}")
+            else if (firstError != null) showToast(context, firstError)
+        }
+    }
+    fun toggleSelect(number: Int) {
+        selected = if (selected.contains(number)) selected - number else selected + number
+    }
+    // 2.0-dev1.7: NO instant download. A tap opens the confirm
+    // sheet; while a selection is active it toggles instead. Rows
+    // with a live job (or mid-resolve) have nothing to pull.
+    fun onRowTap(row: EpisodeRow) {
+        if (selected.isNotEmpty()) { toggleSelect(row.number); return }
+        if (jobForRow(jobs, title.title, row) != null || resolving.contains(row.number)) return
+        confirmRow = row
+    }
+    fun onRowLongPress(row: EpisodeRow) { toggleSelect(row.number) }
     // Skeletons while the index loads, and while the server
     // fallback loads after a NotFound. Never skeletons forever:
     // every path ends in rows, an honest error, or the check dialog.
@@ -3922,10 +4174,39 @@ private fun EpisodeList(
                 title = title, rows = rows ?: emptyList(), jobs = jobs, note = null,
                 episodeView = episodeView,
                 onViewChange = { episodeView = it; prefs.edit().putString("episode_view", it).apply() },
-                resolving = resolving, rowErrors = rowErrors, onPull = { pull(it) },
+                resolving = resolving, resolvingServer = resolvingServer, rowErrors = rowErrors,
+                selected = selected, onRowTap = { onRowTap(it) }, onRowLongPress = { onRowLongPress(it) },
+                onDownloadSelected = { downloadSelected() }, onClearSelection = { selected = emptySet() },
             )
         }
-        mediaResult is MediaIndexResult.NotFound -> when (val f = fallbackResult) {
+        mediaResult is MediaIndexResult.NotFound -> {
+            // 2.0-dev1.7: bare AniList-count rows win over the
+            // fallback error/pending states when the count landed.
+            // While the count is still loading (fallback exhausted
+            // but anilistResult == null), skeletons — never a flash
+            // of the fallback error first.
+            val fallbackExhausted = fallbackResult is EpisodeResult.Failed ||
+                fallbackResult is EpisodeResult.SourcePending ||
+                (fallbackResult as? EpisodeResult.Loaded)?.episodes.isNullOrEmpty() == true
+            if (anilistCount != null) {
+                EpisodeRowsColumn(
+                    title = title, rows = rows ?: emptyList(), jobs = jobs,
+                    // No source name in the UI — the count's origin
+                    // is never named.
+                    note = "Titles and stills aren't available for this title — showing episode numbers.",
+                    episodeView = episodeView,
+                    onViewChange = { episodeView = it; prefs.edit().putString("episode_view", it).apply() },
+                    resolving = resolving, resolvingServer = resolvingServer, rowErrors = rowErrors,
+                    selected = selected, onRowTap = { onRowTap(it) }, onRowLongPress = { onRowLongPress(it) },
+                    onDownloadSelected = { downloadSelected() }, onClearSelection = { selected = emptySet() },
+                )
+            } else if (fallbackResult == null || (fallbackExhausted && anilistResult == null)) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    repeat(3) {
+                        Box(modifier = Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(12.dp)).background(Card))
+                    }
+                }
+            } else when (val f = fallbackResult) {
             null -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 repeat(3) {
                     Box(modifier = Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(12.dp)).background(Card))
@@ -3959,8 +4240,11 @@ private fun EpisodeList(
                     title = title, rows = rows ?: emptyList(), jobs = jobs, note = note,
                     episodeView = episodeView, incomplete = f.incomplete,
                     onViewChange = { episodeView = it; prefs.edit().putString("episode_view", it).apply() },
-                    resolving = resolving, rowErrors = rowErrors, onPull = { pull(it) },
+                    resolving = resolving, resolvingServer = resolvingServer, rowErrors = rowErrors,
+                    selected = selected, onRowTap = { onRowTap(it) }, onRowLongPress = { onRowLongPress(it) },
+                    onDownloadSelected = { downloadSelected() }, onClearSelection = { selected = emptySet() },
                 )
+            }
             }
         }
         mediaFailed != null -> Column {
@@ -3989,20 +4273,39 @@ private fun EpisodeList(
                 pendingPull = null
                 if (retry != null) {
                     scope.launch {
-                        resolving = resolving + retry.episode.number
-                        val outcome = resolveAndEnqueue(
-                            context, title, retry.episode, retry.quality,
-                            serverOverride = retry.serverOverride,
-                            anilistId = retry.anilistId,
-                            fromMediaIndex = retry.fromMediaIndex,
-                            listServer = retry.listServer,
+                        val outcome = runPull(
+                            retry.episode, retry.anilistId, retry.fromMediaIndex,
+                            retry.listServer, retry.quality, retry.serverOverride,
+                            retry.wifiOverride, showDialogOnClearance = false,
                         )
-                        resolving = resolving - retry.episode.number
-                        if (outcome is ResolveOutcome.Error) rowErrors = rowErrors + (retry.episode.number to outcome.message)
+                        when (outcome) {
+                            ResolveOutcome.Enqueued -> showToast(context, "Downloading Episode ${retry.episode.number}")
+                            is ResolveOutcome.Error -> showToast(context, outcome.message)
+                            ResolveOutcome.NeedsClearance -> Unit
+                        }
                     }
                 }
             },
             onCancel = { showClearanceDialog = false; pendingPull = null },
+        )
+    }
+    // 2.0-dev1.7: the per-episode confirm sheet. Pre-selections are
+    // this list's current choices: the Settings prefs in detail
+    // (quality param / language pref / preferred_server), the
+    // DownloadSheet's own chips inside the sheet (quality /
+    // audioFilter / serverOverride params). Confirm pulls with the
+    // sheet's choices; dismiss pulls nothing.
+    confirmRow?.let { row ->
+        EpisodeDownloadSheet(
+            row = row, title = title,
+            initialQuality = quality,
+            initialAudio = audioFilter ?: (prefs.getString("language", "Sub") ?: "Sub"),
+            initialServer = serverOverride ?: preferredServerNumber(context),
+            onDismiss = { confirmRow = null },
+            onConfirm = { q, a, s ->
+                confirmRow = null
+                pull(row, qualityOverride = q, audioOverride = a, serverChoiceOverride = s)
+            },
         )
     }
 }
@@ -4055,8 +4358,13 @@ private fun EpisodeRowsColumn(
     incomplete: Boolean = false,
     onViewChange: (String) -> Unit,
     resolving: Set<Int>,
+    resolvingServer: Map<Int, Int> = emptyMap(),
     rowErrors: Map<Int, String>,
-    onPull: (EpisodeRow) -> Unit,
+    selected: Set<Int> = emptySet(),
+    onRowTap: (EpisodeRow) -> Unit,
+    onRowLongPress: (EpisodeRow) -> Unit,
+    onDownloadSelected: (() -> Unit)? = null,
+    onClearSelection: (() -> Unit)? = null,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(
@@ -4068,7 +4376,27 @@ private fun EpisodeRowsColumn(
             else Spacer(Modifier.weight(1f))
             EpisodeViewToggle(episodeView, onViewChange)
         }
+        // 2.0-dev1.7: multi-select hint (long-press) + the batch
+        // action, which only appears while a selection is active.
+        Text("Long-press an episode to select multiple", color = Muted, fontSize = 12.sp)
         if (incomplete) Text("List may be incomplete.", color = Teal, fontSize = 12.sp)
+        if (selected.isNotEmpty()) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Button(
+                    onClick = { onDownloadSelected?.invoke() },
+                    colors = ButtonDefaults.buttonColors(containerColor = Pink),
+                    modifier = Modifier.weight(1f),
+                ) { Text("Download ${selected.size} episode${if (selected.size == 1) "" else "s"}", color = OnAccent, fontWeight = FontWeight.Bold) }
+                Text(
+                    "Clear", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.clickable { onClearSelection?.invoke() },
+                )
+            }
+        }
         if (rows.isEmpty()) {
             Text("No episodes in this list.", color = Muted, fontSize = 13.sp)
         } else if (episodeView == "grid") {
@@ -4079,8 +4407,11 @@ private fun EpisodeRowsColumn(
                             row = row, title = title,
                             job = jobForRow(jobs, title.title, row),
                             isResolving = resolving.contains(row.number),
+                            resolvingServer = resolvingServer[row.number],
                             rowError = rowErrors[row.number],
-                            onPull = { onPull(row) },
+                            isSelected = selected.contains(row.number),
+                            onTap = { onRowTap(row) },
+                            onLongPress = { onRowLongPress(row) },
                         )
                     }
                     if (pair.size == 1) Spacer(Modifier.weight(1f))
@@ -4092,8 +4423,11 @@ private fun EpisodeRowsColumn(
                     row = row,
                     job = jobForRow(jobs, title.title, row),
                     isResolving = resolving.contains(row.number),
+                    resolvingServer = resolvingServer[row.number],
                     rowError = rowErrors[row.number],
-                    onPull = { onPull(row) },
+                    isSelected = selected.contains(row.number),
+                    onTap = { onRowTap(row) },
+                    onLongPress = { onRowLongPress(row) },
                 )
             }
         }
@@ -4105,11 +4439,21 @@ private fun EpisodeListRow(
     row: EpisodeRow,
     job: DownloadJob?,
     isResolving: Boolean,
+    resolvingServer: Int?,
     rowError: String?,
-    onPull: () -> Unit,
+    isSelected: Boolean,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
     Column(
-        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Card).padding(12.dp),
+        // 2.0-dev1.7: the whole row taps (confirm sheet, or toggle
+        // while selecting) and long-presses to select. Selected
+        // rows get the pink border + tint.
+        modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .background(if (isSelected) Pink.copy(alpha = 0.12f) else Card)
+            .border(1.dp, if (isSelected) Pink else Color.Transparent, RoundedCornerShape(12.dp))
+            .combinedClickable(onClick = onTap, onLongClick = onLongPress)
+            .padding(12.dp),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -4126,9 +4470,9 @@ private fun EpisodeListRow(
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (row.title != null) Text("Episode ${row.number}", color = Muted, fontSize = 12.sp)
                     if (row.duration != null) Text(row.duration, color = Muted, fontSize = 12.sp)
-                    Box(
-                        modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink.copy(alpha = 0.2f)).padding(horizontal = 8.dp, vertical = 3.dp),
-                    ) { Text(if (row.audio.equals("eng", ignoreCase = true)) "Dub" else "Sub", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+                    // 2.0-dev1.7: the Sub/Dub pill is gone — the
+                    // audio choice lives only in the download
+                    // sheet now. Episode N + duration stay.
                 }
             }
             Spacer(Modifier.width(12.dp))
@@ -4139,11 +4483,14 @@ private fun EpisodeListRow(
                     fontSize = 13.sp, fontWeight = FontWeight.Bold,
                 )
             } else if (isResolving) {
-                Text("Resolving…", color = Muted, fontSize = 13.sp)
+                Text(
+                    if (resolvingServer != null) "Resolving… · Server $resolvingServer" else "Resolving…",
+                    color = Muted, fontSize = 13.sp,
+                )
             } else {
                 Text(
                     "Pull ↓", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.clickable { onPull() },
+                    modifier = Modifier.clickable { onTap() },
                 )
             }
         }
@@ -4160,22 +4507,30 @@ private fun RowScope.EpisodeGridCell(
     title: ApiTitle,
     job: DownloadJob?,
     isResolving: Boolean,
+    resolvingServer: Int?,
     rowError: String?,
-    onPull: () -> Unit,
+    isSelected: Boolean,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit,
 ) {
-    // A cell with a live job isn't tappable — there is nothing to
-    // pull. Everything else taps the whole cell (same Pull action
-    // as the list row).
+    // A cell with a live job isn't tappable for a pull — there is
+    // nothing to download. Everything else taps the whole cell
+    // (confirm sheet, or toggle while selecting). Long-press always
+    // selects, even on a cell with a job.
     val canPull = job == null && !isResolving
     Column(
         modifier = Modifier.weight(1f)
-            .clip(RoundedCornerShape(12.dp)).background(Card)
-            .then(if (canPull) Modifier.clickable { onPull() } else Modifier)
+            .clip(RoundedCornerShape(12.dp))
+            .background(if (isSelected) Pink.copy(alpha = 0.12f) else Card)
+            .border(1.dp, if (isSelected) Pink else Color.Transparent, RoundedCornerShape(12.dp))
+            .combinedClickable(onClick = { if (canPull) onTap() }, onLongClick = onLongPress)
             .padding(8.dp),
     ) {
         Box(modifier = Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(8.dp))) {
             // Still when the index has one, else the title poster —
             // a still is a plain image URL, same loader as posters.
+            // Bare AniList rows have no still, so they fall back to
+            // the title poster with "Episode N" below (verified).
             PosterImage(row.still ?: title.poster, Modifier.fillMaxSize(), with(LocalDensity.current) { 160.dp.toPx().toInt() })
         }
         Spacer(Modifier.height(6.dp))
@@ -4188,14 +4543,13 @@ private fun RowScope.EpisodeGridCell(
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Episode ${row.number}", color = Muted, fontSize = 12.sp)
             if (row.duration != null) Text(row.duration, color = Muted, fontSize = 12.sp)
-            Box(
-                modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink.copy(alpha = 0.2f)).padding(horizontal = 8.dp, vertical = 3.dp),
-            ) { Text(if (row.audio.equals("eng", ignoreCase = true)) "Dub" else "Sub", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
+            // 2.0-dev1.7: the Sub/Dub pill is gone here too — the
+            // audio choice lives only in the download sheet now.
         }
         Spacer(Modifier.height(6.dp))
         when {
             job != null -> Text(jobStateText(job), color = if (job.state == JobState.COMPLETED) Teal else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            isResolving -> Text("Resolving…", color = Muted, fontSize = 13.sp)
+            isResolving -> Text(if (resolvingServer != null) "Resolving… · Server $resolvingServer" else "Resolving…", color = Muted, fontSize = 13.sp)
             else -> Text("Pull ↓", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
         if (rowError != null) {
@@ -4537,6 +4891,7 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit) {
         seasonBusy = true
         seasonError = null
         scope.launch {
+            var enqueued = 0
             var firstError: String? = null
             var needsClearance = false
             for (ep in eps) {
@@ -4546,14 +4901,21 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit) {
                     anilistId = seasonAnilistId,
                     fromMediaIndex = seasonFromMediaIndex,
                     listServer = if (seasonFromMediaIndex) null else seasonListServer,
+                    // 2.0-dev1.7: bulk season on mobile data stays
+                    // gated — only an explicit per-episode confirm
+                    // consents to any network.
+                    wifiOverride = false,
                 )) {
-                    ResolveOutcome.Enqueued -> Unit
+                    ResolveOutcome.Enqueued -> enqueued++
                     is ResolveOutcome.Error -> if (firstError == null) firstError = outcome.message
                     ResolveOutcome.NeedsClearance -> { needsClearance = true; break }
                 }
             }
             seasonError = firstError
             seasonBusy = false
+            // 2.0-dev1.7: tap feedback for the season too.
+            if (enqueued > 0) showToast(context, "Downloading season — $enqueued episode${if (enqueued == 1) "" else "s"}")
+            else if (firstError != null) showToast(context, firstError)
             if (needsClearance) {
                 // 2.0-dev1.6: the chain failed and a human check is
                 // still pending for server 3 — solving it may unlock

@@ -451,6 +451,43 @@ fun DownloadsSettingsPage() {
     // priority order 1..9), 1..9 = always try that server first (the
     // rest still back it up if it fails). Same key the sheet reads.
     var preferredServer by remember { mutableStateOf(prefs.getInt("preferred_server", 0)) }
+    // 2.0-dev1.7: Sources priority order — the auto-select /
+    // failover order, rearrangeable with the up/down arrows below.
+    // Default 1..9 (easiest first); persisted as "server_order".
+    var serverOrder by remember { mutableStateOf(ServerRegistry.orderedNumbers(ctx)) }
+    // 2.0-dev1.7: auto-test state — per-server health results from
+    // the last test run (empty = never tested), plus a one-line
+    // summary after a run. The test itself lives in ServerHealth.
+    val settingsScope = rememberCoroutineScope()
+    var testingServers by remember { mutableStateOf(false) }
+    var serverHealth by remember { mutableStateOf<Map<Int, HealthResult>>(emptyMap()) }
+    var testSummary by remember { mutableStateOf<String?>(null) }
+    fun runServerTest() {
+        if (testingServers) return
+        settingsScope.launch {
+            testingServers = true
+            serverHealth = emptyMap()
+            testSummary = null
+            val results = ServerHealth.testAll(ctx, serverOrder)
+            serverHealth = results
+            val next = ServerHealth.reorderByHealth(serverOrder, results)
+            serverOrder = next
+            ServerRegistry.saveOrder(ctx, next)
+            testingServers = false
+            val ok = results.count { it.value.status == HealthStatus.OK }
+            val unknown = results.count { it.value.status == HealthStatus.UNKNOWN }
+            val failed = results.count { it.value.status == HealthStatus.FAILED }
+            testSummary = "Auto-test done — $ok working, $unknown need a check, $failed failed. Fastest working servers first."
+        }
+    }
+    fun moveServer(number: Int, delta: Int) {
+        val from = serverOrder.indexOf(number)
+        val to = from + delta
+        if (from < 0 || to < 0 || to >= serverOrder.size) return
+        val next = serverOrder.toMutableList().also { it.add(to, it.removeAt(from)) }
+        serverOrder = next
+        ServerRegistry.saveOrder(ctx, next)
+    }
     fun save() {
         prefs.edit().putInt("parallel", parallel).putInt("speed_mbps", speedLimit).putString("folder", folder).putString("quality", quality).putString("language", language).putBoolean("wifi_only", wifiOnly).putBoolean("ask_season", askSeason).putBoolean("subs", subs).putBoolean("auto_retry", autoRetry).putBoolean("keep_screen_on", keepScreenOn).putInt("preferred_server", preferredServer).apply()
     }
@@ -535,10 +572,53 @@ fun DownloadsSettingsPage() {
             )
             Spacer(Modifier.height(8.dp))
             Text(
-                if (preferredServer == 0) "Auto tries Server 1 first, then 2, 3… until one works. Pick a server to always try it first — the rest still back it up if it fails. A single download can still override this in its sheet."
+                if (preferredServer == 0) "Auto tries servers in your Sources order below until one works. Pick a server to always try it first — the rest still back it up if it fails. A single download can still override this in its sheet."
                 else ServerRegistry.description(preferredServer),
                 color = Faint, fontSize = 12.sp,
             )
+        }
+    }
+    Spacer(Modifier.height(20.dp))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SettingsSectionLabel("SOURCES")
+        Box(
+            modifier = Modifier.clip(RoundedCornerShape(999.dp))
+                .background(if (testingServers) Card else Pink)
+                .clickable(enabled = !testingServers) { runServerTest() }
+                .padding(horizontal = 14.dp, vertical = 8.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text(
+                if (testingServers) "Testing…" else "Auto-test",
+                color = if (testingServers) Muted else Color.White,
+                fontSize = 13.sp, fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+    Text("Auto-select tries servers in this order — easiest first. Move a server up or down to change the order, or tap Auto-test to check every server and put the fastest working ones first. A server that needs a check is never ranked as failed — it stays where it was.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+    if (testSummary != null) {
+        Spacer(Modifier.height(8.dp))
+        Text(testSummary!!, color = Teal, fontSize = 13.sp, lineHeight = 19.sp)
+    }
+    Spacer(Modifier.height(12.dp))
+    SettingsCard {
+        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+            serverOrder.forEachIndexed { index, number ->
+                ServerOrderRow(
+                    number = number,
+                    position = index,
+                    total = serverOrder.size,
+                    health = serverHealth[number],
+                    testing = testingServers,
+                    onMoveUp = { moveServer(number, -1) },
+                    onMoveDown = { moveServer(number, 1) },
+                )
+                if (index < serverOrder.size - 1) SettingsDivider()
+            }
         }
     }
     Spacer(Modifier.height(20.dp))
@@ -553,6 +633,51 @@ fun DownloadsSettingsPage() {
         SettingsToggle("Auto-retry failed downloads", "Retry a failed episode once before giving up. Applies when the engine lands.", autoRetry) { autoRetry = it; save() }
         SettingsDivider()
         SettingsToggle("Keep screen on while downloading", "Don't let the phone sleep mid-download. Applies when the engine lands.", keepScreenOn) { keepScreenOn = it; save() }
+    }
+}
+
+// 2.0-dev1.7: one row of the Sources priority list — rank,
+// "Server N" + its generic description (capabilities only, never
+// a source name), and up/down arrows. Arrows, not drag-and-drop:
+// robust on every phone, no reorder gesture to get wrong. The
+// first row's up arrow and the last row's down arrow are greyed
+// out and disabled. onClickLabel keeps the arrows announced
+// properly by screen readers.
+@Composable
+private fun ServerOrderRow(number: Int, position: Int, total: Int, health: HealthResult?, testing: Boolean, onMoveUp: () -> Unit, onMoveDown: () -> Unit) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+        Text("${position + 1}", color = Pink, fontSize = 15.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(28.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text("Server $number", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(ServerRegistry.description(number), color = Muted, fontSize = 12.5.sp)
+            // 2.0-dev1.7: auto-test result for this server — latency
+            // when it answered, "needs a check" when the test could
+            // not judge it (e.g. gated), "failed" when it did not
+            // answer at all. Nothing shows before the first test.
+            val statusText = when {
+                testing -> "Testing…" to Muted
+                health?.status == HealthStatus.OK -> "✓ ${health.latencyMs ?: 0} ms" to Teal
+                health?.status == HealthStatus.UNKNOWN -> "? Needs a check" to Muted
+                health?.status == HealthStatus.FAILED -> "✗ Failed" to Color(0xFFFF3B30)
+                else -> null
+            }
+            if (statusText != null) {
+                Spacer(Modifier.height(2.dp))
+                Text(statusText.first, color = statusText.second, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                "↑", color = if (position > 0) Pink else Faint, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable(enabled = position > 0, onClickLabel = "Move Server $number up") { onMoveUp() }
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+            )
+            Text(
+                "↓", color = if (position < total - 1) Pink else Faint, fontSize = 18.sp, fontWeight = FontWeight.Bold,
+                modifier = Modifier.clickable(enabled = position < total - 1, onClickLabel = "Move Server $number down") { onMoveDown() }
+                    .padding(horizontal = 10.dp, vertical = 2.dp),
+            )
+        }
     }
 }
 

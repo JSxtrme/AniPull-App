@@ -57,6 +57,12 @@ data class DownloadJob(
     val speedMBps: Double,
     val error: String?,
     val filePath: String?,
+    // 2.0-dev1.7: which server resolved this job (1..9, 0 = unknown)
+    // and whether an explicit Resume consented to mobile data for
+    // this job (see the Wi-Fi gate in runJob). Both default so old
+    // persisted jobs still parse.
+    val serverNumber: Int = 0,
+    val wifiOverride: Boolean = false,
 )
 
 enum class JobState { QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELLED }
@@ -149,6 +155,8 @@ object DownloadEngine {
         put("speedMBps", job.speedMBps)
         put("error", job.error ?: JSONObject.NULL)
         put("filePath", job.filePath ?: JSONObject.NULL)
+        put("server", job.serverNumber)
+        put("wifi_ok", job.wifiOverride)
         links[job.id]?.let { link ->
             val linkSubs: List<SubtitleTrack> = when (link) {
                 is ResolvedLink.DirectMp4 -> link.subtitles
@@ -227,6 +235,8 @@ object DownloadEngine {
                 speedMBps = obj.optDouble("speedMBps"),
                 error = obj.optString("error").takeIf { it.isNotBlank() },
                 filePath = obj.optString("filePath").takeIf { it.isNotBlank() },
+                serverNumber = obj.optInt("server", 0),
+                wifiOverride = obj.optBoolean("wifi_ok", false),
             )
         } catch (_: Exception) {
             null
@@ -301,7 +311,15 @@ object DownloadEngine {
 
     // --- Queue ---------------------------------------------------------
 
-    fun enqueue(context: Context, title: ApiTitle, episode: EpisodeInfo, quality: String, link: ResolvedLink): String {
+    fun enqueue(
+        context: Context,
+        title: ApiTitle,
+        episode: EpisodeInfo,
+        quality: String,
+        link: ResolvedLink,
+        serverNumber: Int = 0,
+        wifiOverride: Boolean = false,
+    ): String {
         init(context)
         val audio = if (episode.audio.equals("eng", ignoreCase = true)) "Dub" else "Sub"
         val id = "dl_${title.id}_${episode.number}_${episode.audio.lowercase()}_${quality.lowercase()}"
@@ -328,6 +346,8 @@ object DownloadEngine {
                 speedMBps = 0.0,
                 error = null,
                 filePath = null,
+                serverNumber = serverNumber,
+                wifiOverride = wifiOverride,
             )
             links[id] = link
             controls[id] = Control()
@@ -356,7 +376,12 @@ object DownloadEngine {
         controls[id]?.paused = false
         updateJob(id, { job ->
             if (job.state == JobState.PAUSED || job.state == JobState.FAILED) {
-                job.copy(state = JobState.QUEUED, error = null, speedMBps = 0.0)
+                // An explicit Resume is consent for THIS job to use
+                // mobile data (2.0-dev1.7 paused-trap fix): without
+                // it, a Wi-Fi-gated job re-queues, runJob pauses it
+                // again, and Resume can never work on mobile data.
+                // Persisted, so the consent survives a restart.
+                job.copy(state = JobState.QUEUED, error = null, speedMBps = 0.0, wifiOverride = true)
             } else job
         }, persistNow = true)
         pump()
@@ -449,7 +474,14 @@ object DownloadEngine {
                 return
             }
             // Wi-Fi gate: pause on mobile data instead of burning it.
-            if (wifiOnly(ctx) && !isWifiConnected(ctx)) {
+            // Skipped when the job carries a wifiOverride (an explicit
+            // Resume consented to mobile data for this job) — without
+            // the skip, resume() re-queues the job and this gate
+            // pauses it again, an unresumable loop (2.0-dev1.6 bug:
+            // FMAB ep 1 stuck on PAUSED on mobile data). The honest
+            // "Paused — waiting for Wi-Fi" error stays for jobs
+            // without the override.
+            if (!job.wifiOverride && wifiOnly(ctx) && !isWifiConnected(ctx)) {
                 updateJob(id, { it.copy(state = JobState.PAUSED, error = "Paused — waiting for Wi-Fi", speedMBps = 0.0) }, persistNow = true)
                 return
             }

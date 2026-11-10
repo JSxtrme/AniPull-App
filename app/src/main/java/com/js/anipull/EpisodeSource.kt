@@ -70,6 +70,12 @@ sealed class ResolvedLink {
     data class Failed(val message: String) : ResolvedLink()
 }
 
+// A resolved link plus the server whose link won (1..9, null when
+// every candidate failed). The number — never a source name — is
+// what the UI shows ("Server N") and what the engine stores on the
+// job. 2.0-dev1.7.
+data class ResolvedDownload(val link: ResolvedLink, val serverNumber: Int?)
+
 interface EpisodeSource {
     // Internal/logging ONLY — must never reach the UI.
     val sourceName: String
@@ -117,9 +123,11 @@ object EpisodeSources {
 }
 
 // Try candidates in order; first non-Failed wins. If all fail, the
-// last Failed is returned (or a generic message when nothing ran).
-// The Pahe candidate is passed in already constructed with its
-// clearance — the engine NEVER solves Cloudflare.
+// last Failed is returned (or a generic message when nothing ran),
+// with serverNumber null. onAttempt fires with each server number
+// as it is tried, so the UI can show live progress ("Trying
+// Server N…"). The Pahe candidate is passed in already constructed
+// with its clearance — the engine NEVER solves Cloudflare.
 object MultiSourceResolver {
     suspend fun resolveWithFailover(
         candidates: List<EpisodeSource>,
@@ -128,18 +136,20 @@ object MultiSourceResolver {
         number: Int,
         audio: String,
         quality: String,
-    ): ResolvedLink {
+        onAttempt: ((Int) -> Unit)? = null,
+    ): ResolvedDownload {
         var last: ResolvedLink = ResolvedLink.Failed("All servers failed — tap Retry.")
         for (src in candidates) {
+            onAttempt?.invoke(src.serverNumber)
             try {
                 val r = src.resolveEpisode(title, anilistId, number, audio, quality)
-                if (r !is ResolvedLink.Failed) return r
+                if (r !is ResolvedLink.Failed) return ResolvedDownload(r, src.serverNumber)
                 last = r
             } catch (e: Exception) {
                 last = ResolvedLink.Failed(friendlyDownloadError(e))
             }
         }
-        return last
+        return ResolvedDownload(last, null)
     }
 
     suspend fun loadEpisodesWithFailover(
