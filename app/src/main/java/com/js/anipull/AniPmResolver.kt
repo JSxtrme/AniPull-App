@@ -166,7 +166,10 @@ internal class AniPmEpisodeSource : BaseEpisodeSource(
 
     private suspend fun resolveId(title: ApiTitle, anilistId: Long?): Pair<Long, String?>? {
         if (anilistId != null && anilistId > 0) return anilistId to null
-        if (title.id > 0) return title.id to null
+        // Trust the title's own id ONLY when it is a plausible
+        // AniList id (small int). An AniLab id (100000xxxx) goes
+        // straight to title search, never to the details endpoint.
+        if (title.id in 1 until 1_000_000) return title.id to null
         return search(title)
     }
 
@@ -183,25 +186,27 @@ internal class AniPmEpisodeSource : BaseEpisodeSource(
             val packages = runCatching { fetchPackages(id) }.getOrNull()
             val episodes = mutableListOf<EpisodeInfo>()
             for ((num, epTitle) in eps) {
+                // One row per episode: the packages flags pick WHICH
+                // single audio — sub ("jpn") when available, else
+                // dub ("eng"). The download sheet copies the chosen
+                // audio into the EpisodeInfo before resolving, so the
+                // list never needs two rows.
                 val flags = packages?.get(num)
-                val audios = when {
-                    flags == null -> listOf("jpn", "eng")
-                    flags.first && flags.second -> listOf("jpn", "eng")
-                    flags.first -> listOf("jpn")
-                    flags.second -> listOf("eng")
-                    else -> listOf("jpn")
+                val audio = when {
+                    flags == null -> "jpn"
+                    flags.first -> "jpn"
+                    flags.second -> "eng"
+                    else -> "jpn"
                 }
-                for (aud in audios) {
-                    episodes += EpisodeInfo(
-                        number = num,
-                        title = epTitle,
-                        duration = null,
-                        audio = aud,
-                        fansub = null,
-                        episodeSession = "anipm|$id|$num",
-                        animeSession = id.toString(),
-                    )
-                }
+                episodes += EpisodeInfo(
+                    number = num,
+                    title = epTitle,
+                    duration = null,
+                    audio = audio,
+                    fansub = null,
+                    episodeSession = "anipm|$id|$num",
+                    animeSession = id.toString(),
+                )
             }
             EpisodeResult.Loaded(episodes)
         } catch (e: Exception) {

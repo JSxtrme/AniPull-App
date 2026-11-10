@@ -52,10 +52,12 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
     }
 
     // Resolve the AniList id: the passed id first, else the title's
-    // own id (AniLab ids ARE AniList ids), else a title search.
+    // own id when it is a plausible AniList id (small int), else a
+    // title search. AniLab ids (100000xxxx) are NOT AniList ids and
+    // are never verified against the episodes endpoint.
     private suspend fun resolveAnilistId(title: ApiTitle, anilistId: Long?): Long? {
         if (anilistId != null && anilistId > 0) return anilistId
-        if (title.id > 0) {
+        if (title.id in 1 until 1_000_000) {
             // Verify the id exists before trusting it.
             val check = apiGet("/anime/${title.id}/episodes?page=1")
             if (check.code == 200) return title.id
@@ -98,20 +100,21 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                 val obj = arr.optJSONObject(i) ?: continue
                 val num = jsonEpisodeNumber(obj.opt("number")) ?: continue
                 val epTitle = obj.optString("title").takeIf { it.isNotBlank() }
-                // Sub + dub rows: dub availability is verified at
-                // resolve time via the servers endpoint; a missing dub
-                // fails honestly there instead of hiding the row.
-                for (aud in listOf("jpn", "eng")) {
-                    episodes += EpisodeInfo(
-                        number = num,
-                        title = epTitle,
-                        duration = null,
-                        audio = aud,
-                        fansub = null,
-                        episodeSession = "justanime|$anilistId|$num",
-                        animeSession = anilistId.toString(),
-                    )
-                }
+                // One row per episode (audio "jpn"): dub availability
+                // is verified at resolve time via the servers
+                // endpoint; a missing dub fails honestly there
+                // instead of hiding the row. The download sheet
+                // copies the chosen audio into the EpisodeInfo
+                // before resolving, so the list never needs a dub row.
+                episodes += EpisodeInfo(
+                    number = num,
+                    title = epTitle,
+                    duration = null,
+                    audio = "jpn",
+                    fansub = null,
+                    episodeSession = "justanime|$anilistId|$num",
+                    animeSession = anilistId.toString(),
+                )
             }
             page++
         } while (page <= totalPages && page <= 50)

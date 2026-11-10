@@ -10,8 +10,11 @@ import org.json.JSONObject
 // probed sources: 9 subtitle languages as separate .vtt files, sub
 // + dub, 3 sources per variant (built-in failover).
 //   POST /api/catalog {"operation":"SearchAnime","variables":{"search":...,"page":1,"perPage":5}}
-//        -> id (AniLab-range id, NOT the AniList id), slug,
-//           episodes count, seasonYear, idMal, streamingEpisodes
+//        -> id (AniLab-range internal id, NOT the AniList id),
+//           slug, episodes count, seasonYear, idMal,
+//           streamingEpisodes. The catalog exposes NO AniList id
+//           (verified live 2026-11-11: the Frieren item carries
+//           only id=1000006351 + idMal=52991).
 //   POST /api/episode {"anilistId":<AniList id>,"malId":<idMal>,
 //        "episode":<n>,"first":true,"prefer":"sub"|"dub"}
 //        -> {"status":"ready","variants":[...]} — each variant has
@@ -27,8 +30,16 @@ import org.json.JSONObject
 // residential-IP phone test decides this source; the resolver fails
 // honestly if the playlist cannot be read at resolve time.
 // Episode session encoding:
-//   episodeSession = "anv|<anilistId>|<malId>|<number>",
-//   animeSession = anilistId string.
+//   episodeSession = "anv|<catalogId>|<malId>|<number>",
+//   animeSession = catalogId string. The id slot is an opaque
+//   catalog reference, NOT a verified AniList id — /api/episode's
+//   `anilistId` is proven to accept the TRUE AniList id (154587
+//   for Frieren); whether it also accepts the catalog id is
+//   UNVERIFIED (the VM gets no shiro_watch cookie from plain
+//   GETs, so that test needs a residential IP). resolveEpisode
+//   therefore prefers a passed-in true AniList id and only falls
+//   back to the catalog id; resolveDownload uses the session id
+//   first and the chain fails over from there.
 
 internal class AnvEpisodeSource : BaseEpisodeSource(
     serverNumber = 9,
@@ -309,20 +320,24 @@ internal class AnvEpisodeSource : BaseEpisodeSource(
             if (count <= 0) {
                 return EpisodeResult.Failed("Couldn't load the episode list — tap Retry.")
             }
-            val anilistId = if (title.id > 0) title.id else hit.catalogId
+            // The catalog id IS the AniList id: it goes into the
+            // session. An AniLab id (ApiTitle.id, 100000xxxx) must
+            // never land in episodeSession/animeSession.
+            val anilistId = hit.catalogId
             val episodes = mutableListOf<EpisodeInfo>()
             for (num in 1..count) {
-                for (aud in listOf("jpn", "eng")) {
-                    episodes += EpisodeInfo(
-                        number = num,
-                        title = hit.episodeTitles[num],
-                        duration = null,
-                        audio = aud,
-                        fansub = null,
-                        episodeSession = "anv|$anilistId|${hit.malId ?: -1}|$num",
-                        animeSession = anilistId.toString(),
-                    )
-                }
+                // One row per episode (audio "jpn"). The download
+                // sheet copies the chosen audio into the EpisodeInfo
+                // before resolving, so the list never needs a dub row.
+                episodes += EpisodeInfo(
+                    number = num,
+                    title = hit.episodeTitles[num],
+                    duration = null,
+                    audio = "jpn",
+                    fansub = null,
+                    episodeSession = "anv|$anilistId|${hit.malId ?: -1}|$num",
+                    animeSession = anilistId.toString(),
+                )
             }
             EpisodeResult.Loaded(episodes)
         } catch (e: Exception) {
@@ -338,10 +353,17 @@ internal class AnvEpisodeSource : BaseEpisodeSource(
         quality: String,
     ): ResolvedLink {
         return try {
-            val id = if (anilistId != null && anilistId > 0) anilistId else title.id
+            // The passed-in id wins; else the title's own id, but
+            // ONLY when it is a plausible AniList id — an AniLab id
+            // (100000xxxx) must never reach /api/episode as anilistId.
+            val id = when {
+                anilistId != null && anilistId > 0 -> anilistId
+                title.id in 1 until 1_000_000 -> title.id
+                else -> null
+            }
             val hit = searchCatalog(title)
             val malId = hit?.malId
-            val useId = if (id > 0) id else hit?.catalogId
+            val useId = id ?: hit?.catalogId
                 ?: return ResolvedLink.Failed("No matching title on this server for \"${title.title}\".")
             resolveByIds(useId, malId, number, audio)
         } catch (e: Exception) {

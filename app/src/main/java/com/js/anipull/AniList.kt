@@ -13,13 +13,16 @@ import org.json.JSONObject
 // titles, NO runtimes, NO stills. The UI builds bare numbered rows
 // from the count; nothing here invents any of those.
 //
-// ID resolution: ApiTitle.id IS the AniList id in the same id space
-// as media-index, but it is NEVER blind-accepted — the returned
-// Media's normalized title must match the wanted title. Otherwise
-// (or when id <= 0) search by title and disambiguate by format ->
-// year -> popularity, mirroring MediaIndex.matchEntry (same
-// normalization, same tie-break order). No confident match ->
-// NotFound, never a guess.
+// ID resolution: a known AniList id (passed in, or ApiTitle.id
+// when it is a plausible AniList id — small int) is NEVER
+// blind-accepted — the returned Media's normalized title must
+// match the wanted title. ApiTitle.id may instead be an AniLab id
+// (100000xxxx), which lives in a different id space and must NEVER
+// be sent to AniList as an id; those go straight to title search.
+// Otherwise (or when no id is known) search by title and
+// disambiguate by format -> year -> popularity, mirroring
+// MediaIndex.matchEntry (same normalization, same tie-break
+// order). No confident match -> NotFound, never a guess.
 //
 // Rate limit: AniList allows ~90 req/min. One call per list load is
 // far under it; a trivial in-memory 700 ms pace guards bursts. No
@@ -218,13 +221,21 @@ object AniList {
     // `context` is kept for signature symmetry with MediaIndex; the
     // call needs no storage — no disk cache by design.
     @Suppress("UNUSED_PARAMETER")
-    suspend fun episodeCount(context: Context, title: ApiTitle): AniListCount {
+    suspend fun episodeCount(context: Context, title: ApiTitle, anilistId: Long? = null): AniListCount {
         return try {
             withContext(Dispatchers.IO) {
                 pace()
-                // 1) AniList id, verified by title — never blind.
-                if (title.id > 0) {
-                    val byId = fetchById(title.id)
+                // 1) Known AniList id, verified by title — never blind.
+                // A passed-in id wins; else the title's own id, but
+                // ONLY when it is a plausible AniList id. An AniLab
+                // id (100000xxxx) is never sent to AniList as an id.
+                val knownId = when {
+                    anilistId != null && anilistId > 0 -> anilistId
+                    title.id in 1 until 1_000_000 -> title.id
+                    else -> null
+                }
+                if (knownId != null) {
+                    val byId = fetchById(knownId)
                     if (byId != null && titlesMatch(byId, normalizeTitle(title.title))) {
                         return@withContext countFrom(byId)
                     }

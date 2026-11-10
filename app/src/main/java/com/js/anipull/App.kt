@@ -34,6 +34,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.border
@@ -96,6 +97,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.darkColorScheme
@@ -3647,11 +3649,21 @@ private suspend fun loadFallbackEpisodes(
 ): Pair<EpisodeResult, Int?> {
     CronetHttp.setContext(context)
     val numbers = candidateServerNumbers(context, preferredServer)
-    val clearance = paheClearanceIfNeeded(context, 3 in numbers)
+    // 2.0-dev1.8: clearance is LAZY. The old code solved the
+    // Cloudflare check up front whenever server 3 was among the
+    // candidates, burning up to 30s before any server was even
+    // tried — for a clearance most servers never need. Now it is
+    // solved only immediately before server 3 is actually
+    // attempted; servers tried earlier run without it.
+    var clearance: PaheClearance? = null
     var firstError: String? = null
     var sawPending = false
     for (n in numbers) {
-        val src = ServerRegistry.build(n, clearance.cookie, clearance.userAgent) ?: continue
+        if (n == 3 && clearance == null) {
+            clearance = paheClearanceIfNeeded(context, true)
+        }
+        val c = clearance ?: PaheClearance(null, null, false)
+        val src = ServerRegistry.build(n, c.cookie, c.userAgent) ?: continue
         val res = try {
             MultiSourceResolver.loadEpisodesWithFailover(listOf(src), title)
         } catch (e: Exception) {
@@ -3663,7 +3675,7 @@ private suspend fun loadFallbackEpisodes(
             is EpisodeResult.Failed -> if (firstError == null) firstError = res.message
         }
     }
-    if (clearance.needsUserAction) onNeedsClearance()
+    if (clearance?.needsUserAction == true) onNeedsClearance()
     val result = when {
         sawPending && firstError == null -> EpisodeResult.SourcePending
         else -> EpisodeResult.Failed(firstError ?: "Couldn't load the episode list — tap Retry.")
@@ -3748,14 +3760,22 @@ private suspend fun resolveAndEnqueue(
     }
 }
 
-// 2.0-dev1.4: hard bound on one episode-list attempt (clearance
-// solve + fetch). Past it, the section shows a timeout error with
-// Retry — never skeletons forever.
+// 2.0-dev1.8: the episode list is a RACE, not a chain. The old
+// code ran three sequential 45s budgets (index, then servers,
+// then AniList) — worst case 135s for a title the index missed,
+// which is exactly the ~2 minutes JS reported on Black Clover S2.
+// Now all three sources fire at once inside ONE overall budget,
+// each with its own short timeout; the first usable rows show
+// immediately and a richer result upgrades them in place. Past
+// the race budget with nothing usable, phase 2 (the full server
+// chain) gets its own bound — never skeletons forever.
+private const val EPISODE_RACE_TIMEOUT_MS = 20_000L
+private const val EPISODE_SOURCE_TIMEOUT_MS = 8_000L
+private const val EPISODE_FALLBACK_TIMEOUT_MS = 20_000L
+
 // 2.0-dev1.4: one Retry pill for the episode section, shared by
 // the pending and failed states (it used to be inline in Failed
 // only, and pending was a dead end with no way to re-attempt).
-private const val EPISODE_LOAD_TIMEOUT_MS = 45_000L
-
 @Composable
 private fun RetryPill(onRetry: () -> Unit) {
     Box(
@@ -3800,65 +3820,100 @@ private fun EpisodeDownloadSheet(
     var server by remember(row.number) { mutableStateOf(initialServer) }
     Dialog(onDismissRequest = onDismiss) {
         Column(
-            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(20.dp),
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(16.dp),
         ) {
-            Text(
-                row.title ?: "Episode ${row.number}",
-                color = TextMain, fontSize = 17.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont,
-                maxLines = 2, overflow = TextOverflow.Ellipsis,
-            )
-            if (row.title != null) {
-                Spacer(Modifier.height(4.dp))
-                Text("Episode ${row.number}", color = Muted, fontSize = 13.sp)
+            Row(verticalAlignment = Alignment.Top) {
+                PosterImage(
+                    title.poster,
+                    Modifier.size(52.dp, 74.dp).clip(RoundedCornerShape(8.dp)),
+                    with(LocalDensity.current) { 52.dp.toPx().toInt() },
+                )
+                Spacer(Modifier.width(12.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        row.title ?: "Episode ${row.number}",
+                        color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont,
+                        maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(2.dp))
+                    Text(
+                        if (title.type != null) "Episode ${row.number} · ${title.type}" else "Episode ${row.number}",
+                        color = Muted, fontSize = 13.sp,
+                    )
+                }
+                TextButton(
+                    onClick = onDismiss,
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+                    modifier = Modifier.size(32.dp),
+                ) { Text("✕", color = Muted, fontSize = 16.sp) }
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
             Text("Quality", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("360", "480", "720", "1080").forEach { q ->
                     OutlinedButton(
                         onClick = { quality = q },
+                        modifier = Modifier.weight(1f),
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 0.dp, vertical = 0.dp),
                         colors = ButtonDefaults.outlinedButtonColors(
                             containerColor = if (quality == q) Pink else Color.Transparent,
                             contentColor = Color.White,
                         ),
-                    ) { Text("${q}p") }
+                    ) { Text("${q}p", fontSize = 13.sp) }
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
             Text("Audio", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(999.dp))
+                    .border(1.dp, Color.White.copy(alpha = 0.06f), RoundedCornerShape(999.dp))
+                    .background(Color.White.copy(alpha = 0.03f))
+                    .padding(4.dp),
+            ) {
                 listOf("Sub", "Dub").forEach { a ->
-                    OutlinedButton(
-                        onClick = { audio = a },
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = if (audio == a) Pink else Color.Transparent,
-                            contentColor = Color.White,
-                        ),
-                    ) { Text(a) }
+                    Box(
+                        modifier = Modifier.weight(1f)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(if (audio == a) Pink else Color.Transparent)
+                            .clickable { audio = a }
+                            .padding(vertical = 8.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            a,
+                            color = if (audio == a) OnAccent else Muted,
+                            fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                        )
+                    }
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
             Text("Server", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(8.dp))
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
                 (listOf(0 to "Auto") + (1..9).map { it to "Server $it" }).forEach { (n, label) ->
                     OutlinedButton(
                         onClick = { server = n },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 0.dp),
                         colors = ButtonDefaults.outlinedButtonColors(
                             containerColor = if (server == n) Pink else Color.Transparent,
                             contentColor = Color.White,
                         ),
-                    ) { Text(label) }
+                    ) { Text(label, fontSize = 13.sp) }
                 }
             }
             Spacer(Modifier.height(6.dp))
             Text(
-                if (server == 0) "Auto tries servers in order until one works." else serverChoiceLabel(server),
+                "Auto tries servers in order until one works.",
                 color = Muted, fontSize = 12.sp,
             )
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
             Button(
                 onClick = { onConfirm(quality, audio, server) },
                 colors = ButtonDefaults.buttonColors(containerColor = Pink),
@@ -3908,23 +3963,28 @@ private fun EpisodeList(
     val context = LocalContext.current
     val prefs = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
     val scope = rememberCoroutineScope()
-    // 2.0-dev1.6: the list comes from the metadata index FIRST —
-    // no clearance, no server involved. Only when the index has no
-    // list for this title (NotFound) does the section fall back to
-    // the server chain, and only then is a clearance ensured (and
-    // only for server 3). A failed index load is an honest error
-    // with Retry — it does NOT silently fall back to a server list.
+    // 2.0-dev1.8: the list is a RACE — media-index, JustAnime
+    // direct and the AniList count fire at once (see the load
+    // block below). No clearance runs before a server is actually
+    // tried, and a failed index load is an honest error with
+    // Retry once the race + phase 2 both come up empty.
     var mediaResult by remember(title.id) { mutableStateOf<MediaIndexResult?>(null) }
     var fallbackResult by remember(title.id) { mutableStateOf<EpisodeResult?>(null) }
     var fallbackServer by remember(title.id) { mutableStateOf<Int?>(null) }
+    // 2.0-dev1.8: the AniList id the media index matched, kept
+    // even when its episodes file is missing (NotFound carries
+    // it) — it rides on fallback rows and into the download path
+    // so resolvers resolve by a real id instead of guessing.
+    var mediaAnilistId by remember(title.id) { mutableStateOf<Long?>(null) }
     var reloadKey by remember(title.id) { mutableStateOf(0) }
     var resolving by remember(title.id) { mutableStateOf(setOf<Int>()) }
     // 2.0-dev1.7: which server the in-flight resolve is currently
     // trying, per episode — drives "Resolving… · Server N" on the
     // row/cell. Cleared when the pull finishes.
     var resolvingServer by remember(title.id) { mutableStateOf(mapOf<Int, Int>()) }
-    // 2.0-dev1.7: AniList episode-count fallback (third step, after
-    // the media index AND the server list both come up empty).
+    // 2.0-dev1.7: AniList episode-count fallback — last resort,
+    // racing in parallel with the other sources (see the load
+    // block below), never after sequential caps.
     var anilistResult by remember(title.id) { mutableStateOf<AniListCount?>(null) }
     // 2.0-dev1.7: long-press multi-select (episode numbers) + the
     // per-episode confirm sheet. A tap never downloads directly.
@@ -3948,6 +4008,7 @@ private fun EpisodeList(
         mediaResult = null
         fallbackResult = null
         fallbackServer = null
+        mediaAnilistId = null
         anilistResult = null
         resolvingServer = emptyMap()
         selected = emptySet()
@@ -3961,43 +4022,98 @@ private fun EpisodeList(
         // this is the belt-and-braces copy, in case the detail
         // opens before onCreate's registration somehow runs).
         CronetHttp.setContext(context)
-        // 2.0-dev1.4: hard 45s bound on one episode-list attempt.
-        // Before, a stuck solve or a slow host retry chain could
-        // hold the section on skeletons for minutes; now every
-        // path ends in rows, an honest error, or the check dialog
-        // — never skeletons forever. The index gets its own 45s
-        // bound; the server fallback gets a second 45s bound.
-        mediaResult = kotlinx.coroutines.withTimeoutOrNull(EPISODE_LOAD_TIMEOUT_MS) {
-            try {
-                MediaIndex.loadEpisodes(context, title)
-            } catch (e: Exception) {
-                MediaIndexResult.Failed(e.message ?: "Couldn't load the episode list — tap Retry.")
-            }
-        } ?: MediaIndexResult.Failed("Episode list timed out — tap Retry.")
-        if (mediaResult is MediaIndexResult.NotFound) {
-            val effectivePreferred = serverOverride ?: preferredServerNumber(context)
-            val (res, server) = kotlinx.coroutines.withTimeoutOrNull(EPISODE_LOAD_TIMEOUT_MS) {
-                loadFallbackEpisodes(context, title, effectivePreferred) { showClearanceDialog = true }
-            } ?: (EpisodeResult.Failed("Episode list timed out — tap Retry.") to null)
-            fallbackResult = res
-            fallbackServer = server
-            // 2.0-dev1.7: third step — the server list ALSO came up
-            // empty (Failed / SourcePending with no list / Loaded
-            // with an empty list). Ask AniList for the episode
-            // count only; on Count the UI builds bare numbered
-            // rows (no titles/stills). On NotFound/Failed the
-            // honest error + Retry below stays.
-            val fallbackExhausted = res is EpisodeResult.Failed ||
-                res is EpisodeResult.SourcePending ||
-                (res as? EpisodeResult.Loaded)?.episodes.isNullOrEmpty() == true
-            if (fallbackExhausted) {
-                anilistResult = kotlinx.coroutines.withTimeoutOrNull(EPISODE_LOAD_TIMEOUT_MS) {
-                    try {
-                        AniList.episodeCount(context, title)
-                    } catch (e: Exception) {
-                        AniListCount.Failed(e.message ?: "Couldn't load the episode list — tap Retry.")
+        // 2.0-dev1.8: RACE, don't chain. Media-index, JustAnime
+        // direct (server 2 — the fastest rich list, ~2s measured)
+        // and the AniList count fire AT THE SAME TIME inside one
+        // 20s budget, each with its own 8s timeout. Each branch
+        // writes its state the moment it lands, so the first
+        // usable rows show immediately and a richer result
+        // upgrades them in place (rows prefer media-index, then
+        // server, then count). A failed/timed-out branch writes
+        // nothing — no error flash while a sibling is still
+        // racing; the terminal error is decided after the race.
+        // AniList is last-resort count only, in parallel — never
+        // after two sequential caps.
+        kotlinx.coroutines.withTimeoutOrNull(EPISODE_RACE_TIMEOUT_MS) {
+            kotlinx.coroutines.coroutineScope {
+                // A: media-index (rich list).
+                launch {
+                    val r = kotlinx.coroutines.withTimeoutOrNull(EPISODE_SOURCE_TIMEOUT_MS) {
+                        try {
+                            MediaIndex.loadEpisodes(context, title)
+                        } catch (e: Exception) {
+                            MediaIndexResult.Failed(e.message ?: "Couldn't load the episode list — tap Retry.")
+                        }
                     }
-                } ?: AniListCount.Failed("Episode list timed out — tap Retry.")
+                    when (r) {
+                        is MediaIndexResult.Loaded -> mediaResult = r
+                        is MediaIndexResult.NotFound -> {
+                            mediaResult = r
+                            // Keep the matched id even though the
+                            // episodes file is missing — it is the
+                            // true AniList id for the download path.
+                            r.anilistId?.let { mediaAnilistId = it }
+                        }
+                        else -> Unit
+                    }
+                }
+                // B: JustAnime direct (rich list, server 2). It
+                // searches by title itself; no clearance involved.
+                launch {
+                    val src = ServerRegistry.build(2, null, null)
+                    val r = if (src == null) null else kotlinx.coroutines.withTimeoutOrNull(EPISODE_SOURCE_TIMEOUT_MS) {
+                        try {
+                            MultiSourceResolver.loadEpisodesWithFailover(listOf(src), title)
+                        } catch (e: Exception) {
+                            EpisodeResult.Failed(friendlyEpisodeListError(e))
+                        }
+                    }
+                    if (r is EpisodeResult.Loaded && r.episodes.isNotEmpty() && fallbackResult == null) {
+                        fallbackResult = r
+                        fallbackServer = 2
+                    }
+                }
+                // C: AniList count (bare numbered skeleton).
+                launch {
+                    val r = kotlinx.coroutines.withTimeoutOrNull(EPISODE_SOURCE_TIMEOUT_MS) {
+                        try {
+                            AniList.episodeCount(context, title)
+                        } catch (e: Exception) {
+                            AniListCount.Failed(e.message ?: "Couldn't load the episode list — tap Retry.")
+                        }
+                    }
+                    if (r is AniListCount.Count) anilistResult = r
+                }
+            }
+        }
+        // Race over. If no RICH list landed, phase 2 runs the full
+        // server chain (lazy clearance inside) in its own bound —
+        // while the UI already shows bare count rows when the
+        // count landed, or skeletons when nothing did. A rich
+        // phase-2 list upgrades the display automatically (rows
+        // prefer server over count).
+        val richLanded = mediaResult is MediaIndexResult.Loaded ||
+            (fallbackResult as? EpisodeResult.Loaded)?.episodes.isNullOrEmpty() == false
+        if (!richLanded) {
+            if (mediaResult == null) {
+                // Enter the fallback display branch (skeletons
+                // until phase 2 answers); the kept id rides along
+                // when the index matched but its file was missing.
+                mediaResult = MediaIndexResult.NotFound(mediaAnilistId)
+            }
+            val effectivePreferred = serverOverride ?: preferredServerNumber(context)
+            val phase2 = try {
+                kotlinx.coroutines.withTimeoutOrNull(EPISODE_FALLBACK_TIMEOUT_MS) {
+                    loadFallbackEpisodes(context, title, effectivePreferred) { showClearanceDialog = true }
+                }
+            } catch (e: Exception) {
+                null
+            } ?: (EpisodeResult.Failed("Episode list timed out — tap Retry.") to null)
+            // Only take phase 2's list when the race didn't already
+            // land one — first rich list wins.
+            if ((fallbackResult as? EpisodeResult.Loaded)?.episodes.isNullOrEmpty() == true) {
+                fallbackResult = phase2.first
+                fallbackServer = phase2.second
             }
         }
     }
@@ -4029,7 +4145,10 @@ private fun EpisodeList(
                 EpisodeRow(
                     number = ep.number, title = ep.title, duration = ep.duration,
                     audio = ep.audio, still = null, fromMediaIndex = false,
-                    anilistId = null, info = ep,
+                    // 2.0-dev1.8: the kept media-index id rides on
+                    // server rows too, so downloads resolve by a
+                    // real AniList id whenever the index matched.
+                    anilistId = mediaAnilistId, info = ep,
                 )
             }
         }
@@ -4046,14 +4165,17 @@ private fun EpisodeList(
             )
         }
         else -> null
-    }
+    }?.distinctBy { it.number }
     LaunchedEffect(mediaResult, fallbackResult, anilistResult, audioFilter, pullAudio) {
         val eps = rows ?: return@LaunchedEffect
         onLoaded?.invoke(eps.map { it.info })
         // Bare rows carry the AniList id too, so the season loop
-        // resolves them by number like media-index rows.
+        // resolves them by number like media-index rows. The kept
+        // media-index id (index matched, file missing) counts the
+        // same way for server-served rows.
         val bareAnilistId = anilistCount?.anilistId
-        onListMeta?.invoke(mediaLoaded?.anilistId ?: bareAnilistId, mediaLoaded != null || bareAnilistId != null, fallbackServer)
+        val knownAnilistId = mediaLoaded?.anilistId ?: mediaAnilistId ?: bareAnilistId
+        onListMeta?.invoke(knownAnilistId, mediaLoaded != null || knownAnilistId != null, fallbackServer)
     }
     // One pull path for list rows, grid cells, the multi-select
     // batch and the retry after Done — the sheet season loop goes
@@ -4158,49 +4280,44 @@ private fun EpisodeList(
         confirmRow = row
     }
     fun onRowLongPress(row: EpisodeRow) { toggleSelect(row.number) }
-    // Skeletons while the index loads, and while the server
-    // fallback loads after a NotFound. Never skeletons forever:
-    // every path ends in rows, an honest error, or the check dialog.
+    // 2.0-dev1.8: rows-first display. The race can land a server
+    // list or the AniList count while the index is still pending,
+    // so rows render whenever they exist, whatever mediaResult
+    // is — the old mediaResult-keyed branches would blank the
+    // section in that window. The note names the list's origin
+    // (none for metadata, "Server N" for a server list, the
+    // honest caveat for bare count rows). Skeletons only while
+    // nothing has landed; every path still ends in rows, an
+    // honest error, or the check dialog.
+    val rowsNote: String? = when {
+        mediaLoaded != null -> null
+        fallbackLoaded != null -> fallbackServer?.let { "Server $it · List from a download server, not the metadata index." }
+            ?: "List from a download server, not the metadata index."
+        anilistCount != null -> "Titles and stills aren't available for this title — showing episode numbers."
+        else -> null
+    }
+    val rowsIncomplete = (fallbackResult as? EpisodeResult.Loaded)?.incomplete ?: false
     when {
+        rows != null -> EpisodeRowsColumn(
+            title = title, rows = rows, jobs = jobs, note = rowsNote,
+            episodeView = episodeView, incomplete = rowsIncomplete,
+            onViewChange = { episodeView = it; prefs.edit().putString("episode_view", it).apply() },
+            resolving = resolving, resolvingServer = resolvingServer, rowErrors = rowErrors,
+            selected = selected, onRowTap = { onRowTap(it) }, onRowLongPress = { onRowLongPress(it) },
+            onDownloadSelected = { downloadSelected() }, onClearSelection = { selected = emptySet() },
+        )
         mediaResult == null -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             repeat(3) {
                 Box(modifier = Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(12.dp)).background(Card))
             }
         }
-        mediaLoaded != null -> {
-            // Metadata-index list: no source note at all — the
-            // list is metadata, not a server's list.
-            EpisodeRowsColumn(
-                title = title, rows = rows ?: emptyList(), jobs = jobs, note = null,
-                episodeView = episodeView,
-                onViewChange = { episodeView = it; prefs.edit().putString("episode_view", it).apply() },
-                resolving = resolving, resolvingServer = resolvingServer, rowErrors = rowErrors,
-                selected = selected, onRowTap = { onRowTap(it) }, onRowLongPress = { onRowLongPress(it) },
-                onDownloadSelected = { downloadSelected() }, onClearSelection = { selected = emptySet() },
-            )
-        }
         mediaResult is MediaIndexResult.NotFound -> {
-            // 2.0-dev1.7: bare AniList-count rows win over the
-            // fallback error/pending states when the count landed.
-            // While the count is still loading (fallback exhausted
-            // but anilistResult == null), skeletons — never a flash
-            // of the fallback error first.
-            val fallbackExhausted = fallbackResult is EpisodeResult.Failed ||
-                fallbackResult is EpisodeResult.SourcePending ||
-                (fallbackResult as? EpisodeResult.Loaded)?.episodes.isNullOrEmpty() == true
-            if (anilistCount != null) {
-                EpisodeRowsColumn(
-                    title = title, rows = rows ?: emptyList(), jobs = jobs,
-                    // No source name in the UI — the count's origin
-                    // is never named.
-                    note = "Titles and stills aren't available for this title — showing episode numbers.",
-                    episodeView = episodeView,
-                    onViewChange = { episodeView = it; prefs.edit().putString("episode_view", it).apply() },
-                    resolving = resolving, resolvingServer = resolvingServer, rowErrors = rowErrors,
-                    selected = selected, onRowTap = { onRowTap(it) }, onRowLongPress = { onRowLongPress(it) },
-                    onDownloadSelected = { downloadSelected() }, onClearSelection = { selected = emptySet() },
-                )
-            } else if (fallbackResult == null || (fallbackExhausted && anilistResult == null)) {
+            // No rows yet. While phase 2 hasn't answered
+            // (fallbackResult == null), skeletons — the count
+            // already ran in the race, so there is no second
+            // AniList wait here. Once phase 2 answers, the
+            // pending / failed / empty states below apply.
+            if (fallbackResult == null) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     repeat(3) {
                         Box(modifier = Modifier.fillMaxWidth().height(52.dp).clip(RoundedCornerShape(12.dp)).background(Card))
@@ -4232,12 +4349,11 @@ private fun EpisodeList(
                 RetryPill { CloudflareClearance.clearStored(context); reloadKey += 1 }
             }
             is EpisodeResult.Loaded -> {
-                // Server list, labelled as one: which server served
-                // it, and that it is NOT the metadata index.
-                val note = fallbackServer?.let { "Server $it · List from a download server, not the metadata index." }
-                    ?: "List from a download server, not the metadata index."
+                // Empty server list (a non-empty one means rows
+                // exist and the first branch wins): render the
+                // section with no rows, as before.
                 EpisodeRowsColumn(
-                    title = title, rows = rows ?: emptyList(), jobs = jobs, note = note,
+                    title = title, rows = rows ?: emptyList(), jobs = jobs, note = rowsNote,
                     episodeView = episodeView, incomplete = f.incomplete,
                     onViewChange = { episodeView = it; prefs.edit().putString("episode_view", it).apply() },
                     resolving = resolving, resolvingServer = resolvingServer, rowErrors = rowErrors,

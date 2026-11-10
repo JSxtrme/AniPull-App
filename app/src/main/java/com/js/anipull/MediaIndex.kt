@@ -34,7 +34,7 @@ data class MediaEpisode(
 
 sealed class MediaIndexResult {
     data class Loaded(val anilistId: Long, val episodes: List<MediaEpisode>) : MediaIndexResult()
-    object NotFound : MediaIndexResult()
+    data class NotFound(val anilistId: Long? = null) : MediaIndexResult()
     data class Failed(val message: String) : MediaIndexResult()
 }
 
@@ -215,11 +215,12 @@ object MediaIndex {
     // exact match -> disambiguate by format (ApiTitle.type) -> year
     // (ApiTitle.year is already a 4-digit year string from premiered)
     // -> popularity. No exact match: substring + highest popularity.
-    // A direct AniList-id hit (ApiTitle.id IS the AniList id) is
-    // checked first — same id space as the index, so it can only
-    // confirm a match, never invent one.
+    // A direct AniList-id hit is checked first — but ONLY when
+    // ApiTitle.id is a plausible AniList id (small int). AniLab ids
+    // (100000xxxx) live in a different id space and can never match
+    // an index entry, so they skip straight to title matching.
     private fun matchEntry(index: List<IndexEntry>, title: ApiTitle): IndexEntry? {
-        if (title.id > 0) {
+        if (title.id in 1 until 1_000_000) {
             index.firstOrNull { it.id == title.id }?.let { return it }
         }
         val want = normalizeTitle(title.title)
@@ -271,7 +272,7 @@ object MediaIndex {
         return try {
             val index = getIndex(context)
                 ?: return MediaIndexResult.Failed("Couldn't load the episode list — check your network and retry.")
-            val entry = matchEntry(index, title) ?: return MediaIndexResult.NotFound
+            val entry = matchEntry(index, title) ?: return MediaIndexResult.NotFound()
             loadEpisodesForId(context, entry.id)
         } catch (e: Exception) {
             MediaIndexResult.Failed(friendlyEpisodeListError(e))
@@ -287,7 +288,7 @@ object MediaIndex {
                 val epFile = episodeFile(context, anilistId)
                 val missFile = missingFile(context, anilistId)
                 if (missFile.exists() && now - missFile.lastModified() < MISSING_TTL_MS) {
-                    return@withContext MediaIndexResult.NotFound
+                    return@withContext MediaIndexResult.NotFound(anilistId)
                 }
                 if (epFile.exists() && now - epFile.lastModified() < EPISODES_TTL_MS) {
                     return@withContext try {
@@ -322,7 +323,7 @@ object MediaIndex {
                             missFile.writeText(now.toString())
                         } catch (_: Exception) {
                         }
-                        return@withContext MediaIndexResult.NotFound
+                        return@withContext MediaIndexResult.NotFound(anilistId)
                     }
                     return@withContext MediaIndexResult.Failed("Couldn't load the episode list — check your network and retry.")
                 }
