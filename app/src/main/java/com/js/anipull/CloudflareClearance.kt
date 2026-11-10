@@ -185,11 +185,22 @@ object CloudflareClearance {
 
     suspend fun ensureClearance(activity: Activity?): ClearanceResult {
         val ctx = activity ?: return ClearanceResult.Failed
+        // 2.0-dev1.9 TEMPORARY download diagnostics: init the log
+        // here — the clearance check runs before any engine init on
+        // the resolve path, so this is the earliest flush point.
+        DownloadLogs.init(ctx)
         if (activity.isFinishing || activity.isDestroyed) return ClearanceResult.Failed
-        loadStored(ctx)?.let { return ClearanceResult.Cleared(it) }
+        loadStored(ctx)?.let {
+            DownloadLogs.log("CLEARANCE", "stored clearance valid (age ${(System.currentTimeMillis() - it.mintedAtMs) / 1000}s, host=${it.host}) — no solve needed")
+            return ClearanceResult.Cleared(it)
+        }
+        DownloadLogs.log("CLEARANCE", "no valid stored clearance — solving in hidden WebView (up to 30s)")
         return ensureMutex.withLock {
             // Another caller may have stored one while we waited.
-            loadStored(ctx)?.let { return@withLock ClearanceResult.Cleared(it) }
+            loadStored(ctx)?.let {
+                DownloadLogs.log("CLEARANCE", "clearance stored while waiting — reusing it")
+                return@withLock ClearanceResult.Cleared(it)
+            }
             solveHidden(activity)
         }
     }
@@ -269,6 +280,17 @@ object CloudflareClearance {
                     // hidden view cannot tap. Surface the page.
                     result = ClearanceResult.NeedsUserAction
                 }
+                // 2.0-dev1.9 TEMPORARY download diagnostics: which
+                // outcome, and whether a challenge was even seen —
+                // no cookie value, only the result.
+                DownloadLogs.log(
+                    "CLEARANCE",
+                    when (result) {
+                        is ClearanceResult.Cleared -> "solve SUCCEEDED — clearance stored (host=${(result as ClearanceResult.Cleared).clearance.host})"
+                        ClearanceResult.NeedsUserAction -> "solve TIMED OUT with challenge on screen — needs user action"
+                        ClearanceResult.Failed -> if (sawChallenge) "solve FAILED after challenge seen" else "solve FAILED (no challenge seen — load error or timeout)"
+                    },
+                )
                 result
             } finally {
                 // Always tear the hidden view down, including on

@@ -138,17 +138,43 @@ object MultiSourceResolver {
         quality: String,
         onAttempt: ((Int) -> Unit)? = null,
     ): ResolvedDownload {
+        // 2.0-dev1.9 TEMPORARY download diagnostics: every resolve
+        // attempt is logged (server number, result/error, latency)
+        // so a pasted Download Logs report shows which servers even
+        // answer on the phone. No URLs, no cookies in the log.
+        DownloadLogs.log(
+            "RESOLVE",
+            "start: ep $number ${audio.lowercase()} $quality, candidates=${candidates.map { it.serverNumber }}",
+        )
         var last: ResolvedLink = ResolvedLink.Failed("All servers failed — tap Retry.")
         for (src in candidates) {
             onAttempt?.invoke(src.serverNumber)
+            val startedMs = System.currentTimeMillis()
             try {
                 val r = src.resolveEpisode(title, anilistId, number, audio, quality)
-                if (r !is ResolvedLink.Failed) return ResolvedDownload(r, src.serverNumber)
-                last = r
+                val tookMs = System.currentTimeMillis() - startedMs
+                when (r) {
+                    is ResolvedLink.DirectMp4 -> {
+                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: OK in ${tookMs}ms — DDL mp4 (${DownloadLogs.sanitizeUrl(r.url)})")
+                        return ResolvedDownload(r, src.serverNumber)
+                    }
+                    is ResolvedLink.Hls -> {
+                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: OK in ${tookMs}ms — HLS master (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})")
+                        return ResolvedDownload(r, src.serverNumber)
+                    }
+                    is ResolvedLink.Failed -> {
+                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: FAILED in ${tookMs}ms — ${r.message}")
+                        last = r
+                    }
+                }
             } catch (e: Exception) {
+                val tookMs = System.currentTimeMillis() - startedMs
+                DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: EXCEPTION in ${tookMs}ms — ${e.javaClass.simpleName}: ${e.message ?: ""}")
                 last = ResolvedLink.Failed(friendlyDownloadError(e))
             }
         }
+        val lastMsg = (last as? ResolvedLink.Failed)?.message ?: "All servers failed — tap Retry."
+        DownloadLogs.log("RESOLVE", "all servers failed — last: $lastMsg")
         return ResolvedDownload(last, null)
     }
 

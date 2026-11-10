@@ -77,6 +77,11 @@ fun SettingsScreen(onBack: () -> Unit) {
                     "Storage" -> StoragePage()
                     "About" -> AboutPage()
                     "Crash Logs" -> CrashLogsPage()
+                    // 2.0-dev1.9 TEMPORARY debug only: Download Logs
+                    // — the rolling download-pipeline log. Remove
+                    // this route (and DownloadLogs.kt) once downloads
+                    // work; nothing else depends on it.
+                    "Download Logs" -> DownloadLogsPage()
                 }
             }
         }
@@ -127,6 +132,23 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                     Column(modifier = Modifier.weight(1f)) {
                         Text("Crash Logs", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                         Text("View app crash reports & error logs", color = Muted, fontSize = 13.sp)
+                    }
+                    Text("›", color = Muted, fontSize = 22.sp)
+                }
+            }
+            // 2.0-dev1.9 TEMPORARY debug only: Download Logs, under
+            // Crash Logs in DEBUGGING. Same row style, Pink-tinted
+            // icon box. Will be removed once downloads work.
+            Spacer(Modifier.height(12.dp))
+            SettingsCard {
+                Row(modifier = Modifier.fillMaxWidth().clickable(onClick = { onOpen("Download Logs") }).padding(vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Box(modifier = Modifier.size(40.dp).clip(RoundedCornerShape(12.dp)).background(Pink.copy(alpha = 0.15f)), contentAlignment = Alignment.Center) {
+                        androidx.compose.foundation.Image(painter = painterResource(R.drawable.ic_download), contentDescription = null, modifier = Modifier.size(20.dp), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Pink))
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Download Logs", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        Text("Temporary — why a download failed, step by step", color = Muted, fontSize = 13.sp)
                     }
                     Text("›", color = Muted, fontSize = 22.sp)
                 }

@@ -262,13 +262,23 @@ object HlsDownloader {
             }
         }
 
+        // 2.0-dev1.9 TEMPORARY download diagnostics: every HLS
+        // stage is logged (playlist codes, variant pick, key
+        // fetches, per-segment errors, remux result) so the report
+        // shows exactly where a stream dies. URLs are host+path
+        // only — never query params / signatures.
+        val hlsStartedMs = System.currentTimeMillis()
+        DownloadLogs.log("HLS", "start: master=${DownloadLogs.sanitizeUrl(masterUrl)} quality=$quality audio=$audio")
         val masterText = EngineHttp.requestWithRetry(masterUrl, headers = fetchHeaders, timeoutMs = 15_000).let {
+            DownloadLogs.log("HLS", "master playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
             if (it.code != 200) throw java.io.IOException("Playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
             it.text
         }
         val subtitleTracks = parseExtXMedia(masterText, masterUrl).toMutableList()
         val mediaUrl = parseMasterPlaylist(masterText, masterUrl, quality, audio)
+        DownloadLogs.log("HLS", "variant: ${DownloadLogs.sanitizeUrl(mediaUrl)}${if (mediaUrl == masterUrl) " (master is media playlist)" else ""}")
         val mediaText = if (mediaUrl == masterUrl) masterText else EngineHttp.requestWithRetry(mediaUrl, headers = fetchHeaders, timeoutMs = 15_000).let {
+            DownloadLogs.log("HLS", "variant playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
             if (it.code != 200) throw java.io.IOException("Variant playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
             it.text
         }
@@ -279,12 +289,15 @@ object HlsDownloader {
         }
         val playlist = parseMediaPlaylist(mediaText, mediaUrl)
         if (playlist.segments.isEmpty()) throw java.io.IOException("Playlist has no segments — the stream may have expired, retry the download.")
+        DownloadLogs.log("HLS", "media playlist: ${playlist.segments.size} segments, init=${playlist.initSegmentUri != null}, subs=${subtitleTracks.size}")
 
         // Init segment (#EXT-X-MAP) first, if present.
         val initFile = File(tempDir, "init.ts")
         if (playlist.initSegmentUri != null && !initFile.exists()) {
-            val bytes = EngineHttp.requestWithRetry(playlist.initSegmentUri, headers = fetchHeaders, timeoutMs = 15_000).bytes
-            initFile.writeBytes(bytes)
+            val initResp = EngineHttp.requestWithRetry(playlist.initSegmentUri, headers = fetchHeaders, timeoutMs = 15_000)
+            DownloadLogs.log("HLS", "init segment: HTTP ${initResp.code}, ${initResp.bytes.size} bytes")
+            if (initResp.code != 200) throw java.io.IOException("Init segment fetch failed (HTTP ${initResp.code}) — retry the download.")
+            initFile.writeBytes(initResp.bytes)
         }
 
         // Keys: fetched once per unique URI, cached. A key override
@@ -295,6 +308,7 @@ object HlsDownloader {
             overrideKey?.let { return it }
             synchronized(keyCache) { keyCache[uri] }?.let { return it }
             return EngineHttp.requestWithRetry(uri, headers = fetchHeaders, timeoutMs = 10_000).let {
+                DownloadLogs.log("HLS", "key fetch: ${DownloadLogs.sanitizeUrl(uri)} -> HTTP ${it.code}, ${it.bytes.size} bytes")
                 if (it.code != 200 || it.bytes.size != 16) throw java.io.IOException("Could not fetch the stream key (HTTP ${it.code}).")
                 it.bytes
             }.also { synchronized(keyCache) { keyCache[uri] = it } }
@@ -369,18 +383,23 @@ object HlsDownloader {
                         } catch (e: CancellationException) {
                             throw e
                         } catch (e: Exception) {
-                            synchronized(failed) { failed += "segment ${seg.index}: ${friendlyDownloadError(e)}" }
+                            val msg = "segment ${seg.index}: ${friendlyDownloadError(e)}"
+                            DownloadLogs.log("HLS", "FAILED $msg")
+                            synchronized(failed) { failed += msg }
                         }
                     }
                 }
             }.awaitAll()
         }
         if (failed.isNotEmpty()) {
+            DownloadLogs.log("HLS", "aborted: ${failed.size} of $total segments failed in ${System.currentTimeMillis() - hlsStartedMs}ms — first: ${failed.first()}")
             throw java.io.IOException("${failed.size} of $total segments failed — download aborted, retry to resume. First: ${failed.first()}")
         }
         onProgress(downloadedBytes, downloadedBytes, 0.0)
+        DownloadLogs.log("HLS", "all $total segments done in ${System.currentTimeMillis() - hlsStartedMs}ms, ${downloadedBytes / 1024} KB — remuxing")
 
         remux(tempDir, playlist.segments.size, initFile, outputFile)
+        DownloadLogs.log("HLS", "remux done: ${outputFile.length() / 1024} KB -> ${outputFile.name}")
         // Segments are now inside the mp4; clean up.
         try {
             tempDir.deleteRecursively()
@@ -410,6 +429,7 @@ object HlsDownloader {
             extractor.setDataSource(combined.absolutePath)
             val trackCount = extractor.trackCount
             if (trackCount == 0) throw java.io.IOException("Remux failed: no tracks found in the stream.")
+            DownloadLogs.log("HLS", "remux: $trackCount track(s) from ${combined.length() / 1024} KB combined TS")
             muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val trackMap = IntArray(trackCount)
             for (i in 0 until trackCount) {

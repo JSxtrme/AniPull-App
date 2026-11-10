@@ -86,7 +86,10 @@ internal class PaheEpisodeSource(
         title.lowercase().filter { it.isLetterOrDigit() }
 
     override suspend fun loadEpisodes(title: ApiTitle): EpisodeResult {
-        if (clearanceCookie.isNullOrBlank()) return EpisodeResult.SourcePending
+        if (clearanceCookie.isNullOrBlank()) {
+            DownloadLogs.log("RESOLVE", "Server 3: no clearance — SourcePending, no network call")
+            return EpisodeResult.SourcePending
+        }
         return try {
             val q = URLEncoder.encode(title.title, "UTF-8").replace("+", "%20")
             val searchResp = paheGet("/api?m=search&l=8&q=$q")
@@ -467,6 +470,11 @@ internal class PaheEpisodeSource(
         quality: String,
     ): ResolvedLink {
         if (clearanceCookie.isNullOrBlank()) {
+            // 2.0-dev1.9 TEMPORARY download diagnostics: Pahe never
+            // makes a network call without a clearance — the log
+            // must show that, or a dead server 3 looks like a
+            // network failure instead of a missing session.
+            DownloadLogs.log("RESOLVE", "Server 3: no clearance — skipping, no network call")
             return ResolvedLink.Failed("The session is not ready — try again in a moment.")
         }
         return when (val result = loadEpisodes(title)) {

@@ -30,12 +30,18 @@ class DownloadService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // 2.0-dev1.9 TEMPORARY download diagnostics: init the log
+        // here too — the service is the earliest engine entry point
+        // on a cold start.
+        DownloadLogs.init(this)
         DownloadEngine.init(this)
+        DownloadLogs.log("SERVICE", "onCreate: service created")
         startForegroundIfNeeded()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         DownloadEngine.init(this)
+        DownloadLogs.log("SERVICE", "onStartCommand: startId=$startId")
         startForegroundIfNeeded()
         if (watcher == null) {
             watcher = scope.launch {
@@ -53,6 +59,7 @@ class DownloadService : Service() {
                             it.state == JobState.QUEUED || it.state == JobState.DOWNLOADING
                         }
                         if (stillQuiet) {
+                            DownloadLogs.log("SERVICE", "watcher: queue quiet for 7s — stopping service")
                             stopSelf()
                             return@launch
                         }
@@ -97,10 +104,12 @@ class DownloadService : Service() {
             } else {
                 startForeground(FOREGROUND_ID, notification)
             }
-        } catch (_: Exception) {
+            DownloadLogs.log("SERVICE", "foreground started (dataSync)")
+        } catch (e: Exception) {
             // If the system refuses the foreground start (e.g. a
             // background-start restriction), the jobs still run in
             // the engine's scope — just without the service shield.
+            DownloadLogs.log("SERVICE", "startForeground FAILED: ${e.javaClass.simpleName}: ${e.message ?: ""} (jobs still run in engine scope)")
             foregroundStarted = false
         }
     }

@@ -266,6 +266,10 @@ object DownloadEngine {
 
     fun init(context: Context) {
         val ctx = context.applicationContext
+        // 2.0-dev1.9 TEMPORARY download diagnostics: init the
+        // rolling log here (also called from DownloadService and
+        // the clearance path) so resolve-time entries flush to file.
+        DownloadLogs.init(ctx)
         synchronized(lock) {
             appContext = ctx
             if (initialized) return
@@ -278,6 +282,7 @@ object DownloadEngine {
             if (it.state == JobState.DOWNLOADING) it.copy(state = JobState.QUEUED, speedMBps = 0.0) else it
         }
         _jobs.value = restored
+        DownloadLogs.log("ENGINE", "init: restored ${restored.size} job(s), ${restored.count { it.state == JobState.QUEUED }} queued")
         if (restored.any { it.state == JobState.QUEUED }) pump()
     }
 
@@ -355,15 +360,24 @@ object DownloadEngine {
             _jobs.value = _jobs.value + job
         }
         persist(context.applicationContext)
+        val linkKind = when (link) {
+            is ResolvedLink.DirectMp4 -> "DDL mp4"
+            is ResolvedLink.Hls -> "HLS master"
+            else -> "failed-link"
+        }
+        DownloadLogs.logJob(id, "ENGINE", "enqueue: ${title.title} E${episode.number} $quality $audio, server=$serverNumber, link=$linkKind, wifiOverride=$wifiOverride")
         try {
             context.startForegroundService(Intent(context, DownloadService::class.java))
-        } catch (_: Exception) {
+            DownloadLogs.logJob(id, "ENGINE", "foreground service start requested")
+        } catch (e: Exception) {
+            DownloadLogs.logJob(id, "ENGINE", "foreground service start FAILED: ${e.javaClass.simpleName}: ${e.message ?: ""} (jobs still run in engine scope)")
         }
         pump()
         return id
     }
 
     fun pause(id: String) {
+        DownloadLogs.logJob(id, "ENGINE", "pause requested")
         controls[id]?.paused = true
         updateJob(id, { job ->
             if (job.state == JobState.DOWNLOADING || job.state == JobState.QUEUED) {
@@ -373,6 +387,7 @@ object DownloadEngine {
     }
 
     fun resume(id: String) {
+        DownloadLogs.logJob(id, "ENGINE", "resume requested (sets wifiOverride=true for this job)")
         controls[id]?.paused = false
         updateJob(id, { job ->
             if (job.state == JobState.PAUSED || job.state == JobState.FAILED) {
@@ -389,6 +404,7 @@ object DownloadEngine {
 
     fun cancel(id: String) {
         val job = _jobs.value.firstOrNull { it.id == id } ?: return
+        DownloadLogs.logJob(id, "ENGINE", "cancel requested (state=${job.state})")
         // A finished job is not cancellable — cancelling it would
         // delete the downloaded file out from under the user.
         if (job.state == JobState.COMPLETED || job.state == JobState.CANCELLED) return
@@ -465,9 +481,16 @@ object DownloadEngine {
         try {
             val job = _jobs.value.firstOrNull { it.id == id } ?: return
             val link = links[id] ?: run {
+                DownloadLogs.logJob(id, "ENGINE", "FAILED: resolved link is gone (not in memory, not restored from storage)")
                 updateJob(id, { it.copy(state = JobState.FAILED, error = "Download link is gone — tap to retry.") }, persistNow = true)
                 return
             }
+            val linkKind = when (link) {
+                is ResolvedLink.DirectMp4 -> "DDL mp4"
+                is ResolvedLink.Hls -> "HLS master"
+                else -> "failed-link"
+            }
+            DownloadLogs.logJob(id, "ENGINE", "runJob start: server=${job.serverNumber}, link=$linkKind, quality=${job.quality} ${job.audio}")
             val control = controls.getOrPut(id) { Control() }
             if (control.cancelled) {
                 updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0) }, persistNow = true)
@@ -481,7 +504,11 @@ object DownloadEngine {
             // FMAB ep 1 stuck on PAUSED on mobile data). The honest
             // "Paused — waiting for Wi-Fi" error stays for jobs
             // without the override.
-            if (!job.wifiOverride && wifiOnly(ctx) && !isWifiConnected(ctx)) {
+            val wifiOnlyOn = wifiOnly(ctx)
+            val onWifi = isWifiConnected(ctx)
+            DownloadLogs.logJob(id, "ENGINE", "wifi gate: wifiOnly=$wifiOnlyOn onWifi=$onWifi wifiOverride=${job.wifiOverride}")
+            if (!job.wifiOverride && wifiOnlyOn && !onWifi) {
+                DownloadLogs.logJob(id, "ENGINE", "GATED: paused — waiting for Wi-Fi (mobile data, no override)")
                 updateJob(id, { it.copy(state = JobState.PAUSED, error = "Paused — waiting for Wi-Fi", speedMBps = 0.0) }, persistNow = true)
                 return
             }
@@ -497,6 +524,7 @@ object DownloadEngine {
                 return
             }
             if (!hasNetwork(ctx)) {
+                DownloadLogs.logJob(id, "ENGINE", "FAILED: no network after ${waited}s wait")
                 failOrRetry(id, "No connection — check your network and retry.")
                 return
             }
@@ -505,6 +533,7 @@ object DownloadEngine {
             val dir = downloadDir(ctx, job.animeTitle)
             dir.mkdirs()
             val dest = resolveDestination(ctx, job, dir, fileName)
+            DownloadLogs.logJob(id, "ENGINE", "downloading: dest=${if (safTreeUri(ctx) != null) "SAF tree (staged locally)" else "file"} dir=${dir.absolutePath} file=$fileName")
             val speedLimit = speedLimitMbps(ctx)
             val segmentWorkers = (parallelLimit(ctx) * 2).coerceIn(2, 10)
             var hlsSubs: List<SubtitleTrack> = emptyList()
@@ -538,7 +567,11 @@ object DownloadEngine {
                 }
                 if (control.cancelled) throw CancellationException("cancelled")
                 // SAF mode: copy the finished file into the chosen tree.
+                // Size is read BEFORE finish(): a successful SAF copy
+                // deletes the staged file, so reading after would be 0.
+                val finishedBytes = dest.workFile.length()
                 val finalPath = dest.finish(ctx, fileName)
+                DownloadLogs.logJob(id, "ENGINE", "COMPLETED: ${finishedBytes / 1024} KB -> $finalPath")
                 updateJob(id, {
                     it.copy(
                         state = JobState.COMPLETED, progress = 100,
@@ -563,10 +596,15 @@ object DownloadEngine {
                 } catch (_: Exception) {
                 }
             } catch (e: CancellationException) {
+                DownloadLogs.logJob(id, "ENGINE", "CANCELLED by user")
                 deletePartials(ctx, job)
                 updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0, progress = 0, downloadedBytes = 0) }, persistNow = true)
                 ctx.let { DownloadNotifications.cancelJob(it, id) }
             } catch (e: Exception) {
+                // 2.0-dev1.9 diagnostics: the exact failure, not the
+                // friendly string — the friendly text is what the
+                // job stores; this line is what the report shows.
+                DownloadLogs.logJob(id, "ENGINE", "FAILED: ${e.javaClass.simpleName}: ${e.message ?: ""} (friendly: ${friendlyDownloadError(e)})")
                 // A failed HLS remux leaves a partial mp4 — drop it
                 // (the segments in the temp dir are kept: that IS
                 // the resume state). A failed DDL keeps its .part
@@ -585,6 +623,7 @@ object DownloadEngine {
         val shouldRetry = ctx != null && autoRetry(ctx) && (attempts[id] ?: 0) < 1
         if (shouldRetry) {
             attempts[id] = (attempts[id] ?: 0) + 1
+            DownloadLogs.logJob(id, "ENGINE", "auto-retry ${attempts[id]}/1 in 5s (error: $message)")
             // Stay FAILED during the backoff so pump() (called from
             // runJob's finally) does NOT restart the job immediately.
             // The delayed re-queue below is the only path back.
@@ -598,6 +637,7 @@ object DownloadEngine {
                 }
             }
         } else {
+            DownloadLogs.logJob(id, "ENGINE", "final failure (no auto-retry left): $message")
             updateJob(id, { it.copy(state = JobState.FAILED, error = message, speedMBps = 0.0) }, persistNow = true)
         }
     }
@@ -623,6 +663,7 @@ object DownloadEngine {
         speedLimitMBps: Int,
         onProgress: (Long, Long, Double) -> Unit,
     ) = withContext(Dispatchers.IO) {
+        val downloadStartedMs = System.currentTimeMillis()
         var existing = if (workFile.exists()) workFile.length() else 0L
         val conn = (URL(url).openConnection() as HttpURLConnection).apply {
             connectTimeout = 15_000
@@ -634,16 +675,19 @@ object DownloadEngine {
         }
         try {
             val code = conn.responseCode
+            DownloadLogs.logJob(jobId, "DDL", "GET ${DownloadLogs.sanitizeUrl(url)} -> HTTP $code, resumeFrom=${existing}B")
             if (code !in 200..299 && code != 206) {
                 throw java.io.IOException("Video server answered HTTP $code — retry the download.")
             }
             if (code == 200 && existing > 0) {
                 // Server ignored Range: restart from zero.
+                DownloadLogs.logJob(jobId, "DDL", "server ignored Range — restarting from 0")
                 existing = 0
                 workFile.delete()
             }
             val remaining = conn.contentLengthLong.takeIf { it > 0 } ?: -1L
             val total = if (remaining > 0) existing + remaining else -1L
+            DownloadLogs.logJob(jobId, "DDL", "total=${if (total > 0) "${total / 1024} KB" else "unknown"}")
             val throttle = SpeedThrottler(speedLimitMBps * 1024L * 1024L)
             var downloaded = existing
             var windowStart = System.currentTimeMillis()
@@ -675,6 +719,7 @@ object DownloadEngine {
                 }
             }
             onProgress(downloaded, total.coerceAtLeast(downloaded), lastSpeed)
+            DownloadLogs.logJob(jobId, "DDL", "done: ${downloaded / 1024} KB in ${System.currentTimeMillis() - downloadStartedMs}ms")
         } finally {
             conn.disconnect()
         }
@@ -694,7 +739,15 @@ object DownloadEngine {
         // returns the document URI string as the file path.
         fun finish(context: Context, fileName: String): String {
             val tree = safTreeUri ?: return workFile.absolutePath
-            val docUri = safCreateFile(context, tree, safDirName, fileName, workFile) ?: return workFile.absolutePath
+            val docUri = safCreateFile(context, tree, safDirName, fileName, workFile)
+            if (docUri == null) {
+                // 2.0-dev1.9 diagnostics: the SAF copy failed, so
+                // the staged file is kept as the result instead of
+                // failing the job — the log says which happened.
+                DownloadLogs.log("ENGINE", "SAF copy failed for $fileName — keeping staged file ${workFile.absolutePath}")
+                return workFile.absolutePath
+            }
+            DownloadLogs.log("ENGINE", "SAF copy done: $fileName -> ${docUri.host ?: "tree"}")
             return docUri.toString()
         }
     }
@@ -703,7 +756,16 @@ object DownloadEngine {
         val tree = safTreeUri(context)
         val workFile = if (tree != null) {
             // SAF mode: stage locally, copy into the tree on success.
+            // 2.0-dev1.9 FIX (provable from code): the .staging
+            // parent was NEVER created — runJob only mkdirs() the
+            // anime dir, and downloadMp4 opens a FileOutputStream
+            // on this file, so EVERY DDL download with a custom
+            // SAF folder picked died with FileNotFoundException
+            // before a single byte was written. (HLS survived only
+            // because remux() mkdirs() the output parent.) Create
+            // it here so both paths share the guarantee.
             File(File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, ".staging"), "${job.id}.part")
+                .also { it.parentFile?.mkdirs() }
         } else {
             File(dir, fileName)
         }
