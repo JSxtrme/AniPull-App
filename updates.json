@@ -69,19 +69,18 @@
     ]
   },
   "dev": {
-    "versionCode": 59,
-    "versionName": "2.0-dev1.8",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.8/anipull-2.0-dev1.8.apk",
-    "sha256": "f007fa3871b366626586c244e554ff5c76004af161aebd160eec2615d2dc9b00",
+    "versionCode": 60,
+    "versionName": "2.0-dev1.9",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.9/anipull-2.0-dev1.9.apk",
+    "sha256": "4ab05ef9a2909de215f8c4bb070f16d705dc662c40defcc033eb135a3186991f",
     "features": [
-      "Episode lists now load all sources at once instead of one after another \u2014 the first usable list shows immediately and a richer one replaces it, so newer titles stop taking minutes to load",
-      "Download sheet redesigned \u2014 compact, with the poster and title up top, all four qualities in one row, Sub/Dub as one switch, and servers in a single scrolling row"
+      "Temporary Download Logs section in Settings (under Crash Logs, DEBUGGING) \u2014 a rolling log of the whole download pipeline with a Copy report button, so a failed download can finally be diagnosed from the phone",
+      "Episode range grouping like shonenX \u2014 All, 1\u2013100, 101\u2013200 and so on above the episode list, so long titles like One Piece can be browsed a hundred episodes at a time"
     ],
     "fixes": [
-      "Fixed episode lists taking around 2 minutes on newer titles \u2014 the old chain ran three 45-second waits one after another; sources now race in parallel inside one 20-second budget",
-      "Fixed every episode showing twice \u2014 servers were emitting one row per audio (sub + dub) and nothing deduped them; one row per episode now, enforced at the source and in the list",
-      "Fixed the Pahe security check burning up to 30 seconds before any server was even tried \u2014 it is now solved only right before Server 3 is actually attempted",
-      "Fixed AniLab ids being sent to sources as AniList ids \u2014 only ids from the metadata index or AniList are used now; anything else goes straight to title search"
+      "Fixed long titles like One Piece lagging the phone \u2014 the episode list composed all 1,180 rows at once in a plain Column; rows are now lazy items of the scrolling list, so only the viewport is composed",
+      "Fixed every DDL download failing when a custom download folder is picked \u2014 the staging folder was never created, so the file open died before a single byte; the folder is now created first",
+      "Fixed the HLS engine silently writing an error page as the init segment when its fetch failed \u2014 a non-200 init fetch now throws instead of corrupting the download"
     ]
   }
 }
