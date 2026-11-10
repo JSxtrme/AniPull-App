@@ -69,21 +69,19 @@
     ]
   },
   "dev": {
-    "versionCode": 58,
-    "versionName": "2.0-dev1.7",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.7/anipull-2.0-dev1.7.apk",
-    "sha256": "a6d59cf99a5fb215dffadc2914c731e15229aea183ffc8830140e725fd8e6de6",
+    "versionCode": 59,
+    "versionName": "2.0-dev1.8",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.8/anipull-2.0-dev1.8.apk",
+    "sha256": "f007fa3871b366626586c244e554ff5c76004af161aebd160eec2615d2dc9b00",
     "features": [
-      "Episode lists now fall back to an episode count when the metadata index has no list for a title \u2014 numbered rows that still download, with titles and stills from a server's own list when it has them",
-      "Tapping an episode now opens a download sheet first \u2014 quality and audio pre-selected from your Settings, server override included \u2014 instead of starting instantly",
-      "Long-press an episode to select multiple episodes and download them together",
-      "New Sources section in Settings \u2014 reorder Server 1 to 9 to set your own auto-select priority, each with a short description of what it offers, plus an Auto-test button that checks every server and puts the fastest working ones first"
+      "Episode lists now load all sources at once instead of one after another \u2014 the first usable list shows immediately and a richer one replaces it, so newer titles stop taking minutes to load",
+      "Download sheet redesigned \u2014 compact, with the poster and title up top, all four qualities in one row, Sub/Dub as one switch, and servers in a single scrolling row"
     ],
     "fixes": [
-      "Fixed a download landing on Paused with no way to resume \u2014 it was the Wi-Fi-only gate re-pausing the job on every resume; an explicit Resume now actually resumes it",
-      "Fixed the Downloads tab hiding which server a download comes from \u2014 every job now shows its server, including while it is still resolving",
-      "Fixed episode rows showing a Sub/Dub tag \u2014 the audio choice lives only in the download sheet now",
-      "Fixed no feedback when tapping download \u2014 a toast now confirms the download started, or shows the error"
+      "Fixed episode lists taking around 2 minutes on newer titles \u2014 the old chain ran three 45-second waits one after another; sources now race in parallel inside one 20-second budget",
+      "Fixed every episode showing twice \u2014 servers were emitting one row per audio (sub + dub) and nothing deduped them; one row per episode now, enforced at the source and in the list",
+      "Fixed the Pahe security check burning up to 30 seconds before any server was even tried \u2014 it is now solved only right before Server 3 is actually attempted",
+      "Fixed AniLab ids being sent to sources as AniList ids \u2014 only ids from the metadata index or AniList are used now; anything else goes straight to title search"
     ]
   }
 }
