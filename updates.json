@@ -69,20 +69,21 @@
     ]
   },
   "dev": {
-    "versionCode": 57,
-    "versionName": "2.0-dev1.6",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.6/anipull-2.0-dev1.6.apk",
-    "sha256": "7a8337c9afb19d2d1fff3c2c7e05cbcc68f94dd3f4a168809d8d9e77c18cc38b",
+    "versionCode": 58,
+    "versionName": "2.0-dev1.7",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.7/anipull-2.0-dev1.7.apk",
+    "sha256": "a6d59cf99a5fb215dffadc2914c731e15229aea183ffc8830140e725fd8e6de6",
     "features": [
-      "Episode lists now come from a metadata index instead of a single server \u2014 real episode titles, stills and air dates, with a list/grid toggle",
-      "9 download servers behind one auto-picker \u2014 if one fails, the next takes over inside the same download; pin a default server in Settings or pick one per download",
-      "Subtitle sidecars now download next to the video when a server offers soft subtitles",
-      "Home now shows the real server count \u2014 9 servers, auto-picked \u2014 instead of three demo rows with fake statuses"
+      "Episode lists now fall back to an episode count when the metadata index has no list for a title \u2014 numbered rows that still download, with titles and stills from a server's own list when it has them",
+      "Tapping an episode now opens a download sheet first \u2014 quality and audio pre-selected from your Settings, server override included \u2014 instead of starting instantly",
+      "Long-press an episode to select multiple episodes and download them together",
+      "New Sources section in Settings \u2014 reorder Server 1 to 9 to set your own auto-select priority, each with a short description of what it offers, plus an Auto-test button that checks every server and puts the fastest working ones first"
     ],
     "fixes": [
-      "Fixed episode lists depending on one gated server \u2014 the list now loads even when that server is unreachable, falling back to a server's own list only when the index has none",
-      "Fixed server names showing up in the app \u2014 servers are Server 1 to 9 everywhere, with generic descriptions only",
-      "Fixed the security-check dialog popping up when another server had already served the episode \u2014 it now only appears when the whole chain actually needs it"
+      "Fixed a download landing on Paused with no way to resume \u2014 it was the Wi-Fi-only gate re-pausing the job on every resume; an explicit Resume now actually resumes it",
+      "Fixed the Downloads tab hiding which server a download comes from \u2014 every job now shows its server, including while it is still resolving",
+      "Fixed episode rows showing a Sub/Dub tag \u2014 the audio choice lives only in the download sheet now",
+      "Fixed no feedback when tapping download \u2014 a toast now confirms the download started, or shows the error"
     ]
   }
 }
