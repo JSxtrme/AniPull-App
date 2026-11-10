@@ -21,6 +21,8 @@ internal class PaheEpisodeSource(
     private val clearanceUa: String? = null,
 ) : EpisodeSource {
     override val sourceName: String = "AnimePahe"
+    override val serverNumber: Int = 3
+    override val serverDescription: String = ServerRegistry.description(3)
 
     companion object {
         // Rotatable list, never a single hardcoded host (.pw is the
@@ -88,17 +90,17 @@ internal class PaheEpisodeSource(
         return try {
             val q = URLEncoder.encode(title.title, "UTF-8").replace("+", "%20")
             val searchResp = paheGet("/api?m=search&l=8&q=$q")
-                ?: return EpisodeResult.Failed("Pahe did not answer — the source may be down or the session expired.")
+                ?: return EpisodeResult.Failed("The source did not answer — it may be down or the session expired.")
             // 2.0-dev1.4: a challenge page is HTML with a 200 status —
             // parsing it as JSON threw, and the list failed with a
             // misleading "Download failed". A non-JSON answer means
             // the session was rejected: say so honestly.
             val searchBody = searchResp.text
             if (!searchBody.trimStart().startsWith("{")) {
-                return EpisodeResult.Failed("Pahe is still showing its security check — the session didn't stick. Tap Retry to solve it again.")
+                return EpisodeResult.Failed("The source is still showing its security check — the session didn't stick. Tap Retry to solve it again.")
             }
             val data = JSONObject(searchBody).optJSONArray("data")
-                ?: return EpisodeResult.Failed("Pahe search returned no results for \"${title.title}\".")
+                ?: return EpisodeResult.Failed("Search returned no results for \"${title.title}\".")
             val want = normalize(title.title)
             var bestSession: String? = null
             var bestScore = Int.MAX_VALUE
@@ -122,7 +124,7 @@ internal class PaheEpisodeSource(
                 }
             }
             if (bestScore >= 30 || bestSession == null) {
-                return EpisodeResult.Failed("No matching title on Pahe for \"${title.title}\".")
+                return EpisodeResult.Failed("No matching title on this server for \"${title.title}\".")
             }
             val episodes = mutableListOf<EpisodeInfo>()
             var incomplete = false
@@ -138,7 +140,7 @@ internal class PaheEpisodeSource(
                 // 2.0-dev1.4: same challenge-HTML guard as search —
                 // the session can die mid-list.
                 if (!resp.text.trimStart().startsWith("{")) {
-                    return EpisodeResult.Failed("Pahe is still showing its security check — the session didn't stick. Tap Retry to solve it again.")
+                    return EpisodeResult.Failed("The source is still showing its security check — the session didn't stick. Tap Retry to solve it again.")
                 }
                 try {
                     val root = JSONObject(resp.text)
@@ -453,13 +455,41 @@ internal class PaheEpisodeSource(
         null
     }
 
+    // Decoupled resolve: search -> releases -> match the episode
+    // number (and audio when present) -> the same DDL-first chain
+    // as resolveDownload. The full list load is reused rather than
+    // re-implementing the search + pagination.
+    override suspend fun resolveEpisode(
+        title: ApiTitle,
+        anilistId: Long?,
+        number: Int,
+        audio: String,
+        quality: String,
+    ): ResolvedLink {
+        if (clearanceCookie.isNullOrBlank()) {
+            return ResolvedLink.Failed("The session is not ready — try again in a moment.")
+        }
+        return when (val result = loadEpisodes(title)) {
+            is EpisodeResult.Loaded -> {
+                val wantAudio = audioCode(audio)
+                val ep = result.episodes.firstOrNull { it.number == number && it.audio.equals(wantAudio, ignoreCase = true) }
+                    ?: result.episodes.firstOrNull { it.number == number }
+                    ?: return ResolvedLink.Failed("This episode isn't listed on this server.")
+                resolveDownload(ep, quality)
+            }
+            is EpisodeResult.SourcePending ->
+                ResolvedLink.Failed("The session is not ready — try again in a moment.")
+            is EpisodeResult.Failed -> ResolvedLink.Failed(result.message)
+        }
+    }
+
     override suspend fun resolveDownload(episode: EpisodeInfo, quality: String): ResolvedLink {
         if (clearanceCookie.isNullOrBlank()) {
-            return ResolvedLink.Failed("Pahe session is not ready — try again in a moment.")
+            return ResolvedLink.Failed("The session is not ready — try again in a moment.")
         }
         return try {
             val playResp = paheGet("/play/${episode.animeSession}/${episode.episodeSession}")
-                ?: return ResolvedLink.Failed("Could not open the episode page on Pahe.")
+                ?: return ResolvedLink.Failed("Could not open the episode page.")
             val html = playResp.text
             val variants = parseVariants(html)
             val chosen = pickVariant(variants, episode.audio, quality)
@@ -479,11 +509,11 @@ internal class PaheEpisodeSource(
             }
             // HLS fallback: Kwik m3u8 via the chosen (or first) button.
             val kwikUrl = chosen?.kwikUrl ?: variants.firstOrNull()?.kwikUrl
-                ?: return ResolvedLink.Failed("No stream found for this episode on Pahe.")
+                ?: return ResolvedLink.Failed("No stream found for this episode on this server.")
             val (kwikHtml, _) = fetchKwikPage(kwikUrl)
                 ?: return ResolvedLink.Failed("Could not reach the stream host — try again.")
             val m3u8 = extractM3u8(kwikHtml)
-                ?: return ResolvedLink.Failed("Could not extract a stream link — Pahe may have changed its player.")
+                ?: return ResolvedLink.Failed("Could not extract a stream link — the source may have changed its player.")
             ResolvedLink.Hls(m3u8)
         } catch (e: Exception) {
             ResolvedLink.Failed(friendlyDownloadError(e))

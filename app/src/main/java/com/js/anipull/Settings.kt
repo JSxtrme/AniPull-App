@@ -137,7 +137,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("2.0-dev1.5 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("2.0-dev1.6 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -447,8 +447,12 @@ fun DownloadsSettingsPage() {
     var subs by remember { mutableStateOf(prefs.getBoolean("subs", true)) }
     var autoRetry by remember { mutableStateOf(prefs.getBoolean("auto_retry", true)) }
     var keepScreenOn by remember { mutableStateOf(prefs.getBoolean("keep_screen_on", false)) }
+    // 2.0-dev1.6: default download server — 0 = Auto (try servers in
+    // priority order 1..9), 1..9 = always try that server first (the
+    // rest still back it up if it fails). Same key the sheet reads.
+    var preferredServer by remember { mutableStateOf(prefs.getInt("preferred_server", 0)) }
     fun save() {
-        prefs.edit().putInt("parallel", parallel).putInt("speed_mbps", speedLimit).putString("folder", folder).putString("quality", quality).putString("language", language).putBoolean("wifi_only", wifiOnly).putBoolean("ask_season", askSeason).putBoolean("subs", subs).putBoolean("auto_retry", autoRetry).putBoolean("keep_screen_on", keepScreenOn).apply()
+        prefs.edit().putInt("parallel", parallel).putInt("speed_mbps", speedLimit).putString("folder", folder).putString("quality", quality).putString("language", language).putBoolean("wifi_only", wifiOnly).putBoolean("ask_season", askSeason).putBoolean("subs", subs).putBoolean("auto_retry", autoRetry).putBoolean("keep_screen_on", keepScreenOn).putInt("preferred_server", preferredServer).apply()
     }
     val folderPicker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -458,7 +462,7 @@ fun DownloadsSettingsPage() {
             if (display.isNotBlank()) { folder = display; prefs.edit().putString("folder", display).putString("folder_uri", uri.toString()).apply() }
         }
     }
-    Text("Saved on this phone. Download settings apply once the download engine lands — right now downloads are still demo-only.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+    Text("Saved on this phone. Downloads use the real engine — these settings apply to every pull.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("QUEUE")
     SettingsCard {
@@ -510,6 +514,31 @@ fun DownloadsSettingsPage() {
                 }
             }
             Text("Sub = Japanese audio with subtitles. Dub = English audio.", color = Faint, fontSize = 12.sp)
+        }
+    }
+    Spacer(Modifier.height(20.dp))
+    SettingsSectionLabel("SERVER")
+    SettingsCard {
+        Column(modifier = Modifier.padding(vertical = 12.dp)) {
+            Text("Preferred server", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            // 2.0-dev1.6: no source names anywhere user-visible —
+            // servers are "Server 1".."Server 9" with the generic
+            // descriptions from the registry. Auto is the default.
+            val serverOptions = listOf(Triple("0", "Auto", "Tries servers in order until one works")) +
+                ServerRegistry.servers.map { Triple(it.number.toString(), "Server ${it.number}", it.description) }
+            SettingsDropdown(
+                selectedLabel = if (preferredServer == 0) "Auto" else "Server $preferredServer",
+                options = serverOptions,
+                currentValue = preferredServer.toString(),
+                onSelect = { preferredServer = it.toIntOrNull() ?: 0; save() },
+            )
+            Spacer(Modifier.height(8.dp))
+            Text(
+                if (preferredServer == 0) "Auto tries Server 1 first, then 2, 3… until one works. Pick a server to always try it first — the rest still back it up if it fails. A single download can still override this in its sheet."
+                else ServerRegistry.description(preferredServer),
+                color = Faint, fontSize = 12.sp,
+            )
         }
     }
     Spacer(Modifier.height(20.dp))
@@ -742,7 +771,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("2.0-dev1.5 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("2.0-dev1.6 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")
@@ -842,9 +871,9 @@ fun AboutPage() {
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
             Text("Metadata: AniLab (no key, live feed).", color = TextMain, fontSize = 14.sp)
             Spacer(Modifier.height(4.dp))
-            Text("Sources indexed: AnimePahe · AnimeTosho · AnimeOut.", color = Muted, fontSize = 13.sp)
+            Text("Downloads run on 9 servers, picked automatically.", color = Muted, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
-            Text("Downloads are demo-only until 2.0, when the real engine, queue, pause/resume and foreground service land.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+            Text("Downloads use the real engine — queue, pause/resume and the foreground service are live.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
         }
     }
 }

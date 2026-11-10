@@ -150,6 +150,22 @@ object DownloadEngine {
         put("error", job.error ?: JSONObject.NULL)
         put("filePath", job.filePath ?: JSONObject.NULL)
         links[job.id]?.let { link ->
+            val linkSubs: List<SubtitleTrack> = when (link) {
+                is ResolvedLink.DirectMp4 -> link.subtitles
+                is ResolvedLink.Hls -> link.subtitles
+                else -> emptyList()
+            }
+            if (linkSubs.isNotEmpty()) {
+                val subsArr = JSONArray()
+                linkSubs.forEach { s ->
+                    subsArr.put(JSONObject().apply {
+                        put("language", s.language)
+                        put("url", s.url)
+                        put("label", s.label ?: JSONObject.NULL)
+                    })
+                }
+                put("link_subs", subsArr)
+            }
             when (link) {
                 is ResolvedLink.DirectMp4 -> {
                     put("link_type", "mp4")
@@ -159,18 +175,42 @@ object DownloadEngine {
                 is ResolvedLink.Hls -> {
                     put("link_type", "hls")
                     put("link_url", link.masterPlaylistUrl)
+                    link.keyOverrideB64?.let { put("link_key", it) }
+                    link.ivOverrideB64?.let { put("link_iv", it) }
+                    link.referer?.let { put("link_referer", it) }
                 }
                 else -> {}
             }
         }
     }
 
+    private fun subsFromJson(obj: JSONObject): List<SubtitleTrack> {
+        val out = mutableListOf<SubtitleTrack>()
+        val arr = obj.optJSONArray("link_subs") ?: return out
+        for (i in 0 until arr.length()) {
+            val s = arr.optJSONObject(i) ?: continue
+            val url = s.optString("url").takeIf { it.isNotBlank() } ?: continue
+            out += SubtitleTrack(
+                language = s.optString("language").takeIf { it.isNotBlank() } ?: "en",
+                url = url,
+                label = s.optString("label").takeIf { it.isNotBlank() },
+            )
+        }
+        return out
+    }
+
     private fun jsonToJob(obj: JSONObject): DownloadJob? {
         return try {
             val id = obj.optString("id").takeIf { it.isNotBlank() } ?: return null
             when (obj.optString("link_type")) {
-                "mp4" -> links[id] = ResolvedLink.DirectMp4(obj.optString("link_url"), obj.optString("link_referer"))
-                "hls" -> links[id] = ResolvedLink.Hls(obj.optString("link_url"))
+                "mp4" -> links[id] = ResolvedLink.DirectMp4(obj.optString("link_url"), obj.optString("link_referer"), subsFromJson(obj))
+                "hls" -> links[id] = ResolvedLink.Hls(
+                    obj.optString("link_url"),
+                    subsFromJson(obj),
+                    obj.optString("link_key").takeIf { it.isNotBlank() },
+                    obj.optString("link_iv").takeIf { it.isNotBlank() },
+                    obj.optString("link_referer").takeIf { it.isNotBlank() },
+                )
             }
             DownloadJob(
                 id = id,
@@ -435,6 +475,7 @@ object DownloadEngine {
             val dest = resolveDestination(ctx, job, dir, fileName)
             val speedLimit = speedLimitMbps(ctx)
             val segmentWorkers = (parallelLimit(ctx) * 2).coerceIn(2, 10)
+            var hlsSubs: List<SubtitleTrack> = emptyList()
             try {
                 when (link) {
                     is ResolvedLink.DirectMp4 -> downloadMp4(
@@ -446,7 +487,7 @@ object DownloadEngine {
                         speedLimitMBps = speedLimit,
                         onProgress = { bytes, total, speed -> reportProgress(id, bytes, total, speed) },
                     )
-                    is ResolvedLink.Hls -> HlsDownloader.download(
+                    is ResolvedLink.Hls -> hlsSubs = HlsDownloader.download(
                         masterUrl = link.masterPlaylistUrl,
                         outputFile = dest.workFile,
                         tempDir = dest.tempDir,
@@ -456,6 +497,10 @@ object DownloadEngine {
                         isCancelled = { control.cancelled },
                         isPaused = { control.paused },
                         onProgress = { bytes, total, speed -> reportProgress(id, bytes, total, speed) },
+                        audio = job.audio,
+                        keyOverrideB64 = link.keyOverrideB64,
+                        ivOverrideB64 = link.ivOverrideB64,
+                        referer = link.referer,
                     )
                     is ResolvedLink.Failed -> throw java.io.IOException(link.message)
                 }
@@ -469,6 +514,22 @@ object DownloadEngine {
                         speedMBps = 0.0, error = null, filePath = finalPath,
                     )
                 }, persistNow = true)
+                // Subtitle sidecars (best-effort): union of the
+                // resolve-time tracks and the ones the master
+                // playlist itself advertised. A failed sidecar never
+                // fails the job.
+                try {
+                    val linkSubs: List<SubtitleTrack> = when (link) {
+                        is ResolvedLink.DirectMp4 -> link.subtitles
+                        is ResolvedLink.Hls -> link.subtitles
+                        else -> emptyList()
+                    }
+                    val allSubs = (linkSubs + hlsSubs).distinctBy { it.url }
+                    if (allSubs.isNotEmpty()) {
+                        writeSubtitleSidecars(ctx, job, fileName, finalPath, allSubs)
+                    }
+                } catch (_: Exception) {
+                }
             } catch (e: CancellationException) {
                 deletePartials(ctx, job)
                 updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0, progress = 0, downloadedBytes = 0) }, persistNow = true)
@@ -645,6 +706,58 @@ object DownloadEngine {
         }
     }
 
+    // --- Subtitle sidecars (best-effort) ------------------------------
+
+    // Download each subtitle track next to the finished video:
+    // same stem + .<language>.vtt. File mode writes beside the mp4;
+    // SAF mode writes into the same tree folder via DocumentsContract
+    // (reusing the safCreateFile pattern). A failed sidecar is
+    // skipped silently and never fails the job.
+    private fun writeSubtitleSidecars(
+        context: Context,
+        job: DownloadJob,
+        fileName: String,
+        finalPath: String,
+        subs: List<SubtitleTrack>,
+    ) {
+        val stem = fileName.removeSuffix(".mp4")
+        val used = mutableSetOf<String>()
+        for (sub in subs) {
+            try {
+                val langRaw = sub.language.ifBlank { "sub" }
+                    .map { c -> if (c.isLetterOrDigit() || c == '-' || c == '_') c else '-' }
+                    .joinToString("").trim('-').ifBlank { "sub" }
+                var vttName = "$stem.$langRaw.vtt"
+                var n = 2
+                while (!used.add(vttName)) {
+                    vttName = "$stem.$langRaw-$n.vtt"
+                    n++
+                }
+                val bytes = try {
+                    val resp = EngineHttp.requestWithRetry(sub.url, timeoutMs = 15_000)
+                    if (resp.code != 200 || resp.bytes.isEmpty()) null else resp.bytes
+                } catch (_: Exception) {
+                    null
+                } ?: continue
+                if (finalPath.startsWith("content://")) {
+                    val tree = safTreeUri(context) ?: continue
+                    val staging = File(
+                        File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, ".staging"),
+                        "${job.id}-$vttName",
+                    )
+                    staging.parentFile?.mkdirs()
+                    staging.writeBytes(bytes)
+                    safCreateFile(context, tree, sanitizeFileName(job.animeTitle), vttName, staging, mimeType = "text/vtt")
+                } else {
+                    val dir = File(finalPath).parentFile ?: continue
+                    File(dir, vttName).writeBytes(bytes)
+                }
+            } catch (_: Exception) {
+                // Best-effort: skip this track, keep the rest.
+            }
+        }
+    }
+
     // --- SAF helpers (framework DocumentsContract only, no new dep) -----
 
     private fun safFindChild(context: Context, treeUri: Uri, parentDocId: String, name: String): Uri? {
@@ -664,7 +777,7 @@ object DownloadEngine {
         return null
     }
 
-    private fun safCreateFile(context: Context, treeUri: Uri, dirName: String, fileName: String, source: File): Uri? {
+    private fun safCreateFile(context: Context, treeUri: Uri, dirName: String, fileName: String, source: File, mimeType: String = "video/mp4"): Uri? {
         return try {
             val resolver = context.contentResolver
             val rootId = DocumentsContract.getTreeDocumentId(treeUri)
@@ -681,7 +794,7 @@ object DownloadEngine {
                 } catch (_: Exception) {
                 }
             }
-            val docUri = DocumentsContract.createDocument(resolver, dirDoc, "video/mp4", fileName) ?: return null
+            val docUri = DocumentsContract.createDocument(resolver, dirDoc, mimeType, fileName) ?: return null
             resolver.openOutputStream(docUri)?.use { out ->
                 source.inputStream().use { it.copyTo(out) }
             } ?: return null
