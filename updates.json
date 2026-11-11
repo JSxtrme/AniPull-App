@@ -69,14 +69,15 @@
     ]
   },
   "dev": {
-    "versionCode": 72,
-    "versionName": "2.0-dev2.11",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.11/anipull-2.0-dev2.11.apk",
-    "sha256": "469d625f092bc4d3988127cd33da50d8c52c7fac45a86acd35f8d2d69b1d6aa4",
+    "versionCode": 73,
+    "versionName": "2.0-dev2.12",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.12/anipull-2.0-dev2.12.apk",
+    "sha256": "d1a7915557ba50ecb24361a725be840661b11f2572c142d14a24ab34cd3f4627",
     "features": [
-      "New 10th source: Server 10 joins the race \u2014 a direct-download source (subtitles burned in, single file per episode) that can win 1080p Sub requests. It counts as a direct file, so the \"Prefer direct downloads\" toggle prefers it over streams at the same quality. Home now reads \"10 Sources\"",
-      "Home now shows 10 Sources: the stats cell that read \"3 DDL Sources\" now reads the live server count (\"10 Sources\"), and the chip above it reads \"10 servers\" \u2014 both derived from the server list so they stay truthful as sources are added"
+      "The update sheet now resolves the download link in the background while you read the changelog, so tapping Download & Install connects straight to the download server instead of waiting on GitHub's slow redirect first"
     ],
-    "fixes": []
+    "fixes": [
+      "Fixed the updater sitting on \"Connecting\u2026\" for seconds before installing \u2014 the slow part was GitHub generating the signed download link (~1s) plus a second connection to another host, all hidden behind one word with no retry. The sheet now shows honest phases (\"Contacting GitHub\u2026\", \"Redirecting to download server\u2026\", \"Starting download\u2026\") and a stalled connection retries once instead of dying"
+    ]
   }
 }
