@@ -69,13 +69,17 @@
     ]
   },
   "dev": {
-    "versionCode": 61,
-    "versionName": "2.0-dev2.0",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.0/anipull-2.0-dev2.0.apk",
-    "sha256": "cec966ef4988c4655a85b1dbf7602fe22cf025b27956032bfbb253ca637c284c",
-    "features": [],
+    "versionCode": 62,
+    "versionName": "2.0-dev2.1",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.1/anipull-2.0-dev2.1.apk",
+    "sha256": "b1bf4632fb444d156b60a1397b314781eac50d48c539a7a7791c7f3f477aa3dd",
+    "features": [
+      "Server 5's episode list actually works now \u2014 its library parser never matched the real library file, so the server could never match any title; it now reads the real shape and looks titles up by AniList id when the id is already known",
+      "Episode lists no longer hide episodes a server doesn't have \u2014 when the AniList count says more episodes aired than the winning list holds, the missing numbers appear as bare rows that resolve through the next server instead"
+    ],
     "fixes": [
-      "Fixed the episode list showing only skeletons \u2014 dev1.9's restructure split the episode list into a state holder and a plain emitter, and the derived episode rows were plain variables that nothing subscribed to, so the detail page never re-rendered when a list landed; rows are snapshot state now and the detail page and download sheet read them in their own scope, so episode rows appear as soon as a source lands (list and grid, detail and sheet)"
+      "Fixed Server 5 never returning any episode list \u2014 its parser only handled a top-level array or an id-keyed object, but the live library is a {built, titles} wrapper with hosting nested under lib (folder, eps, audio, subs) and episodes as a count; the parser now reads the real shape and reports a partial library as incomplete instead of failing",
+      "Fixed episode lists silently dropping episodes \u2014 a partial server list used to win over the AniList count, so episodes the server lacked simply never appeared; missing numbers are now padded in as bare rows that download through the next working server"
     ]
   }
 }
