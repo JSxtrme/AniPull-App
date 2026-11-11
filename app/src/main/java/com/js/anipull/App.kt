@@ -4016,16 +4016,25 @@ private class EpisodeListState(
     var episodeView by mutableStateOf(prefs.getString("episode_view", "list") ?: "list")
     // 2.0-dev1.9: range grouping state (see EpisodeRange.kt).
     var rangeIndex by mutableStateOf(0)
-    // Derived in the holder every recomposition (plain vars — the
-    // holder's remember() reads subscribe the caller, so the
-    // caller's LazyColumn re-emits when a source lands).
-    var rows: List<EpisodeRow>? = null
-    var ranges: List<EpisodeRange> = emptyList()
-    var safeRangeIndex: Int = 0
-    var visibleRows: List<EpisodeRow>? = null
-    var rowsNote: String? = null
-    var rowsIncomplete: Boolean = false
-    var jobs: List<DownloadJob> = emptyList()
+    // Derived in the holder every recomposition — as SNAPSHOT
+    // state (mutableStateOf), not plain vars. 2.0-dev1.9 had these
+    // as plain vars with a comment claiming the holder's
+    // remember() reads subscribe the caller: FALSE. A callee's
+    // state reads subscribe only the callee's own scope, so when
+    // a source landed the holder re-derived rows into a plain var
+    // and nothing recomposed — DetailScreen never re-ran its
+    // LazyColumn DSL and the list stayed on skeletons forever
+    // (dev1.9 regression, JS phone test 2026-11-11). Snapshot
+    // state here + a read in the caller's own scope (see
+    // DetailScreen / DownloadSheet) is what re-subscribes the
+    // caller, so the LazyColumn re-emits with the new rows.
+    var rows by mutableStateOf<List<EpisodeRow>?>(null)
+    var ranges by mutableStateOf<List<EpisodeRange>>(emptyList())
+    var safeRangeIndex by mutableStateOf(0)
+    var visibleRows by mutableStateOf<List<EpisodeRow>?>(null)
+    var rowsNote by mutableStateOf<String?>(null)
+    var rowsIncomplete by mutableStateOf(false)
+    var jobs by mutableStateOf<List<DownloadJob>>(emptyList())
 
     // One pull path for list rows, grid cells, the multi-select
     // batch and the retry after Done — the sheet season loop goes
@@ -4955,7 +4964,25 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
     // here, in @Composable context, before the LazyColumn — the
     // plain EpisodeList(state) emission inside the LazyColumn
     // then only calls item { } / items(...).
-    val episodeState = rememberEpisodeListState(title = title, quality = qualityPref, audioFilter = null)
+    // 2.0-dev2.0 REGRESSION FIX (dev1.9 broke the episode list):
+    // the holder derives rows into snapshot state (see
+    // EpisodeListState), but a read inside the LazyColumn DSL
+    // alone subscribes NOBODY — the DSL block is not a
+    // @Composable scope. So this scope must read the derived
+    // state itself, BEFORE the LazyColumn: that read subscribes
+    // DetailScreen, and when a source lands DetailScreen
+    // recomposes and the LazyColumn DSL re-emits with the rows.
+    // The onLoaded rescue below is the second subscription path
+    // (same trick the DownloadSheet already had): the holder's
+    // effect writes detailLoadedEpisodes, a mutableStateOf owned
+    // by THIS scope, which also forces a recomposition.
+    var detailLoadedEpisodes by remember { mutableStateOf<List<EpisodeInfo>?>(null) }
+    val episodeState = rememberEpisodeListState(
+        title = title, quality = qualityPref, audioFilter = null,
+        onLoaded = { detailLoadedEpisodes = it },
+    )
+    @Suppress("UNUSED_VARIABLE")
+    val episodeRows = episodeState.rows // subscription read — see above; value itself is emitted by EpisodeList(state)
     var synExpanded by remember { mutableStateOf(false) }
     // 1.9-dev4.8 extra smoothness: without a hero, the detail fades
     // in over 300ms instead of appearing instantly; with a hero, the
@@ -5258,6 +5285,13 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit) {
             seasonListServer = listServer
         },
     )
+    // 2.0-dev2.0: same subscription read as DetailScreen — the
+    // sheet already had the onLoaded rescue above, but reading
+    // the derived rows in THIS scope too means the sheet
+    // recomposes the moment a source lands, instead of only
+    // when the holder's onLoaded effect fires.
+    @Suppress("UNUSED_VARIABLE")
+    val sheetEpisodeRows = episodeState.rows // subscription read — value itself is emitted by EpisodeList(state)
     ModalBottomSheet(onDismissRequest = onDismiss) {
         // 2.0-dev1.9: LazyColumn, not Column + verticalScroll — the
         // episode rows are lazy items of THIS list (same One Piece
