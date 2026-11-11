@@ -4232,6 +4232,48 @@ private fun showToast(context: android.content.Context, message: String) {
     }
 }
 
+// 2.0-dev2.8: live sheet-size state machine for the per-episode
+// confirm sheet. Unknown = the size could not be determined (or
+// no fetch has finished) — the sheet shows NO size line, exactly
+// like the old behaviour. Checking = a fetch is in flight — the
+// sheet shows "Size: checking…". Known = a label for THIS combo.
+// The Download button is never disabled or blocked by this state.
+private sealed class SheetSizeState {
+    object Unknown : SheetSizeState()
+    object Checking : SheetSizeState()
+    data class Known(val label: String) : SheetSizeState()
+}
+
+// 2.0-dev2.8: size label for ONE already-resolved link — never
+// borrowed from another source or server. Order: the link's own
+// stored size first (exact DDL probe total / API label, or an HLS
+// estimate a resolver already attached); else a DDL link is
+// probed at its OWN url (exact total from Content-Range), and an
+// HLS link is estimated from its OWN master playlist (summed
+// byte-ranges when present, else AVERAGE-BANDWIDTH x duration,
+// "~"). Null = this link's size genuinely cannot be determined —
+// the caller shows nothing, never a number from elsewhere.
+private suspend fun sheetSizeLabelForLink(link: ResolvedLink, quality: String, audio: String): String? {
+    link.sizeLabel()?.let { return it }
+    return when (link) {
+        is ResolvedLink.DirectMp4 -> {
+            val headers = if (link.referer.isNotBlank()) mapOf("Referer" to link.referer) else emptyMap()
+            val probe = DdlQualityProbe.probeDdlQuality(link.url, headers, timeoutMs = 4_000) ?: return null
+            probe.totalBytes?.takeIf { it > 0 }?.let { formatSizeBytes(it, estimate = false) }
+        }
+        is ResolvedLink.Hls -> {
+            val headers = buildMap {
+                link.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+                link.origin?.takeIf { it.isNotBlank() }?.let { put("Origin", it) }
+            }
+            val estimate = DdlQualityProbe.estimateHlsSizeBytes(link.masterPlaylistUrl, headers, quality, audio)
+                ?: return null
+            if (estimate.bytes > 0) formatSizeBytes(estimate.bytes, estimate.isEstimate) else null
+        }
+        is ResolvedLink.Failed -> null
+    }
+}
+
 // 2.0-dev1.7: per-episode confirm sheet — tapping an episode
 // row / grid cell NO LONGER downloads immediately. It opens this
 // sheet instead: episode title + "Episode N", Quality chips
@@ -4251,10 +4293,58 @@ private fun EpisodeDownloadSheet(
     initialServer: Int, // 0 = Auto
     onDismiss: () -> Unit,
     onConfirm: (quality: String, audio: String, server: Int) -> Unit,
+    // 2.0-dev2.8: warms a resolve for the sheet's CURRENT chips
+    // (threaded in from EpisodeListDialogs, which owns the state).
+    // Null = no warmer available; the sheet then shows a size only
+    // when a link is already cached for the combo.
+    onWarmSize: ((quality: String, audio: String, server: Int) -> Unit)? = null,
 ) {
     var quality by remember(row.number) { mutableStateOf(initialQuality) }
     var audio by remember(row.number) { mutableStateOf(initialAudio) }
     var server by remember(row.number) { mutableStateOf(initialServer) }
+    val context = LocalContext.current
+    // 2.0-dev2.8: instant Known when the cached link for the
+    // OPENING combo already carries a size — a re-tap / reopen
+    // shows it on the first frame with no fetch at all.
+    var sheetSize by remember(row.number) {
+        mutableStateOf<SheetSizeState>(
+            ResolveCache.lookup(context, title.id, row.number, initialAudio, initialQuality, initialServer, null)?.link?.sizeLabel()
+                ?.let { SheetSizeState.Known(it) } ?: SheetSizeState.Unknown,
+        )
+    }
+    // 2.0-dev2.8: live size for the current chips, in order:
+    // (i) the cached link for this EXACT combo (same title /
+    // episode / audio / quality / first server — the link the
+    // confirm would actually download, never another server's
+    // link as a proxy) -> its own sizeLabel, instant;
+    // (ii) that link without a size -> probe / estimate THAT
+    // link's own URL / master playlist (see
+    // sheetSizeLabelForLink); (iii) no cached link -> warm a
+    // resolve for THIS combo in the background, await the
+    // coalesced in-flight resolve, then re-run (i)/(ii) on what
+    // landed. A fetch that yields nothing leaves Unknown (no
+    // size line). The effect re-runs on every chip tap; a
+    // previously computed combo answers from ResolveCache +
+    // the probe/size caches with no re-fetch.
+    LaunchedEffect(quality, audio, server) {
+        val cachedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null)?.link
+        if (cachedLink != null) {
+            cachedLink.sizeLabel()?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
+            sheetSize = SheetSizeState.Checking
+            sheetSizeLabelForLink(cachedLink, quality, audio)?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
+            sheetSize = SheetSizeState.Unknown
+            return@LaunchedEffect
+        }
+        sheetSize = SheetSizeState.Checking
+        onWarmSize?.invoke(quality, audio, server)
+        awaitInFlightResolve(title.id, row.number, audio, quality, server)
+        val landedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null)?.link
+        if (landedLink != null) {
+            landedLink.sizeLabel()?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
+            sheetSizeLabelForLink(landedLink, quality, audio)?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
+        }
+        sheetSize = SheetSizeState.Unknown
+    }
     Dialog(onDismissRequest = onDismiss) {
         Column(
             modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(16.dp),
@@ -4300,17 +4390,23 @@ private fun EpisodeDownloadSheet(
                     ) { Text("${q}p", fontSize = 13.sp) }
                 }
             }
-            // 2.0-dev2.6: size for the SELECTED quality only, when
-            // the pre-resolve already cached a link for these exact
-            // choices. Null -> show nothing (never an invented size).
-            // Read inline (not remember) so a pre-resolve landing
-            // after the sheet opened shows up on recomposition.
+            // 2.0-dev2.8: live size (see the LaunchedEffect above
+            // the Dialog). Known -> the label; Checking -> the
+            // "checking…" line; Unknown -> NO size line at all
+            // (never an invented or borrowed size). The Download
+            // button below is never gated on this state.
             // NOTE: the season DownloadSheet has no single-episode
             // size, so it deliberately shows none there.
-            val sheetSizeLabel = ResolveCache.lookup(LocalContext.current, title.id, row.number, audio, quality, server, null)?.link?.sizeLabel()
-            if (sheetSizeLabel != null) {
-                Spacer(Modifier.height(6.dp))
-                Text("Size: $sheetSizeLabel", color = Muted, fontSize = 12.sp)
+            when (val sizeState = sheetSize) {
+                is SheetSizeState.Known -> {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Size: ${sizeState.label}", color = Muted, fontSize = 12.sp)
+                }
+                is SheetSizeState.Checking -> {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Size: checking…", color = Muted, fontSize = 12.sp)
+                }
+                is SheetSizeState.Unknown -> Unit
             }
             Spacer(Modifier.height(10.dp))
             Text("Audio", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
@@ -4689,6 +4785,38 @@ private class EpisodeListState(
                 resolveOnly(
                     context, title, row.info.copy(audio = pullAudio),
                     quality, serverOverride = initialServer,
+                    anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
+                    listServer = if (row.fromMediaIndex) null else fallbackServer,
+                )
+            }.getOrNull()
+        }
+        if (resolveInFlight.putIfAbsent(key, deferred) != null) return
+        deferred.invokeOnCompletion {
+            resolveInFlight.remove(key, deferred)
+        }
+        deferred.start()
+    }
+
+    // 2.0-dev2.8: SIZE warm for the sheet's CURRENT chips.
+    // preResolveRow above warms only the sheet's OPENING choices
+    // (Settings defaults); a chip tap changes quality/audio/server
+    // and needs a resolve for THAT combo before its size can be
+    // shown. Same shape as preResolveRow — same application-
+    // lifetime preResolveScope, same shared resolveInFlight
+    // putIfAbsent coalescing with resolveCoalesceKey, same
+    // resolveOnly call (episode audio copied from the sheet's
+    // audio chip, anilistId / fromMediaIndex from the row,
+    // listServer only for non-media-index rows) — only the
+    // parameters come from the caller instead of the state's
+    // defaults. Silent like preResolveRow: a failure changes
+    // nothing, the sheet just shows no size.
+    fun warmSizeFor(row: EpisodeRow, quality: String, audio: String, server: Int) {
+        val key = resolveCoalesceKey(title.id, row.number, audio, quality, server)
+        val deferred = preResolveScope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            runCatching {
+                resolveOnly(
+                    context, title, row.info.copy(audio = audioCode(audio)),
+                    quality, serverOverride = server,
                     anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
                     listServer = if (row.fromMediaIndex) null else fallbackServer,
                 )
@@ -5260,6 +5388,7 @@ private fun EpisodeListDialogs(state: EpisodeListState) {
             initialServer = state.initialServer,
             onDismiss = { state.onConfirmDismiss() },
             onConfirm = { q, a, s -> state.onConfirm(q, a, s) },
+            onWarmSize = { q, a, s -> state.warmSizeFor(row, q, a, s) },
         )
     }
 }

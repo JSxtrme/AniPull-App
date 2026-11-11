@@ -136,6 +136,30 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
         }
     }
 
+    // 2.0-dev2.8: parse the API's stated "filesize" label
+    // ("27MB", "1.2GB", "404MB") into bytes. Same digits-first
+    // style as the resolution parsing above; a malformed label
+    // parses to null, never a crash. This is the API's stated size
+    // for THIS file only — it is exact (sizeIsEstimate = false),
+    // but only as a FALLBACK when the probe returns no total, and
+    // it is never borrowed for another server's file.
+    private fun parseApiFilesizeBytes(raw: String?): Long? {
+        val label = raw?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val match = Regex("""^(\d+(?:\.\d+)?)\s*([KMGT]?B?)$""", RegexOption.IGNORE_CASE)
+            .find(label) ?: return null
+        val value = match.groupValues.getOrNull(1)?.toDoubleOrNull() ?: return null
+        val unit = match.groupValues.getOrNull(2)?.uppercase().orEmpty()
+        val multiplier = when (unit) {
+            "", "B" -> 1L
+            "K", "KB" -> 1024L
+            "M", "MB" -> 1024L * 1024L
+            "G", "GB" -> 1024L * 1024L * 1024L
+            "T", "TB" -> 1024L * 1024L * 1024L * 1024L
+            else -> return null
+        }
+        return runCatching { (value * multiplier).toLong() }.getOrNull()?.takeIf { it > 0 }
+    }
+
     // 2.0-dev2.6: `quality` is null when the API states none
     // ("auto", blank, or missing): UNKNOWN, not 1080. The old
     // code ran the raw string through qualityHeight(), whose
@@ -284,11 +308,12 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                     val downloads = runCatching { JSONObject(dlResp.text).optJSONArray("downloads") }.getOrNull()
                     if (downloads != null) {
                         // (url, stated height or null when the API
-                        // states none). Unstated entries used to be
+                        // states none, API-stated filesize bytes or
+                        // null). Unstated entries used to be
                         // SKIPPED outright — now they are kept and
                         // the probe decides them, so a good DDL is
                         // never hidden by a missing label.
-                        val options = mutableListOf<Pair<String, Int?>>()
+                        val options = mutableListOf<Triple<String, Int?, Long?>>()
                         for (i in 0 until downloads.length()) {
                             val d = downloads.optJSONObject(i) ?: continue
                             if (d.optBoolean("isDub") != wantDub) continue
@@ -298,7 +323,7 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                                     ?.groupValues?.getOrNull(1)?.toIntOrNull()
                                 ?: Regex("""(\d+)""").find(d.optString("quality"))
                                     ?.groupValues?.getOrNull(1)?.toIntOrNull()
-                            options += url to res
+                            options += Triple(url, res, parseApiFilesizeBytes(d.optString("filesize")))
                         }
                         // Highest stated height at/below wanted;
                         // else the lowest stated height; else an
@@ -308,7 +333,7 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                             ?: options.filter { it.second != null }.minByOrNull { it.second ?: 0 }
                             ?: options.firstOrNull()
                         if (pick != null) {
-                            val (bestUrl, statedRes) = pick
+                            val (bestUrl, statedRes, apiFilesizeBytes) = pick
                             // Probe BEFORE the floor decision: a
                             // probed height overrides the stated one
                             // (a lying 1080 label loses to a real
@@ -317,7 +342,12 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                             // unknown) and the race re-probes / the
                             // post-download check stays the backstop.
                             // The probe's exact total size rides
-                            // along for the sheet, free.
+                            // along for the sheet, free. When the
+                            // probe returns no total, the API's own
+                            // "filesize" label for THIS file is the
+                            // fallback (exact, not an estimate) —
+                            // the probe total always wins when it
+                            // exists.
                             val probe = DdlQualityProbe.probeDdlQuality(
                                 bestUrl,
                                 mapOf("Referer" to ORIGIN),
@@ -327,7 +357,7 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                             val ddl = ResolvedLink.DirectMp4(
                                 bestUrl, ORIGIN,
                                 actualQuality = realHeight,
-                                estimatedSizeBytes = probe?.totalBytes,
+                                estimatedSizeBytes = probe?.totalBytes ?: apiFilesizeBytes,
                                 sizeIsEstimate = false,
                             )
                             if (realHeight != null && realHeight >= floor) return ddl

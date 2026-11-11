@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 
 // 2.0-dev2.6 — DDL QUALITY PROBE + HLS SIZE ESTIMATE.
 //
@@ -21,9 +22,20 @@ import java.net.URL
 //
 // HLS links get the same treatment for SIZE only (their height
 // comes from the master playlist, parsed by HlsDownloader at
-// download time): BANDWIDTH x total duration as an estimate, or
-// summed #EXT-X-BYTERANGE lengths when the playlist carries them
-// (exact). No segments are ever downloaded here.
+// download time): AVERAGE-BANDWIDTH x total duration as an
+// estimate, or summed #EXT-X-BYTERANGE lengths when the playlist
+// carries them (exact). No segments are ever downloaded here.
+//
+// 2.0-dev2.8 — SIZE CACHES. The download sheet re-asks for the
+// size on every quality/audio/server tap; without caching each
+// tap re-fetched the master + media playlists (and re-probed the
+// DDL). Master/media playlist text, computed HLS sizes and DDL
+// probe results are now cached in memory (~10 min TTL, ~20
+// entries each, oldest evicted, ConcurrentHashMap, never throws),
+// so a re-tap of a computed combo is instant with no re-fetch.
+// The caches are per-URL / per-(master, quality, audio): a size
+// is NEVER borrowed from another server's link — 1080p is only
+// the dimensions, every source encodes at its own bitrate.
 
 object DdlQualityProbe {
 
@@ -42,6 +54,46 @@ object DdlQualityProbe {
     private const val HEAD_BYTES = 64 * 1024 // one Range chunk
     private const val MAX_PLAYLIST_BYTES = 512 * 1024
 
+    // 2.0-dev2.8 — in-memory size caches (see the object header).
+    // TTL ~10 min: playlists are small text that can change, and
+    // a DDL file's size/height never changes, but a bounded TTL
+    // keeps stale entries from living forever. Bounded ~20 each,
+    // oldest evicted first. Failures are never cached, so a failed
+    // fetch/probe can be retried on the next tap.
+    private const val SIZE_CACHE_TTL_MS = 10 * 60_000L
+    private const val SIZE_CACHE_MAX_ENTRIES = 20
+
+    private data class CachedEntry<T>(val value: T, val atMs: Long)
+
+    private val masterPlaylistCache = ConcurrentHashMap<String, CachedEntry<String>>()
+    private val mediaPlaylistCache = ConcurrentHashMap<String, CachedEntry<String>>()
+    private val hlsSizeCache = ConcurrentHashMap<String, CachedEntry<HlsSizeEstimate>>()
+    private val ddlProbeCache = ConcurrentHashMap<String, CachedEntry<ProbeResult>>()
+
+    private fun <T> cachedGet(map: ConcurrentHashMap<String, CachedEntry<T>>, key: String): T? {
+        return try {
+            val entry = map[key] ?: return null
+            if (System.currentTimeMillis() - entry.atMs > SIZE_CACHE_TTL_MS) {
+                map.remove(key, entry)
+                return null
+            }
+            entry.value
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun <T> cachedPut(map: ConcurrentHashMap<String, CachedEntry<T>>, key: String, value: T) {
+        try {
+            if (map.size >= SIZE_CACHE_MAX_ENTRIES) {
+                map.entries.minByOrNull { it.value.atMs }?.key?.let { map.remove(it) }
+            }
+            map[key] = CachedEntry(value, System.currentTimeMillis())
+        } catch (_: Exception) {
+            // Caching must never break the probe itself.
+        }
+    }
+
     // Probe a DDL mp4 URL: real video height + exact total size.
     // `headers` is the download's own headers (e.g. Referer) — the
     // proxy/CDN sees the same request the download would make.
@@ -54,9 +106,13 @@ object DdlQualityProbe {
         timeoutMs: Long = 5_000,
     ): ProbeResult? {
         if (url.isBlank()) return null
+        // 2.0-dev2.8: a probed URL's height + exact total are file
+        // properties — the same URL probes identically every time,
+        // so a cached result answers a re-tap with no requests.
+        cachedGet(ddlProbeCache, url)?.let { return it }
         return withTimeoutOrNull(timeoutMs) {
             withContext(Dispatchers.IO) { probeBlocking(url, headers) }
-        }
+        }?.also { cachedPut(ddlProbeCache, url, it) }
     }
 
     // Estimate an HLS stream's total size in bytes: summed segment
@@ -74,11 +130,16 @@ object DdlQualityProbe {
         timeoutMs: Long = 5_000,
     ): HlsSizeEstimate? {
         if (masterUrl.isBlank()) return null
+        // 2.0-dev2.8: a computed size is keyed by the exact
+        // (master, quality, audio) — a re-tap of the same combo is
+        // instant, and a different combo/server never reuses it.
+        val sizeKey = "$masterUrl|$requestedQuality|$audio"
+        cachedGet(hlsSizeCache, sizeKey)?.let { return it }
         return withTimeoutOrNull(timeoutMs) {
             withContext(Dispatchers.IO) {
                 estimateBlocking(masterUrl, headers, requestedQuality, audio)
             }
-        }
+        }?.also { cachedPut(hlsSizeCache, sizeKey, it) }
     }
 
     // --- DDL probe (blocking I/O; caller confines to Dispatchers.IO) ---
@@ -304,7 +365,15 @@ object DdlQualityProbe {
 
     // --- HLS size estimate (blocking I/O; caller confines to Dispatchers.IO) ---
 
-    private fun fetchTextCapped(url: String, headers: Map<String, String>): String? {
+    // 2.0-dev2.8: `cache` is the playlist cache for this fetch
+    // (master or media playlist text, keyed by URL) — a cached
+    // playlist answers with no request. Null = no caching.
+    private fun fetchTextCapped(
+        url: String,
+        headers: Map<String, String>,
+        cache: ConcurrentHashMap<String, CachedEntry<String>>? = null,
+    ): String? {
+        cache?.let { cachedGet(it, url)?.let { text -> return text } }
         var conn: HttpURLConnection? = null
         try {
             conn = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -318,7 +387,9 @@ object DdlQualityProbe {
             if (conn.responseCode != HttpURLConnection.HTTP_OK) return null
             val bytes = readCapped(conn, MAX_PLAYLIST_BYTES)
             if (bytes.isEmpty()) return null
-            return bytes.toString(Charsets.UTF_8)
+            return bytes.toString(Charsets.UTF_8).also { text ->
+                cache?.let { cachedPut(it, url, text) }
+            }
         } catch (_: Exception) {
             return null
         } finally {
@@ -329,9 +400,19 @@ object DdlQualityProbe {
         }
     }
 
-    // BANDWIDTH of the variant whose URI is `pickedUrl`. The master
+    // Bitrate of the variant whose URI is `pickedUrl`. The master
     // parser drops bandwidth, so it is re-read from the #EXT-X-
     // STREAM-INF line directly above that variant's URI.
+    // 2.0-dev2.8: AVERAGE-BANDWIDTH is preferred over BANDWIDTH.
+    // BANDWIDTH is the PEAK bitrate and overestimates badly — a
+    // calm 1080p variant states BANDWIDTH 6,715,884 against an
+    // AVERAGE-BANDWIDTH of 3,124,000 (~1.15 GB vs ~540 MB for the
+    // same stream). The average is the honest basis for a size
+    // estimate (typical accuracy ~5–15% — code comment only, the
+    // UI never claims accuracy, it only prefixes "~").
+    // Audio: the variant bitrate ALREADY includes the audio track
+    // — EXT-X-MEDIA carries no BANDWIDTH of its own — so NO
+    // separate audio-bitrate addition is ever made here.
     private fun bandwidthForVariant(masterText: String, masterUrl: String, pickedUrl: String): Long? {
         val lines = masterText.lineSequence().map { it.trim() }.toList()
         var i = 0
@@ -340,8 +421,11 @@ object DdlQualityProbe {
             if (line.startsWith("#EXT-X-STREAM-INF")) {
                 val uriLine = lines.getOrNull(i + 1)?.takeIf { it.isNotEmpty() && !it.startsWith("#") }
                 if (uriLine != null && resolveUrl(masterUrl, uriLine) == pickedUrl) {
-                    return Regex("""BANDWIDTH=(\d+)""").find(line.substringAfter(":"))
+                    val attrs = line.substringAfter(":")
+                    return Regex("""AVERAGE-BANDWIDTH=(\d+)""").find(attrs)
                         ?.groupValues?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0 }
+                        ?: Regex("""BANDWIDTH=(\d+)""").find(attrs)
+                            ?.groupValues?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0 }
                 }
             }
             i++
@@ -356,10 +440,10 @@ object DdlQualityProbe {
         audio: String,
     ): HlsSizeEstimate? {
         return try {
-            val masterText = fetchTextCapped(masterUrl, headers) ?: return null
+            val masterText = fetchTextCapped(masterUrl, headers, masterPlaylistCache) ?: return null
             val picked = HlsDownloader.parseMasterPlaylist(masterText, masterUrl, requestedQuality, audio)
             val mediaText = if (picked.url == masterUrl) masterText
-            else fetchTextCapped(picked.url, headers) ?: return null
+            else fetchTextCapped(picked.url, headers, mediaPlaylistCache) ?: return null
             var durationSum = 0.0
             var segmentCount = 0
             val byteRanges = mutableListOf<Long>()
