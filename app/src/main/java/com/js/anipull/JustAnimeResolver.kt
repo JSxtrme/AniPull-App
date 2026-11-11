@@ -122,9 +122,9 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
         return episodes
     }
 
-    override suspend fun loadEpisodes(title: ApiTitle): EpisodeResult {
+    override suspend fun loadEpisodes(title: ApiTitle, anilistId: Long?): EpisodeResult {
         return try {
-            val id = resolveAnilistId(title, null)
+            val id = resolveAnilistId(title, anilistId)
                 ?: return EpisodeResult.Failed("No matching title on this server for \"${title.title}\".")
             val episodes = fetchAllEpisodes(id)
             if (episodes.isEmpty()) {

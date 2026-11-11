@@ -173,7 +173,7 @@ internal class AniPmEpisodeSource : BaseEpisodeSource(
         return search(title)
     }
 
-    override suspend fun loadEpisodes(title: ApiTitle): EpisodeResult {
+    override suspend fun loadEpisodes(title: ApiTitle, anilistId: Long?): EpisodeResult {
         return try {
             val (id, rawId) = resolveId(title, null)
                 ?: return EpisodeResult.Failed("No matching title on this server for \"${title.title}\".")

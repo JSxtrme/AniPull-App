@@ -312,7 +312,7 @@ internal class AnvEpisodeSource : BaseEpisodeSource(
         }
     }
 
-    override suspend fun loadEpisodes(title: ApiTitle): EpisodeResult {
+    override suspend fun loadEpisodes(title: ApiTitle, anilistId: Long?): EpisodeResult {
         return try {
             val hit = searchCatalog(title)
                 ?: return EpisodeResult.Failed("No matching title on this server for \"${title.title}\".")

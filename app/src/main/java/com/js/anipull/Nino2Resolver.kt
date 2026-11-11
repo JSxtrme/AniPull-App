@@ -9,12 +9,15 @@ import org.json.JSONObject
 // at all, no auth, plain GETs. Verified live 2026-11-10 (200).
 //   GET https://beta.cno.to/library.json  (cached 10 min, like MiruDL)
 //   https://beta.cno.to/hls/<folder>/E<episode, zero-padded to 4>/master.m3u8
-// Entries are keyed by AniList id and carry title, native title,
-// format, status, cover, year, total episodes, score, genres, a
-// `folder` name, the list of available episode numbers, and
-// audio[] / subs[] language lists. Audio and subtitle tracks are
-// parsed from the master playlist's #EXT-X-MEDIA lines at download
-// time (HlsDownloader), not here. Episode titles are not in the
+// Live shape (verified 2026-11-11): {"built": "...", "titles":
+// [{id, title, native, format, status, year, episodes: <COUNT>,
+// mal, cover, lib: {folder, eps: [...present numbers...], audio,
+// subs}}]}. `episodes` is the show's total count; the episodes
+// actually present are `lib.eps` — a gap there means "not in this
+// library", never "episode doesn't exist". Titles without `lib`
+// are not hosted. Audio and subtitle tracks are parsed from the
+// master playlist's #EXT-X-MEDIA lines at download time
+// (HlsDownloader), not here. Episode titles are not in the
 // library (MiruDL cross-calls ani.pm for them — that call is gated,
 // so titles stay null here rather than guessed).
 // The master URL is verified with a GET (200 + #EXTM3U) before it is
@@ -40,6 +43,10 @@ internal class Nino2EpisodeSource : BaseEpisodeSource(
         val folder: String,
         val episodes: List<Int>,
         val audio: List<String>,
+        // The show's total episode count when the library states
+        // one (the top-level `episodes` int). `episodes` above is
+        // only the episodes actually present in the library.
+        val totalEpisodes: Int? = null,
     )
 
     // In-memory cache only (plus a filesDir copy so a restart within
@@ -69,6 +76,14 @@ internal class Nino2EpisodeSource : BaseEpisodeSource(
         return parsed
     }
 
+    // Live shape (verified 2026-11-11): {"built": "...", "titles":
+    // [{id, title, native, format, status, year, episodes: <COUNT>,
+    // mal, cover, lib: {folder, eps: [...], audio: [...], subs:
+    // [...]}}]}. `episodes` is a COUNT, not a list — the episodes
+    // actually present are `lib.eps`. Titles without a `lib`
+    // object are not hosted at all. The top-level-array and
+    // id-keyed-object branches below are fallbacks for shape drift
+    // only; the `titles` wrapper is what the file actually is.
     private fun parseLibrary(text: String): List<LibraryEntry> {
         val out = mutableListOf<LibraryEntry>()
         val trimmed = text.trimStart()
@@ -77,44 +92,62 @@ internal class Nino2EpisodeSource : BaseEpisodeSource(
             for (i in 0 until arr.length()) {
                 arr.optJSONObject(i)?.let { parseEntry(it) }?.let { out += it }
             }
-        } else {
-            val root = JSONObject(trimmed)
-            // Keyed by AniList id: {"154587": {...}, ...}
-            val keys = root.keys()
-            while (keys.hasNext()) {
-                val key = keys.next()
-                val obj = root.optJSONObject(key) ?: continue
-                parseEntry(obj, key.toLongOrNull())?.let { out += it }
+            return out
+        }
+        val root = runCatching { JSONObject(trimmed) }.getOrNull() ?: return out
+        val titles = root.optJSONArray("titles")
+        if (titles != null) {
+            for (i in 0 until titles.length()) {
+                titles.optJSONObject(i)?.let { parseEntry(it) }?.let { out += it }
             }
+            return out
+        }
+        // Keyed by AniList id: {"154587": {...}, ...}
+        val keys = root.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val obj = root.optJSONObject(key) ?: continue
+            parseEntry(obj, key.toLongOrNull())?.let { out += it }
         }
         return out
     }
 
     private fun parseEntry(obj: JSONObject, keyId: Long? = null): LibraryEntry? {
         val id = keyId
+            ?: obj.optLong("id", -1L).takeIf { it > 0 }
             ?: obj.optLong("anilistId", -1L).takeIf { it > 0 }
             ?: obj.optLong("anilist_id", -1L).takeIf { it > 0 }
-            ?: obj.optLong("id", -1L).takeIf { it > 0 }
             ?: return null
-        val folder = obj.optString("folder").takeIf { it.isNotBlank() } ?: return null
         val title = obj.optString("title").takeIf { it.isNotBlank() }
             ?: obj.optString("native").takeIf { it.isNotBlank() }
             ?: return null
+        // Hosting lives under `lib` in the live shape (folder +
+        // eps + audio/subs); the top-level fields are the drift
+        // fallback. No `lib` and no top-level folder = not hosted.
+        val lib = obj.optJSONObject("lib")
+        val folder = lib?.optString("folder")?.takeIf { it.isNotBlank() }
+            ?: obj.optString("folder").takeIf { it.isNotBlank() }
+            ?: return null
         val episodes = mutableListOf<Int>()
-        val epsArr = obj.optJSONArray("episodes")
+        val epsArr = lib?.optJSONArray("eps") ?: obj.optJSONArray("episodes")
         if (epsArr != null) {
             for (i in 0 until epsArr.length()) {
                 jsonEpisodeNumber(epsArr.opt(i))?.let { episodes += it }
             }
         }
-        if (episodes.isEmpty()) {
-            val total = obj.optInt("totalEpisodes", obj.optInt("total_episodes", obj.optInt("episodes_count", 0)))
-            if (total > 0 && total <= 3000) {
-                for (n in 1..total) episodes += n
-            }
-        }
+        // No present-episode list = nothing to play. NEVER
+        // synthesize 1..total from the count alone — those rows
+        // would 404 on resolve and fake a library that isn't there.
+        if (episodes.isEmpty()) return null
+        // The live shape's top-level `episodes` is a count int;
+        // the drift shape may carry it as totalEpisodes instead.
+        // (An `episodes` JSON array means the old list shape, not
+        // a count — optInt on an array yields 0, so it is ignored.)
+        val total = (obj.opt("episodes") as? Number)?.toInt()?.takeIf { it > 0 }
+            ?: obj.optInt("totalEpisodes", 0).takeIf { it > 0 }
+            ?: obj.optInt("total_episodes", 0).takeIf { it > 0 }
         val audio = mutableListOf<String>()
-        val audioArr = obj.optJSONArray("audio")
+        val audioArr = lib?.optJSONArray("audio") ?: obj.optJSONArray("audio")
         if (audioArr != null) {
             for (i in 0 until audioArr.length()) {
                 audioArr.optString(i).takeIf { it.isNotBlank() }?.let { audio += it }
@@ -127,11 +160,15 @@ internal class Nino2EpisodeSource : BaseEpisodeSource(
             folder = folder,
             episodes = episodes.sorted(),
             audio = audio,
+            totalEpisodes = total,
         )
     }
 
     private fun matchEntry(lib: List<LibraryEntry>, title: ApiTitle): LibraryEntry? {
-        if (title.id > 0) {
+        // 2.0-dev1.8 rule: only a small int is a plausible AniList
+        // id. An AniLab id (100000xxxx) lives in a different id
+        // space and must NEVER be matched against library ids.
+        if (title.id in 1 until 1_000_000) {
             lib.firstOrNull { it.anilistId == title.id }?.let { return it }
         }
         val want = normalize(title.title)
@@ -180,17 +217,29 @@ internal class Nino2EpisodeSource : BaseEpisodeSource(
         return out
     }
 
-    override suspend fun loadEpisodes(title: ApiTitle): EpisodeResult {
+    override suspend fun loadEpisodes(title: ApiTitle, anilistId: Long?): EpisodeResult {
         return try {
             val lib = fetchLibrary()
                 ?: return EpisodeResult.Failed("Couldn't load the episode list — tap Retry.")
-            val entry = matchEntry(lib, title)
+            // A known AniList id (from the media-index match, threaded
+            // through loadEpisodesWithFailover) is an exact library
+            // lookup — no fuzzy title search. Otherwise fall back to
+            // title matching as before.
+            val entry = if (anilistId != null && anilistId > 0) {
+                lib.firstOrNull { it.anilistId == anilistId }
+            } else {
+                matchEntry(lib, title)
+            }
                 ?: return EpisodeResult.Failed("No matching title on this server for \"${title.title}\".")
             val episodes = toEpisodeInfos(entry)
             if (episodes.isEmpty()) {
                 return EpisodeResult.Failed("Couldn't load the episode list — tap Retry.")
             }
-            EpisodeResult.Loaded(episodes)
+            // 2.0-dev2.1: the library lists only the episodes
+            // actually present (lib.eps), which can be fewer than
+            // the show's total — that gap is reported, never hidden.
+            val incomplete = entry.totalEpisodes != null && entry.episodes.size < entry.totalEpisodes
+            EpisodeResult.Loaded(episodes, incomplete = incomplete)
         } catch (e: Exception) {
             EpisodeResult.Failed(friendlyEpisodeListError(e))
         }

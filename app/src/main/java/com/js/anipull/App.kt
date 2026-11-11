@@ -3647,6 +3647,7 @@ private suspend fun loadFallbackEpisodes(
     title: ApiTitle,
     preferredServer: Int,
     onNeedsClearance: () -> Unit,
+    knownAnilistId: Long? = null, // media-index match id — exact server lookups, no title guessing
 ): Pair<EpisodeResult, Int?> {
     CronetHttp.setContext(context)
     val numbers = candidateServerNumbers(context, preferredServer)
@@ -3666,7 +3667,7 @@ private suspend fun loadFallbackEpisodes(
         val c = clearance ?: PaheClearance(null, null, false)
         val src = ServerRegistry.build(n, c.cookie, c.userAgent) ?: continue
         val res = try {
-            MultiSourceResolver.loadEpisodesWithFailover(listOf(src), title)
+            MultiSourceResolver.loadEpisodesWithFailover(listOf(src), title, knownAnilistId)
         } catch (e: Exception) {
             EpisodeResult.Failed(friendlyEpisodeListError(e))
         }
@@ -4246,7 +4247,7 @@ private fun rememberEpisodeListState(
     // download-progress tick, then the whole Column recomposed.
     // Now it only recomputes when a list source actually lands.
     val rows: List<EpisodeRow>? = remember(state.mediaResult, state.fallbackResult, state.anilistResult, audioFilter, state.pullAudio, state.mediaAnilistId) {
-    when {
+    val base: List<EpisodeRow>? = when {
         mediaLoaded != null -> mediaLoaded.episodes.map { me ->
             EpisodeRow(
                 number = me.number, title = me.title, duration = me.duration,
@@ -4283,7 +4284,31 @@ private fun rememberEpisodeListState(
             )
         }
         else -> null
-    }?.distinctBy { it.number }
+    }
+    // 2.0-dev2.1: GAP PADDING — a server list can be shorter than
+    // the show (Nino 2's lib.eps lists only the episodes actually
+    // present). A missing number must never read as "episode
+    // doesn't exist": when the AniList count has landed and says
+    // more episodes aired than the winning list holds, the missing
+    // numbers are appended as bare rows (same shape as the count
+    // rows above), so they resolve by number through the decoupled
+    // path and fail over to the next server. No count landed = no
+    // padding (exactly the old behavior). Sanity cap: an aired
+    // count past 3000 is not trusted for padding.
+    val padded = if (base != null && anilistCount != null && anilistCount.aired in 1..3000) {
+        val have = base.map { it.number }.toSet()
+        val missing = (1..anilistCount.aired).filter { it !in have }
+        if (missing.isEmpty()) base
+        else base + missing.map { n ->
+            EpisodeRow(
+                number = n, title = null, duration = null,
+                audio = state.pullAudio, still = null, fromMediaIndex = true,
+                anilistId = anilistCount.anilistId,
+                info = EpisodeInfo(n, null, null, state.pullAudio, fansub = null, episodeSession = "", animeSession = ""),
+            )
+        }
+    } else base
+    padded?.distinctBy { it.number }?.sortedBy { it.number }
     }
     state.rows = rows
     // 2.0-dev1.9: shonenX-style range grouping (see EpisodeRange.kt).
@@ -4423,7 +4448,7 @@ private fun rememberEpisodeListState(
             val effectivePreferred = state.serverOverride ?: preferredServerNumber(context)
             val phase2 = try {
                 kotlinx.coroutines.withTimeoutOrNull(EPISODE_FALLBACK_TIMEOUT_MS) {
-                    loadFallbackEpisodes(context, title, effectivePreferred) { state.showClearanceDialog = true }
+                    loadFallbackEpisodes(context, title, effectivePreferred, { state.showClearanceDialog = true }, state.mediaAnilistId)
                 }
             } catch (e: Exception) {
                 null

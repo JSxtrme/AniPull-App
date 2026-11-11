@@ -85,7 +85,7 @@ internal class PaheEpisodeSource(
     private fun normalize(title: String): String =
         title.lowercase().filter { it.isLetterOrDigit() }
 
-    override suspend fun loadEpisodes(title: ApiTitle): EpisodeResult {
+    override suspend fun loadEpisodes(title: ApiTitle, anilistId: Long?): EpisodeResult {
         if (clearanceCookie.isNullOrBlank()) {
             DownloadLogs.log("RESOLVE", "Server 3: no clearance — SourcePending, no network call")
             return EpisodeResult.SourcePending
@@ -477,7 +477,7 @@ internal class PaheEpisodeSource(
             DownloadLogs.log("RESOLVE", "Server 3: no clearance — skipping, no network call")
             return ResolvedLink.Failed("The session is not ready — try again in a moment.")
         }
-        return when (val result = loadEpisodes(title)) {
+        return when (val result = loadEpisodes(title, anilistId)) {
             is EpisodeResult.Loaded -> {
                 val wantAudio = audioCode(audio)
                 val ep = result.episodes.firstOrNull { it.number == number && it.audio.equals(wantAudio, ignoreCase = true) }

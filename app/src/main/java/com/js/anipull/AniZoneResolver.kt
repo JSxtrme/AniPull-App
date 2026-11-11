@@ -176,7 +176,7 @@ internal class AniZoneEpisodeSource : BaseEpisodeSource(
         }
     }
 
-    override suspend fun loadEpisodes(title: ApiTitle): EpisodeResult {
+    override suspend fun loadEpisodes(title: ApiTitle, anilistId: Long?): EpisodeResult {
         return try {
             val slug = fetchSlug(title)
                 ?: return EpisodeResult.Failed("No matching title on this server for \"${title.title}\".")

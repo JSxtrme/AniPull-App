@@ -172,7 +172,7 @@ internal class AnikotoEpisodeSource : BaseEpisodeSource(
         return out
     }
 
-    override suspend fun loadEpisodes(title: ApiTitle): EpisodeResult {
+    override suspend fun loadEpisodes(title: ApiTitle, anilistId: Long?): EpisodeResult {
         return try {
             val hits = search(title)
             val hit = pickHit(hits, title)

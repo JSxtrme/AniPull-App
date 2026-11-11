@@ -83,7 +83,7 @@ interface EpisodeSource {
     val serverNumber: Int
     // Generic description, no source name — see ServerRegistry.
     val serverDescription: String
-    suspend fun loadEpisodes(title: ApiTitle): EpisodeResult
+    suspend fun loadEpisodes(title: ApiTitle, anilistId: Long? = null): EpisodeResult
     suspend fun resolveDownload(episode: EpisodeInfo, quality: String): ResolvedLink
     // Resolve by (series identity + episode number), the decoupled
     // path used with the media-index episode list. `anilistId` is the
@@ -181,13 +181,14 @@ object MultiSourceResolver {
     suspend fun loadEpisodesWithFailover(
         candidates: List<EpisodeSource>,
         title: ApiTitle,
+        anilistId: Long? = null,
     ): EpisodeResult {
         var last: EpisodeResult = EpisodeResult.Failed("All servers failed — tap Retry.")
         var sawPending = false
         var sawFailed = false
         for (src in candidates) {
             try {
-                when (val r = src.loadEpisodes(title)) {
+                when (val r = src.loadEpisodes(title, anilistId)) {
                     is EpisodeResult.Loaded -> return r
                     is EpisodeResult.SourcePending -> sawPending = true
                     is EpisodeResult.Failed -> {

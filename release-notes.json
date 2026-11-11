@@ -1,1 +1,10 @@
-{"features":[],"fixes":["Fixed the episode list showing only skeletons — dev1.9's restructure split the episode list into a state holder and a plain emitter, and the derived episode rows were plain variables that nothing subscribed to, so the detail page never re-rendered when a list landed; rows are snapshot state now and the detail page and download sheet read them in their own scope, so episode rows appear as soon as a source lands (list and grid, detail and sheet)"]}
+{
+  "features": [
+    "Server 5's episode list actually works now — its library parser never matched the real library file, so the server could never match any title; it now reads the real shape and looks titles up by AniList id when the id is already known",
+    "Episode lists no longer hide episodes a server doesn't have — when the AniList count says more episodes aired than the winning list holds, the missing numbers appear as bare rows that resolve through the next server instead"
+  ],
+  "fixes": [
+    "Fixed Server 5 never returning any episode list — its parser only handled a top-level array or an id-keyed object, but the live library is a {built, titles} wrapper with hosting nested under lib (folder, eps, audio, subs) and episodes as a count; the parser now reads the real shape and reports a partial library as incomplete instead of failing",
+    "Fixed episode lists silently dropping episodes — a partial server list used to win over the AniList count, so episodes the server lacked simply never appeared; missing numbers are now padded in as bare rows that download through the next working server"
+  ]
+}

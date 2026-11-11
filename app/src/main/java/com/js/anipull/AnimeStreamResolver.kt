@@ -182,7 +182,7 @@ internal class AnimeStreamEpisodeSource : BaseEpisodeSource(
         return Triple(hit, season, episodes)
     }
 
-    override suspend fun loadEpisodes(title: ApiTitle): EpisodeResult {
+    override suspend fun loadEpisodes(title: ApiTitle, anilistId: Long?): EpisodeResult {
         return try {
             val (hit, season, episodes) = resolveSeries(title)
                 ?: return EpisodeResult.Failed("No matching title on this server for \"${title.title}\".")
