@@ -4213,6 +4213,116 @@ private suspend fun resolveOnly(
     )
 }
 
+// 2.0-dev2.13: one key formula for the board, shared by the
+// sheet (reads it), collectBoardFor (fresh-check) and collectBoard
+// (writes it). ServerSizeBoard.key applies audioCode internally,
+// so "Sub"/"Dub" and "jpn"/"eng" key identically — the sheet's
+// chip audio and the episode's audio code are the same board.
+private fun serverSizeBoardKey(titleId: Long, number: Int, audio: String, quality: String, preferSmaller: Boolean, preferDirect: Boolean): String =
+    ServerSizeBoard.key(titleId, number, audio, quality, preferSmaller, preferDirect)
+
+// 2.0-dev2.13: the Auto row's winner WHILE collecting — the
+// store's winnerServer only lands on completion. Same precedence
+// as the race (see resolveWithFailover's collect-all pick): exact
+// KNOWN entries only (offeredHeight >= requested); preferDirect
+// narrows to direct files when any exact direct exists;
+// preferSmaller takes the smallest sizeBytes among the pool
+// (unknown-size exacts sort last, arrival order breaks ties);
+// otherwise the earliest arrival (smallest seq). Null = no exact
+// file has landed yet — the Auto row shows "checking…".
+private fun provisionalBoardWinner(board: BoardState?, requestedHeight: Int, preferSmaller: Boolean, preferDirect: Boolean): Int? {
+    val exact = board?.entries?.values
+        ?.filter { it.state == BoardEntryState.KNOWN && (it.offeredHeight ?: 0) >= requestedHeight }
+        ?.sortedBy { it.seq } ?: return null
+    if (exact.isEmpty()) return null
+    val pool = if (preferDirect) {
+        val direct = exact.filter { it.isDirect }
+        if (direct.isNotEmpty()) direct else exact
+    } else exact
+    return if (preferSmaller) pool.minByOrNull { it.sizeBytes ?: Long.MAX_VALUE }?.serverNumber
+    else pool.firstOrNull()?.serverNumber
+}
+
+// 2.0-dev2.13: per-server size board collect — the collect-all
+// twin of resolveOnly. Same candidate building (candidateServerNumbers
+// order, stored-clearance peek for Server 3, Server 3 held out when
+// no stored clearance — NEVER a clearance solve, NO phase B, NO
+// serving-first shortcut): the board must show what the race can
+// see without a human check. The race runs in collect-all mode so
+// every racer's outcome lands in ServerSizeBoard via onBoardEntry;
+// servers with no entry when the race ends (held-out Server 3,
+// never-arriving racers) are marked NO_FILE, the winner is stored
+// in ResolveCache exactly as resolveOnly stores it, and the board
+// is completed with that winner. Returns the attempt so the warm
+// (collectBoardFor) can reuse the winner.
+private suspend fun collectBoard(
+    context: android.content.Context,
+    title: ApiTitle,
+    episode: EpisodeInfo,
+    quality: String,
+    anilistId: Long? = null,
+    fromMediaIndex: Boolean = false,
+    listServer: Int? = null,
+): ResolveAttempt {
+    CronetHttp.setContext(context)
+    val preferSmaller = preferSmallerFiles(context)
+    val preferDirect = preferDirectDownloads(context)
+    val boardKey = serverSizeBoardKey(title.id, episode.number, episode.audio, quality, preferSmaller, preferDirect)
+    val numbers = candidateServerNumbers(context, 0).let { ordered ->
+        if (listServer != null) listOf(listServer) + ordered.filter { it != listServer } else ordered
+    }
+    // Stored-clearance peek only (cheap prefs read, never a solve):
+    // a valid stored clearance lets Server 3 race with everyone
+    // else; without one it is held out and its row shows "—".
+    val storedClearance: PaheClearance? = if (3 in numbers) {
+        CloudflareClearance.loadStored(context)?.let { PaheClearance(it.cookieValue, it.userAgent, false) }
+    } else null
+    val upFrontClearance = storedClearance ?: PaheClearance(null, null, false)
+    val firstNumbers = if (storedClearance != null) numbers else numbers.filter { it != 3 }
+    val firstCandidates = firstNumbers.mapNotNull { ServerRegistry.build(it, upFrontClearance.cookie, upFrontClearance.userAgent) }
+    // Seed every server's row as CHECKING; the held-out Server 3
+    // flips to "—" immediately — it is never attempted, so
+    // "checking…" would be a lie for the whole collect.
+    ServerSizeBoard.start(boardKey, numbers)
+    if (storedClearance == null && 3 in numbers) ServerSizeBoard.markNoFile(boardKey, 3)
+    val resolved = try {
+        if (firstCandidates.isNotEmpty()) {
+            MultiSourceResolver.resolveWithFailover(
+                firstCandidates, title, anilistId, episode.number, episode.audio, quality,
+                preferSmaller = preferSmaller, preferDirect = preferDirect,
+                collectAll = true, onBoardEntry = { ServerSizeBoard.putEntry(boardKey, it) },
+            )
+        } else {
+            ResolvedDownload(ResolvedLink.Failed("No server available — tap Retry."), null)
+        }
+    } catch (e: Exception) {
+        ResolvedDownload(ResolvedLink.Failed(friendlyDownloadError(e)), null)
+    }
+    // Every candidate with no entry — or still CHECKING after the
+    // race ended — has no file at this quality: "—", never a row
+    // stuck on "checking…" on a complete board. markNoFile never
+    // overwrites a KNOWN/UNKNOWN entry.
+    val landed = ServerSizeBoard.boards.value[boardKey]?.entries ?: emptyMap()
+    numbers.forEach { n ->
+        val entry = landed[n]
+        if (entry == null || entry.state == BoardEntryState.CHECKING) ServerSizeBoard.markNoFile(boardKey, n)
+    }
+    // Same store call resolveOnly makes (successes only — store()
+    // itself drops Failed links and null servers).
+    if (resolved.serverNumber != null) {
+        ResolveCache.store(context, title.id, episode.number, episode.audio, quality, resolved, preferSmaller, preferDirect)
+    }
+    // 2.0-dev2.13: only an EXACT winner rides the board's Auto
+    // row — a downgrade/unprovable/unknown fallback winner is
+    // not a file at the selected quality, so tagging its "—"
+    // row [Auto] (and showing its size as the Auto size) would
+    // lie. The confirm path still serves such a fallback exactly
+    // as before; the board just doesn't claim it.
+    val exactWinner = if (resolved.link !is ResolvedLink.Failed && (resolved.link.offeredHeight() ?: 0) >= qualityHeight(quality)) resolved.serverNumber else null
+    ServerSizeBoard.setWinnerAndComplete(boardKey, exactWinner)
+    return ResolveAttempt(resolved, false)
+}
+
 private suspend fun resolveAndEnqueue(
     context: android.content.Context,
     title: ApiTitle,
@@ -4283,57 +4393,57 @@ private fun showToast(context: android.content.Context, message: String) {
     }
 }
 
-// 2.0-dev2.8: live sheet-size state machine for the per-episode
-// confirm sheet. Unknown = the size could not be determined (or
-// no fetch has finished) — the sheet shows NO size line, exactly
-// like the old behaviour. Checking = a fetch is in flight — the
-// sheet shows "Size: checking…". Known = a label for THIS combo.
-// The Download button is never disabled or blocked by this state.
-private sealed class SheetSizeState {
-    object Unknown : SheetSizeState()
-    object Checking : SheetSizeState()
-    data class Known(val label: String) : SheetSizeState()
-}
-
-// 2.0-dev2.8: size label for ONE already-resolved link — never
-// borrowed from another source or server. Order: the link's own
-// stored size first (exact DDL probe total / API label, or an HLS
-// estimate a resolver already attached); else a DDL link is
-// probed at its OWN url (exact total from Content-Range), and an
-// HLS link is estimated from its OWN master playlist (summed
-// byte-ranges when present, else AVERAGE-BANDWIDTH x duration,
-// "~"). Null = this link's size genuinely cannot be determined —
-// the caller shows nothing, never a number from elsewhere.
-private suspend fun sheetSizeLabelForLink(link: ResolvedLink, quality: String, audio: String): String? {
-    link.sizeLabel()?.let { return it }
-    return when (link) {
-        is ResolvedLink.DirectMp4 -> {
-            val headers = if (link.referer.isNotBlank()) mapOf("Referer" to link.referer) else emptyMap()
-            val probe = DdlQualityProbe.probeDdlQuality(link.url, headers, timeoutMs = 4_000) ?: return null
-            probe.totalBytes?.takeIf { it > 0 }?.let { formatSizeBytes(it, estimate = false) }
+// 2.0-dev2.13: one row of the per-server size board — radio +
+// "Server N · <size>" + tag pills. Selected = pink radio + pink
+// outline (as in the approved mockup). Dense single line (~40 dp).
+// `enabled` false = CHECKING / NO_FILE rows, shown but not
+// tappable; `mutedText` = UNKNOWN rows ("Unknown", tappable).
+@Composable
+private fun BoardServerRow(
+    text: String,
+    tags: List<String>,
+    selected: Boolean,
+    enabled: Boolean,
+    mutedText: Boolean = false,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().height(40.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, if (selected) Pink else Color.Transparent, RoundedCornerShape(8.dp))
+            .background(if (selected) Pink.copy(alpha = 0.10f) else Color.Transparent)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(if (selected) "◉" else "○", color = if (selected) Pink else Muted, fontSize = 14.sp)
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text, color = if (mutedText) Muted else TextMain, fontSize = 13.sp,
+            modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+        tags.forEach { tag ->
+            Spacer(Modifier.width(4.dp))
+            Box(
+                modifier = Modifier.clip(RoundedCornerShape(999.dp))
+                    .border(1.dp, Pink, RoundedCornerShape(999.dp))
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                contentAlignment = Alignment.Center,
+            ) { Text(tag, color = Pink, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
         }
-        is ResolvedLink.Hls -> {
-            val headers = buildMap {
-                link.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
-                link.origin?.takeIf { it.isNotBlank() }?.let { put("Origin", it) }
-            }
-            val estimate = DdlQualityProbe.estimateHlsSizeBytes(link.masterPlaylistUrl, headers, quality, audio)
-                ?: return null
-            if (estimate.bytes > 0) formatSizeBytes(estimate.bytes, estimate.isEstimate) else null
-        }
-        is ResolvedLink.Failed -> null
     }
 }
 
 // 2.0-dev1.7: per-episode confirm sheet — tapping an episode
 // row / grid cell NO LONGER downloads immediately. It opens this
 // sheet instead: episode title + "Episode N", Quality chips
-// (360/480/720/1080), Sub/Dub, and a Server row (Auto / Server
-// 1..10), all pre-selected from the caller's current choices (the
-// Settings prefs in detail, the DownloadSheet's own chips inside
-// the sheet). Only the confirm button pulls. Chip patterns reuse
-// DownloadSheet's OutlinedButton rows; no source names anywhere —
-// servers are "Server N" only, as everywhere else.
+// (360/480/720/1080), Sub/Dub, and a per-server size board (Auto
+// + Server 1..10 rows, each with its file size), all pre-selected
+// from the caller's current choices (the Settings prefs in detail,
+// the DownloadSheet's own chips inside the sheet). Only the
+// confirm button pulls. Chip patterns reuse DownloadSheet's
+// OutlinedButton rows; no source names anywhere — servers are
+// "Server N" only, as everywhere else.
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EpisodeDownloadSheet(
@@ -4344,71 +4454,85 @@ private fun EpisodeDownloadSheet(
     initialServer: Int, // 0 = Auto
     onDismiss: () -> Unit,
     onConfirm: (quality: String, audio: String, server: Int) -> Unit,
-    // 2.0-dev2.8: warms a resolve for the sheet's CURRENT chips
-    // (threaded in from EpisodeListDialogs, which owns the state).
-    // Null = no warmer available; the sheet then shows a size only
-    // when a link is already cached for the combo.
-    onWarmSize: ((quality: String, audio: String, server: Int) -> Unit)? = null,
+    // 2.0-dev2.13: collects the per-server size board for the
+    // sheet's CURRENT chips (threaded in from EpisodeListDialogs,
+    // which owns the state). Null = no collector available; the
+    // board then stays empty and rows show "checking…".
+    onCollectBoard: ((quality: String, audio: String) -> Unit)? = null,
 ) {
     var quality by remember(row.number) { mutableStateOf(initialQuality) }
     var audio by remember(row.number) { mutableStateOf(initialAudio) }
     var server by remember(row.number) { mutableStateOf(initialServer) }
+    var sizesExpanded by remember { mutableStateOf(true) }
     val context = LocalContext.current
-    // 2.0-dev2.8: instant Known when the cached link for the
-    // OPENING combo already carries a size — a re-tap / reopen
-    // shows it on the first frame with no fetch at all.
-    var sheetSize by remember(row.number) {
-        mutableStateOf<SheetSizeState>(
-            ResolveCache.lookup(context, title.id, row.number, initialAudio, initialQuality, initialServer, null, preferSmallerFiles(context), preferDirectDownloads(context))?.link?.sizeLabel()
-                ?.let { SheetSizeState.Known(it) } ?: SheetSizeState.Unknown,
-        )
+    val preferSmaller = preferSmallerFiles(context)
+    val preferDirect = preferDirectDownloads(context)
+    // 2.0-dev2.13: the board for this combo + mode. The key does
+    // NOT include the picked server — the board is the full
+    // per-server list for the combo, and picking a row only
+    // chooses which server is tried first.
+    val boardKey = serverSizeBoardKey(title.id, row.number, audio, quality, preferSmaller, preferDirect)
+    val boards by ServerSizeBoard.boards.collectAsState()
+    val board = boards[boardKey]
+    // 2.0-dev2.13: tapping another quality/audio starts (or
+    // awaits) that combo's collect; rows stream in as racers
+    // land. The collect is coalesced + cancellable like the other
+    // warms (see collectBoardFor); a fresh board answers instantly
+    // with no re-collect.
+    LaunchedEffect(quality, audio) {
+        onCollectBoard?.invoke(quality, audio)
     }
-    // 2.0-dev2.8: live size for the current chips, in order:
-    // (i) the cached link for this EXACT combo (same title /
-    // episode / audio / quality / first server — the link the
-    // confirm would actually download, never another server's
-    // link as a proxy) -> its own sizeLabel, instant;
-    // (ii) that link without a size -> probe / estimate THAT
-    // link's own URL / master playlist (see
-    // sheetSizeLabelForLink); (iii) no cached link -> warm a
-    // resolve for THIS combo in the background, await the
-    // coalesced in-flight resolve, then re-run (i)/(ii) on what
-    // landed. A fetch that yields nothing leaves Unknown (no
-    // size line). The effect re-runs on every chip tap; a
-    // previously computed combo answers from ResolveCache +
-    // the probe/size caches with no re-fetch. 2.0-dev2.9: sheet-open
-    // warms every chip combo (see warmAllSheetCombos), so step
-    // (iii) usually just awaits an in-flight warm — and only
-    // starts one when none exists (await-first, below).
-    LaunchedEffect(quality, audio, server) {
-        val cachedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null, preferSmallerFiles(context), preferDirectDownloads(context))?.link
-        if (cachedLink != null) {
-            cachedLink.sizeLabel()?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
-            sheetSize = SheetSizeState.Checking
-            sheetSizeLabelForLink(cachedLink, quality, audio)?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
-            sheetSize = SheetSizeState.Unknown
-            return@LaunchedEffect
-        }
-        sheetSize = SheetSizeState.Checking
-        // 2.0-dev2.9: await-first — a warm for this combo is
-        // usually already in flight (sheet-open warm-all, or a
-        // list warm); starting another resolve here used to
-        // double the race this effect was about to wait for.
-        // Only start one when nothing is warming this combo.
-        if (!isResolveInFlight(title.id, row.number, audio, quality, server, preferSmallerFiles(context), preferDirectDownloads(context))) {
-            onWarmSize?.invoke(quality, audio, server)
-        }
-        awaitInFlightResolve(title.id, row.number, audio, quality, server, preferSmallerFiles(context), preferDirectDownloads(context))
-        val landedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null, preferSmallerFiles(context), preferDirectDownloads(context))?.link
-        if (landedLink != null) {
-            landedLink.sizeLabel()?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
-            sheetSizeLabelForLink(landedLink, quality, audio)?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
-        }
-        sheetSize = SheetSizeState.Unknown
+    // 2.0-dev2.13: Auto winner — the store's winner once the
+    // collect completed, the provisional one (same precedence)
+    // while racers are still landing.
+    val requestedHeight = qualityHeight(quality)
+    val autoWinner = if (board?.complete == true) board.winnerServer
+    else provisionalBoardWinner(board, requestedHeight, preferSmaller, preferDirect)
+    val autoText = when {
+        autoWinner != null -> "Auto — Server $autoWinner · ${board?.entries?.get(autoWinner)?.sizeLabel ?: "Unknown"}"
+        board?.complete == true -> "Auto — Unknown"
+        else -> "Auto — checking…"
     }
+    // 2.0-dev2.13: [Smallest] — the smallest known-size file,
+    // only when it isn't the winner's row (that row already
+    // carries [Auto]).
+    val smallestServer = board?.entries?.values
+        ?.filter { it.state == BoardEntryState.KNOWN && it.sizeBytes != null }
+        ?.minByOrNull { it.sizeBytes ?: Long.MAX_VALUE }?.serverNumber
+    // 2.0-dev2.13: empty state — complete AND no file at this
+    // quality on any server (no KNOWN or UNKNOWN entry).
+    val boardEmpty = board?.complete == true &&
+        board.entries.values.none { it.state == BoardEntryState.KNOWN || it.state == BoardEntryState.UNKNOWN }
+    // 2.0-dev2.13: row order — smallest known size first,
+    // UNKNOWN next, CHECKING next, NO_FILE last; each group in
+    // server-number order (known rows without a size sort after
+    // sized knowns). A missing entry is CHECKING while the board
+    // is still collecting, NO_FILE once it completed.
+    val serverRows = (1..10).sortedWith(Comparator { a, b ->
+        val ea = board?.entries?.get(a)
+        val eb = board?.entries?.get(b)
+        val sa = ea?.state ?: if (board?.complete == true) BoardEntryState.NO_FILE else BoardEntryState.CHECKING
+        val sb = eb?.state ?: if (board?.complete == true) BoardEntryState.NO_FILE else BoardEntryState.CHECKING
+        fun rank(state: BoardEntryState, hasSize: Boolean): Int = when (state) {
+            BoardEntryState.KNOWN -> if (hasSize) 0 else 1
+            BoardEntryState.UNKNOWN -> 2
+            BoardEntryState.CHECKING -> 3
+            BoardEntryState.NO_FILE -> 4
+        }
+        val ra = rank(sa, ea?.sizeBytes != null)
+        val rb = rank(sb, eb?.sizeBytes != null)
+        val byRank = ra - rb
+        if (byRank != 0) byRank
+        else if (ra == 0) {
+            val bySize = (ea?.sizeBytes ?: Long.MAX_VALUE).compareTo(eb?.sizeBytes ?: Long.MAX_VALUE)
+            if (bySize != 0) bySize else a - b
+        } else a - b
+    })
     Dialog(onDismissRequest = onDismiss) {
         Column(
-            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(16.dp),
+            // 2.0-dev2.13: scrollable — 11 board rows must fit
+            // small screens (the old fixed column would clip).
+            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).clip(RoundedCornerShape(20.dp)).background(Card).padding(16.dp),
         ) {
             Row(verticalAlignment = Alignment.Top) {
                 PosterImage(
@@ -4451,24 +4575,6 @@ private fun EpisodeDownloadSheet(
                     ) { Text("${q}p", fontSize = 13.sp) }
                 }
             }
-            // 2.0-dev2.8: live size (see the LaunchedEffect above
-            // the Dialog). Known -> the label; Checking -> the
-            // "checking…" line; Unknown -> NO size line at all
-            // (never an invented or borrowed size). The Download
-            // button below is never gated on this state.
-            // NOTE: the season DownloadSheet has no single-episode
-            // size, so it deliberately shows none there.
-            when (val sizeState = sheetSize) {
-                is SheetSizeState.Known -> {
-                    Spacer(Modifier.height(6.dp))
-                    Text("Size: ${sizeState.label}", color = Muted, fontSize = 12.sp)
-                }
-                is SheetSizeState.Checking -> {
-                    Spacer(Modifier.height(6.dp))
-                    Text("Size: checking…", color = Muted, fontSize = 12.sp)
-                }
-                is SheetSizeState.Unknown -> Unit
-            }
             Spacer(Modifier.height(10.dp))
             Text("Audio", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
@@ -4497,34 +4603,90 @@ private fun EpisodeDownloadSheet(
                 }
             }
             Spacer(Modifier.height(10.dp))
-            Text("Server", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
-            Spacer(Modifier.height(6.dp))
+            // 2.0-dev2.13: the per-server size board replaces the
+            // single "Size:" line AND the Server chip row — the
+            // list IS the server picker. Tapping a row sets the
+            // same `server` state the old chips set (0 = Auto);
+            // the confirm path is untouched. The Download button
+            // below is never gated on the board.
             Row(
-                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth().clickable { sizesExpanded = !sizesExpanded },
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                (listOf(0 to "Auto") + (1..10).map { it to "Server $it" }).forEach { (n, label) ->
-                    OutlinedButton(
-                        onClick = { server = n },
-                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 0.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            containerColor = if (server == n) Pink else Color.Transparent,
-                            contentColor = Color.White,
-                        ),
-                    ) { Text(label, fontSize = 13.sp) }
-                }
+                Text(
+                    "File size by server",
+                    color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(if (sizesExpanded) "⌄" else "⌃", color = Muted, fontSize = 14.sp)
             }
-            Spacer(Modifier.height(6.dp))
-            Text(
-                "Auto tries servers in order until one works.",
-                color = Muted, fontSize = 12.sp,
-            )
+            if (sizesExpanded) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Same episode, same quality — but each server's file is a different size. Tap one to download it.",
+                    color = Muted, fontSize = 12.sp, lineHeight = 16.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                if (boardEmpty) {
+                    // No file at this quality on any server — one
+                    // honest line instead of rows. The Download
+                    // button stays: the existing confirm path
+                    // handles it (toasts / fails honestly).
+                    Text(
+                        "No server has a file at ${quality}p $audio — try a lower quality.",
+                        color = Muted, fontSize = 13.sp,
+                    )
+                } else {
+                    BoardServerRow(
+                        text = autoText,
+                        tags = if (autoWinner != null) listOf("Auto") else emptyList(),
+                        selected = server == 0,
+                        enabled = true,
+                        onClick = { server = 0 },
+                    )
+                    serverRows.forEach { n ->
+                        val entry = board?.entries?.get(n)
+                        val state = entry?.state
+                            ?: if (board?.complete == true) BoardEntryState.NO_FILE else BoardEntryState.CHECKING
+                        val sizeText = when (state) {
+                            BoardEntryState.KNOWN -> entry?.sizeLabel ?: "Unknown"
+                            BoardEntryState.UNKNOWN -> "Unknown"
+                            BoardEntryState.CHECKING -> "checking…"
+                            BoardEntryState.NO_FILE -> "—"
+                        }
+                        val tags = buildList {
+                            if (n == autoWinner) add("Auto")
+                            if (n == smallestServer && n != autoWinner) add("Smallest")
+                            if (entry?.isDirect == true) add("Direct")
+                        }
+                        BoardServerRow(
+                            text = "Server $n · $sizeText",
+                            tags = tags,
+                            selected = server == n,
+                            enabled = state == BoardEntryState.KNOWN || state == BoardEntryState.UNKNOWN,
+                            mutedText = state == BoardEntryState.UNKNOWN,
+                            onClick = { server = n },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "Auto picks for you. Tapping a server tries it first — the others still work as backup.",
+                    color = Muted, fontSize = 12.sp,
+                )
+            }
             Spacer(Modifier.height(12.dp))
             Button(
                 onClick = { onConfirm(quality, audio, server) },
                 colors = ButtonDefaults.buttonColors(containerColor = Pink),
                 modifier = Modifier.fillMaxWidth(),
-            ) { Text("Download Episode ${row.number}", color = OnAccent, fontWeight = FontWeight.Bold) }
+            ) {
+                Text(
+                    if (server == 0) "Download Episode ${row.number}"
+                    else "Download Episode ${row.number} · Server $server",
+                    color = OnAccent, fontWeight = FontWeight.Bold,
+                )
+            }
         }
     }
 }
@@ -4950,6 +5112,34 @@ private class EpisodeListState(
         }
     }
 
+    // 2.0-dev2.13: BOARD collect for the sheet's CURRENT chips —
+    // the collect-all twin of warmSizeFor. Same shape: via
+    // startWarmResolve (shared warm-starter, 4-permit cap), tracked
+    // under the same sheetWarms key so cancelSheetWarms cancels it
+    // on dismiss. The coalesce key is "board|" + the winner-only
+    // key with a null server override (the board is the full
+    // per-server list, server-independent), so a collect for one
+    // combo never coalesces with another combo's — or with a
+    // winner-only warm. Await-first: a fresh (complete, < 90 s)
+    // board is served as-is, and an in-flight collect is a no-op
+    // (putIfAbsent inside startWarmResolve).
+    fun collectBoardFor(row: EpisodeRow, quality: String, audio: String) {
+        val preferSmaller = preferSmallerFiles(context)
+        val preferDirect = preferDirectDownloads(context)
+        val key = serverSizeBoardKey(title.id, row.number, audio, quality, preferSmaller, preferDirect)
+        if (ServerSizeBoard.fresh(key)) return
+        startWarmResolve(
+            "board|" + resolveCoalesceKey(title.id, row.number, audio, quality, null, preferSmaller, preferDirect),
+            trackSheetKey = "${title.id}|${row.number}",
+        ) {
+            collectBoard(
+                context, title, row.info.copy(audio = audioCode(audio)),
+                quality, anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
+                listServer = if (row.fromMediaIndex) null else fallbackServer,
+            )
+        }
+    }
+
     // 2.0-dev2.9: warm ALL sheet combos on open — 4 qualities x
     // Sub/Dub at the sheet's server — so a chip tap hits
     // ResolveCache (or an in-flight warm it just awaits) instead
@@ -4968,7 +5158,12 @@ private class EpisodeListState(
             add(quality to otherAudio)
             qualities.filter { it != quality }.forEach { add(it to otherAudio) }
         }
-        ordered.forEach { (q, a) -> warmSizeFor(row, q, a, initialServer) }
+        ordered.forEachIndexed { index, (q, a) ->
+            // 2.0-dev2.13: the OPENING combo collects the full
+            // board; the other 7 combos keep today's cheap
+            // winner-only warm.
+            if (index == 0) collectBoardFor(row, q, a) else warmSizeFor(row, q, a, initialServer)
+        }
     }
 
     // 2.0-dev2.9: cancel this episode's still-pending sheet warms
@@ -5531,14 +5726,15 @@ private fun EpisodeListDialogs(state: EpisodeListState) {
     }
     // 2.0-dev1.7: the per-episode confirm sheet.
     state.confirmRow?.let { row ->
-        // 2.0-dev2.3: pre-resolve when the sheet opens, so the link
-        // is already cached by the time the user taps Download.
+        // 2.0-dev2.13: warm every chip combo (4 qualities x
+        // Sub/Dub) now, so a chip tap hits the cache instead
+        // of starting a fresh multi-second race. The opening
+        // combo collects the full per-server board (collect-all
+        // race); the other 7 warm winner-only. The old
+        // preResolveRow for the opening combo is gone — the
+        // collect stores the same winner in ResolveCache, so a
+        // second winner-only race next to it would be pure waste.
         androidx.compose.runtime.LaunchedEffect(row) {
-            state.preResolveRow(row)
-            // 2.0-dev2.9: warm every chip combo (4 qualities x
-            // Sub/Dub) now, so a chip tap hits the cache instead
-            // of starting a fresh multi-second race. The opening
-            // combo above coalesces with its twin inside.
             state.warmAllSheetCombos(row)
         }
         EpisodeDownloadSheet(
@@ -5548,7 +5744,7 @@ private fun EpisodeListDialogs(state: EpisodeListState) {
             initialServer = state.initialServer,
             onDismiss = { state.cancelSheetWarms(row); state.onConfirmDismiss() },
             onConfirm = { q, a, s -> state.onConfirm(q, a, s) },
-            onWarmSize = { q, a, s -> state.warmSizeFor(row, q, a, s) },
+            onCollectBoard = { q, a -> state.collectBoardFor(row, q, a) },
         )
     }
 }
