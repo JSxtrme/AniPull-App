@@ -69,17 +69,20 @@
     ]
   },
   "dev": {
-    "versionCode": 62,
-    "versionName": "2.0-dev2.1",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.1/anipull-2.0-dev2.1.apk",
-    "sha256": "b1bf4632fb444d156b60a1397b314781eac50d48c539a7a7791c7f3f477aa3dd",
+    "versionCode": 63,
+    "versionName": "2.0-dev2.2",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.2/anipull-2.0-dev2.2.apk",
+    "sha256": "8e8509e5a4de0e823431230d38793fc43fa3e47a67dd7c1d3d8432061efb802f",
     "features": [
-      "Server 5's episode list actually works now \u2014 its library parser never matched the real library file, so the server could never match any title; it now reads the real shape and looks titles up by AniList id when the id is already known",
-      "Episode lists no longer hide episodes a server doesn't have \u2014 when the AniList count says more episodes aired than the winning list holds, the missing numbers appear as bare rows that resolve through the next server instead"
+      "Downloads now send each server's own stream headers on every fetch \u2014 Server 2's video hosts were refusing every segment without the player origin headers, so downloads failed with all segments blocked",
+      "The download log's Copy report now starts with a per-job summary \u2014 winning server, video host, headers sent, first failure and outcome \u2014 and keeps the first 50 + last 150 entries so the resolve lines can no longer scroll away",
+      "Cancelled downloads can be retried \u2014 a cancelled episode row goes back to the normal download action instead of sticking on 'cancelled', and cancelled jobs in the Downloads tab get a Retry button"
     ],
     "fixes": [
-      "Fixed Server 5 never returning any episode list \u2014 its parser only handled a top-level array or an id-keyed object, but the live library is a {built, titles} wrapper with hosting nested under lib (folder, eps, audio, subs) and episodes as a count; the parser now reads the real shape and reports a partial library as incomplete instead of failing",
-      "Fixed episode lists silently dropping episodes \u2014 a partial server list used to win over the AniList count, so episodes the server lacked simply never appeared; missing numbers are now padded in as bare rows that download through the next working server"
+      "Fixed every Server 2 download failing with all segments blocked \u2014 its video hosts require the player origin headers (Referer, and Origin for one host) on segment fetches and the app was sending none; the headers each server's own stream response supplies are now sent on playlist, key, segment and subtitle fetches, and a server leg with no headers is skipped instead of fetched headerless",
+      "Fixed cancelled downloads being stuck \u2014 a cancelled episode row showed 'cancelled' forever with no way to download again; cancelled and failed rows now return to the normal download action and start a fresh download, and the Downloads tab shows cancelled jobs with Retry",
+      "Fixed the download log dropping the resolve lines \u2014 the last-200 cap kept only the segment failures, so the winning server scrolled away; the log now keeps the first 50 + last 150 entries with an omission marker in the middle",
+      "HLS fetches now follow redirects like the rest of the app"
     ]
   }
 }
