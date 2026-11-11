@@ -69,19 +69,23 @@
     ]
   },
   "dev": {
-    "versionCode": 65,
-    "versionName": "2.0-dev2.4",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.4/anipull-2.0-dev2.4.apk",
-    "sha256": "532d0d58102952e205454a795c76e4ae772d14f60ef04216ec5489fb2f13bd5a",
+    "versionCode": 66,
+    "versionName": "2.0-dev2.5",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.5/anipull-2.0-dev2.5.apk",
+    "sha256": "654f5ffd53055b93aeaa2c79bd3b963fca1b74a8b3b4f34cdaf8b0a8e3daf880",
     "features": [
-      "Downloads tab now has filter pills \u2014 All, Active, Queue, Errored, Cancelled and Completed, each with its count \u2014 so you can see only the group you care about",
-      "New Recently downloaded row at the very top of Home, above Marathon Picks \u2014 every anime you pulled an episode from, whether it finished, failed or was cancelled, with a history icon",
-      "Tapping an anime in Recently downloaded opens its detail page scrolled straight to the last episode you downloaded, centred in the middle of the screen",
-      "Each poster in Recently downloaded has a cross to remove it from the row, and the rest glide over to fill the space; clearing the whole row collapses the section and pulls everything below up with animation"
+      "Download start now shows a Snackbar with a View action \u2014 tap it to jump straight to the Downloads tab",
+      "Tapping Download shows 'Download queued' instantly, before any resolving \u2014 the job appears in the Downloads tab right away",
+      "Episode range selector now defaults to 1\u2013100 on long titles, and the pill is bigger and clearer with an Episodes label",
+      "Downloads show honest progress while connecting \u2014 'Connecting\u2026' with real bytes and speed instead of a frozen 0%"
     ],
     "fixes": [
-      "Fixed the Downloads tab having no way to clear failed or cancelled jobs \u2014 Errored and Cancelled now have a Clear all button that clears only that group",
-      "Fixed the debug 'Preview download notification' button sitting at the bottom of the Downloads tab \u2014 it is gone now"
+      "Fixed two notifications for one download \u2014 the foreground service notification is now the single group summary, so the shade shows one entry",
+      "Fixed the download notification flickering and sliding in the status bar \u2014 one stable notification, updated in place and throttled, only when its content changes",
+      "Fixed progress stuck at 0% on downloads with no total size \u2014 they now show an indeterminate state with real bytes and speed, never a fake 0%",
+      "Fixed downloads silently delivering the wrong quality \u2014 if no server can provide the selected quality the download now fails honestly instead of saving a lower-quality file, and delivered files are verified and named from their actual quality",
+      "Fixed Recently downloaded showing the same anime twice \u2014 it now dedups by anime",
+      "Fixed resolving still being slow \u2014 Pahe clearance now only solves if the other servers fail first, the serving-first resolve is capped at 15 seconds, and pre-resolve warms earlier with confirm reusing it instead of starting a second resolve"
     ]
   }
 }
