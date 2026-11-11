@@ -69,15 +69,16 @@
     ]
   },
   "dev": {
-    "versionCode": 73,
-    "versionName": "2.0-dev2.12",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.12/anipull-2.0-dev2.12.apk",
-    "sha256": "d1a7915557ba50ecb24361a725be840661b11f2572c142d14a24ab34cd3f4627",
+    "versionCode": 74,
+    "versionName": "2.0-dev2.13",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.13/anipull-2.0-dev2.13.apk",
+    "sha256": "4f846edb57a06a510c5377aa9415665a9ed423a1e1621947f832fa91177b5e2a",
     "features": [
-      "The update sheet now resolves the download link in the background while you read the changelog, so tapping Download & Install connects straight to the download server instead of waiting on GitHub's slow redirect first"
+      "The download sheet now shows every server's file size for your chosen quality and language \u2014 one row per server, smallest first, so you can see that Server 10's 1080p file is 131 MB while Server 5's is ~369 MB and pick the one you want. Tap a row to download from that server first (the others still work as backup), or leave it on Auto",
+      "The sheet's download button now names the server you picked (\"Download Episode 1 \u00b7 Server 10\") instead of just the episode"
     ],
     "fixes": [
-      "Fixed the updater sitting on \"Connecting\u2026\" for seconds before installing \u2014 the slow part was GitHub generating the signed download link (~1s) plus a second connection to another host, all hidden behind one word with no retry. The sheet now shows honest phases (\"Contacting GitHub\u2026\", \"Redirecting to download server\u2026\", \"Starting download\u2026\") and a stalled connection retries once instead of dying"
+      "Fixed the sheet hiding the small file: it used to show only the winning server's size, so a much smaller file at the same quality went unnoticed. The size list is the server picker now \u2014 Auto, Smallest and Direct tags show which row Auto would download, which file is smallest, and which files are direct downloads"
     ]
   }
 }
