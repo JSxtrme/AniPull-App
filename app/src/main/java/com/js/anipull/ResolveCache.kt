@@ -63,7 +63,7 @@ object ResolveCache {
         number: Int,
         audio: String,
         quality: String,
-        preferred: Int, // 0 = Auto; 1..9 = explicit first server
+        preferred: Int, // 0 = Auto; 1..10 = explicit first server
         listServer: Int?, // server that served the list, tried first
         // 2.0-dev2.8: the resolve mode the cached win was decided
         // under — a fastest-first win is never served when the
@@ -83,7 +83,7 @@ object ResolveCache {
         // The winner must match the requested first server: an
         // explicit preferred server, or the list server when the row
         // came from a server list. Auto accepts any winner.
-        val first = listServer ?: preferred.takeIf { it in 1..9 }
+        val first = listServer ?: preferred.takeIf { it in 1..10 }
         if (first != null && entry.serverNumber != first) return null
         DownloadLogs.log("RESOLVE", "cache HIT: Server ${entry.serverNumber}, age ${ageMs}ms")
         // 2.0-dev2.7: a cached link bypasses the race, so the race's
@@ -154,7 +154,7 @@ object ResolveCache {
                     // HLS downloader enforces the variant floor
                     // pre-download, so an untagged HLS link is safe.
                     if (link is ResolvedLink.DirectMp4 && link.actualQuality == null) return@forEach
-                    val server = e.optInt("server", 0).takeIf { it in 1..9 } ?: return@forEach
+                    val server = e.optInt("server", 0).takeIf { it in 1..10 } ?: return@forEach
                     val at = e.optLong("at", 0)
                     if (at <= 0 || now - at < 0 || now - at > ttlMs(server)) return@forEach
                     mem[key] = Entry(link, server, at)

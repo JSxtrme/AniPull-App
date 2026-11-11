@@ -480,12 +480,12 @@ fun DownloadsSettingsPage() {
     // only — no DDL/HLS jargon, most people don't know it.
     var preferDirect by remember { mutableStateOf(prefs.getBoolean("prefer_direct_downloads", false)) }
     // 2.0-dev1.6: default download server — 0 = Auto (try servers in
-    // priority order 1..9), 1..9 = always try that server first (the
+    // priority order 1..10), 1..10 = always try that server first (the
     // rest still back it up if it fails). Same key the sheet reads.
     var preferredServer by remember { mutableStateOf(prefs.getInt("preferred_server", 0)) }
     // 2.0-dev1.7: Sources priority order — the auto-select /
     // failover order, rearrangeable with the up/down arrows below.
-    // Default 1..9 (easiest first); persisted as "server_order".
+    // Default 1..10 (easiest first); persisted as "server_order".
     var serverOrder by remember { mutableStateOf(ServerRegistry.orderedNumbers(ctx)) }
     // 2.0-dev1.7: auto-test state — per-server health results from
     // the last test run (empty = never tested), plus a one-line
@@ -610,7 +610,7 @@ fun DownloadsSettingsPage() {
             Text("Preferred server", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
             // 2.0-dev1.6: no source names anywhere user-visible —
-            // servers are "Server 1".."Server 9" with the generic
+            // servers are "Server 1".."Server 10" with the generic
             // descriptions from the registry. Auto is the default.
             val serverOptions = listOf(Triple("0", "Auto", "Tries servers in order until one works")) +
                 ServerRegistry.servers.map { Triple(it.number.toString(), "Server ${it.number}", it.description) }
@@ -1071,7 +1071,7 @@ fun AboutPage() {
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
             Text("Metadata: AniLab (no key, live feed).", color = TextMain, fontSize = 14.sp)
             Spacer(Modifier.height(4.dp))
-            Text("Downloads run on 9 servers, picked automatically.", color = Muted, fontSize = 13.sp)
+            Text("Downloads run on 10 servers, picked automatically.", color = Muted, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
             Text("Downloads use the real engine — queue, pause/resume and the foreground service are live.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
         }

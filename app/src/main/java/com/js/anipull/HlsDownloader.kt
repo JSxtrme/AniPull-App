@@ -71,7 +71,7 @@ enum class HlsPhase(val label: String) {
 // 2.0-dev2.9 — hard deadlines for HLS fetches. Why these numbers:
 // the diagnosed stall held a fetch open 144 s with zero bytes;
 // a healthy playlist/init/key fetch answers in well under 10 s
-// on any of the nine servers (the resolve race caps attempts at
+// on any of the ten servers (the resolve race caps attempts at
 // 15 s and masters are <1 MB — the Death Note master was 902 B).
 // 10 s to first byte catches a dead/dribbling host fast; 30 s
 // total bounds a slow-but-alive playlist/init/key fetch; 20 s

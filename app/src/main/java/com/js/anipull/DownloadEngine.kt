@@ -67,7 +67,7 @@ data class DownloadJob(
     val speedMBps: Double,
     val error: String?,
     val filePath: String?,
-    // 2.0-dev1.7: which server resolved this job (1..9, 0 = unknown)
+    // 2.0-dev1.7: which server resolved this job (1..10, 0 = unknown)
     // and whether an explicit Resume consented to mobile data for
     // this job (see the Wi-Fi gate in runJob). Both default so old
     // persisted jobs still parse.
@@ -375,7 +375,7 @@ object DownloadEngine {
                 titleId = obj.optLong("title_id", 0),
                 anilistId = obj.optLong("anilist_id", -1).takeIf { it > 0 },
                 fromMediaIndex = obj.optBoolean("from_media_index", false),
-                listServer = obj.optInt("list_server", -1).takeIf { it in 1..9 },
+                listServer = obj.optInt("list_server", -1).takeIf { it in 1..10 },
                 actualQuality = obj.optString("actual_quality").takeIf { it.isNotBlank() },
                 totalEstimated = obj.optBoolean("total_estimated", false),
             )

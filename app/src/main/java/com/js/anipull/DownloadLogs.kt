@@ -327,11 +327,11 @@ object DownloadLogs {
     // 2.0-dev2.9 (D): server number -> internal sub-server name,
     // the ONLY place a summary gets a name — derived from the
     // enqueue/runJob server number, never parsed from a log line.
-    // Mirror of ServerRegistry.build() 1..9 and each resolver's
+    // Mirror of ServerRegistry.build() 1..10 and each resolver's
     // sourceName (AniZoneResolver 1, JustAnimeResolver 2,
     // PaheResolver 3, AniPmResolver 4, Nino2Resolver 5,
     // AniWavesResolver 6, AnikotoResolver 7, AnimeStreamResolver 8,
-    // AnvResolver 9): if a source is renamed or renumbered there,
+    // AnvResolver 9, AnimeHeavenResolver 10): if a source is renamed or renumbered there,
     // update this map in the same change. Unknown number (0 = no
     // enqueue/runJob line) stays "unknown", never a guessed name.
     private fun serverName(number: Int): String = when (number) {
@@ -344,6 +344,7 @@ object DownloadLogs {
         7 -> "Anikoto"
         8 -> "AnimeStream"
         9 -> "Anv"
+        10 -> "AnimeHeaven"
         else -> "unknown"
     }
 

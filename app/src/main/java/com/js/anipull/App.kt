@@ -340,7 +340,7 @@ fun SourceChips() {
         verticalArrangement = Arrangement.spacedBy(7.dp),
     ) {
         Text("Sources", color = Faint, fontSize = 12.sp, modifier = Modifier.padding(end = 7.dp, top = 6.dp))
-        SourceChip("9 servers", "auto-picked", Color(0xFF34D399))
+        SourceChip("${ServerRegistry.servers.size} servers", "auto-picked", Color(0xFF34D399))
     }
 }
 
@@ -433,7 +433,7 @@ fun StatsGrid(live: Boolean, loading: Boolean = false) {
                 if (loading) StatCell("···", "LOADING")
                 else StatCell("6000+", "ANIME TITLES")
             }
-            Box(Modifier.weight(1f)) { StatCell("3", "DDL SOURCES") }
+            Box(Modifier.weight(1f)) { StatCell(ServerRegistry.servers.size.toString(), "SOURCES") }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
             Box(Modifier.weight(1f)) { StatCell("1080p", "MAX QUALITY") }
@@ -3686,10 +3686,10 @@ private fun retryDownloadJob(
         // the shared in-flight resolve first; its fresh win lands
         // in ResolveCache, so the resolveAndEnqueue below reuses
         // it instead of doubling the work.
-        awaitInFlightResolve(job.titleId, job.episodeNumber, episode.audio, job.quality, job.serverNumber.takeIf { it in 1..9 }, preferSmallerFiles(context), preferDirectDownloads(context))
+        awaitInFlightResolve(job.titleId, job.episodeNumber, episode.audio, job.quality, job.serverNumber.takeIf { it in 1..10 }, preferSmallerFiles(context), preferDirectDownloads(context))
         val outcome = resolveAndEnqueue(
             context, title, episode, job.quality,
-            serverOverride = job.serverNumber.takeIf { it in 1..9 },
+            serverOverride = job.serverNumber.takeIf { it in 1..10 },
             anilistId = job.anilistId,
             fromMediaIndex = job.fromMediaIndex,
             listServer = job.listServer,
@@ -3744,7 +3744,7 @@ private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Uni
             // active jobs — alongside progress/error. FAILED keeps
             // its error text too.
             Text(
-                (if (job.serverNumber in 1..9) "Server ${job.serverNumber} · " else "") + when (job.state) {
+                (if (job.serverNumber in 1..10) "Server ${job.serverNumber} · " else "") + when (job.state) {
                     // 2.0-dev2.5: indeterminate progress — the engine
                     // reports PROGRESS_INDETERMINATE (-1) whenever
                     // the total is unknown (chunked DDL with no
@@ -3884,7 +3884,7 @@ fun BackPill(onBack: () -> Unit) {
 // rows and the DownloadSheet season button. The episode list comes
 // from the metadata index first (see EpisodeList); downloads are
 // decoupled from it and resolve per episode with failover across
-// servers 1..9. No source names anywhere user-visible: the user
+// servers 1..10. No source names anywhere user-visible: the user
 // only ever sees "Server N" + its generic description.
 // No fake episodes, counts, durations or progress anywhere.
 private fun preferredServerNumber(context: android.content.Context): Int =
@@ -3893,12 +3893,12 @@ private fun preferredServerNumber(context: android.content.Context): Int =
 
 // Candidate order: the preferred server first (when one is picked),
 // then the rest in the user's Sources priority order (default
-// 1..9 — easiest/reliable first, clearance-gated server 3 lower).
+// 1..10 — easiest/reliable first, clearance-gated server 3 lower).
 // 0 = Auto. The persisted order comes from ServerRegistry, so
 // Settings and the failover chain can never drift apart.
 private fun candidateServerNumbers(context: android.content.Context, preferred: Int): List<Int> {
     val ordered = ServerRegistry.orderedNumbers(context)
-    return if (preferred in 1..9) listOf(preferred) + ordered.filter { it != preferred } else ordered
+    return if (preferred in 1..10) listOf(preferred) + ordered.filter { it != preferred } else ordered
 }
 
 // 2.0-dev2.8: "Prefer smaller files" (Settings → Downloads,
@@ -3934,7 +3934,7 @@ private fun serverChoiceLabel(number: Int): String =
 // operation actually failed AND a check is still pending. If
 // another server already served the list/episode, flashing a check
 // the user doesn't need would be noise (in dev1.5 server 3 was the
-// only source, so the dialog was always needed; with 9 servers it
+// only source, so the dialog was always needed; with 10 servers it
 // usually isn't). Done reloads, and the pending pull/season retries.
 private data class PaheClearance(val cookie: String?, val userAgent: String?, val needsUserAction: Boolean)
 
@@ -4329,7 +4329,7 @@ private suspend fun sheetSizeLabelForLink(link: ResolvedLink, quality: String, a
 // row / grid cell NO LONGER downloads immediately. It opens this
 // sheet instead: episode title + "Episode N", Quality chips
 // (360/480/720/1080), Sub/Dub, and a Server row (Auto / Server
-// 1..9), all pre-selected from the caller's current choices (the
+// 1..10), all pre-selected from the caller's current choices (the
 // Settings prefs in detail, the DownloadSheet's own chips inside
 // the sheet). Only the confirm button pulls. Chip patterns reuse
 // DownloadSheet's OutlinedButton rows; no source names anywhere —
@@ -4503,7 +4503,7 @@ private fun EpisodeDownloadSheet(
                 modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                (listOf(0 to "Auto") + (1..9).map { it to "Server $it" }).forEach { (n, label) ->
+                (listOf(0 to "Auto") + (1..10).map { it to "Server $it" }).forEach { (n, label) ->
                     OutlinedButton(
                         onClick = { server = n },
                         contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 0.dp),
@@ -4662,7 +4662,7 @@ private fun isResolveInFlight(titleId: Long, number: Int, audio: String, quality
 // server is never served — the confirm just resolves fresh,
 // sequentially, instead of concurrently.
 private fun resolveCoalesceKey(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false, preferDirect: Boolean = false): String {
-    val first = serverOverride?.takeIf { it in 1..9 } ?: 0
+    val first = serverOverride?.takeIf { it in 1..10 } ?: 0
     // 2.0-dev2.8: the mode is in the key — a warm started under
     // fastest-first must never satisfy a confirm under
     // smallest-file (or vice versa); the confirm would await the
@@ -6330,7 +6330,7 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, onDownloadStarted: ((S
     // per-episode rows from the same EpisodeSource load as the detail
     // section, Download Season enqueues every loaded episode. The old
     // copy-links button and the dead-end toast path are gone.
-    // 2.0-dev1.6: + a Server row (Auto / Server 1..9), the per-download
+    // 2.0-dev1.6: + a Server row (Auto / Server 1..10), the per-download
     // override: it applies to the season download and to Pull taps in
     // this sheet, and starts at the Settings default.
     val context = LocalContext.current
@@ -6483,7 +6483,7 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, onDownloadStarted: ((S
                 Text("Server", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    (listOf(0 to "Auto") + (1..9).map { it to "Server $it" }).forEach { (n, label) ->
+                    (listOf(0 to "Auto") + (1..10).map { it to "Server $it" }).forEach { (n, label) ->
                         OutlinedButton(
                             onClick = { serverChoice = n },
                             colors = ButtonDefaults.outlinedButtonColors(

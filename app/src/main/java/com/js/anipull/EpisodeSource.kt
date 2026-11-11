@@ -24,7 +24,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 // making any network call.
 //
 // IDENTITY RULE: `sourceName` is internal/logging ONLY and must never
-// reach the UI. What the user sees is the server NUMBER (1..9) and the
+// reach the UI. What the user sees is the server NUMBER (1..10) and the
 // generic `serverDescription` — no source names anywhere user-visible.
 
 data class EpisodeInfo(
@@ -116,7 +116,7 @@ sealed class ResolvedLink {
     data class Failed(val message: String) : ResolvedLink()
 }
 
-// A resolved link plus the server whose link won (1..9, null when
+// A resolved link plus the server whose link won (1..10, null when
 // every candidate failed). The number — never a source name — is
 // what the UI shows ("Server N") and what the engine stores on the
 // job. 2.0-dev1.7.
@@ -211,7 +211,7 @@ internal class QualityMismatchException(message: String) : java.io.IOException(m
 interface EpisodeSource {
     // Internal/logging ONLY — must never reach the UI.
     val sourceName: String
-    // 1..9, see ServerRegistry. The ONLY user-facing identity.
+    // 1..10, see ServerRegistry. The ONLY user-facing identity.
     val serverNumber: Int
     // Generic description, no source name — see ServerRegistry.
     val serverDescription: String
@@ -252,6 +252,7 @@ object EpisodeSources {
     fun anikoto(): EpisodeSource = AnikotoEpisodeSource()
     fun animeStream(): EpisodeSource = AnimeStreamEpisodeSource()
     fun anv(): EpisodeSource = AnvEpisodeSource()
+    fun animeHeaven(): EpisodeSource = AnimeHeavenEpisodeSource()
 }
 
 // Try candidates in priority order. 2.0-dev2.7: the win tier is
@@ -279,7 +280,7 @@ object EpisodeSources {
 //
 // 2.0-dev2.3: RACE, don't chain (MiruDL pattern — no sequential
 // failover tax). 2.0-dev2.9: ALL candidates race at once (batch of
-// 9, was 3) and the first proven-exact success wins — the old
+// 10, was 3) and the first proven-exact success wins — the old
 // batches of 3 made Server 8 wait up to ~30 s behind two full
 // batches before it even started. The exact-tier parking rules
 // (downgrade / unknown park, exact wins) are unchanged, so a slow
@@ -313,7 +314,9 @@ object MultiSourceResolver {
     // behind two 15 s-capped batches. All 9 race at once now; the
     // exact-tier parking rules inside raceGroup are unchanged, so
     // this costs no correctness — only latency.
-    private const val RESOLVE_RACE_BATCH = 9
+    // 2.0-dev2.11: 10 — Server 10 joins the single batch; all 10
+    // race at once now.
+    private const val RESOLVE_RACE_BATCH = 10
     private const val RESOLVE_ATTEMPT_TIMEOUT_MS = 15_000L
 
     suspend fun resolveWithFailover(
