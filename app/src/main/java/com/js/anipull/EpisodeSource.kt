@@ -62,7 +62,13 @@ sealed class ResolvedLink {
     // It is the ONLY honest basis for the file name and for
     // quality-aware failover; DownloadJob.quality stays the
     // REQUESTED quality.
-    data class DirectMp4(val url: String, val referer: String, val subtitles: List<SubtitleTrack> = emptyList(), val actualQuality: Int? = null) : ResolvedLink()
+    // 2.0-dev2.6: `estimatedSizeBytes` is the file's size in bytes
+    // when it is known BEFORE downloading — exact for DDL (from
+    // the probe's Content-Range total), an estimate for HLS (see
+    // DdlQualityProbe). `sizeIsEstimate` is true only for the HLS
+    // BANDWIDTH x duration estimate; a DDL size is exact. Null =
+    // genuinely unknown: show NOTHING for it, never invent a size.
+    data class DirectMp4(val url: String, val referer: String, val subtitles: List<SubtitleTrack> = emptyList(), val actualQuality: Int? = null, val estimatedSizeBytes: Long? = null, val sizeIsEstimate: Boolean = false) : ResolvedLink()
     // Master playlist URL. m3u8 URLs expire in 3-5 minutes: the
     // caller must hand this to HlsDownloader immediately, in the
     // same job, with no gap — never queue it for later.
@@ -87,7 +93,13 @@ sealed class ResolvedLink {
         // playlist hasn't been parsed yet — HlsDownloader fills the
         // real picked height in at download time and the
         // post-download MediaExtractor check is the final truth.
+        // 2.0-dev2.6: `estimatedSizeBytes` / `sizeIsEstimate` are
+        // the HLS size estimate (BANDWIDTH x duration, "~", or
+        // summed segment byte-ranges, exact) — see DirectMp4 above.
+        // Null = genuinely unknown, never a made-up number.
         val actualQuality: Int? = null,
+        val estimatedSizeBytes: Long? = null,
+        val sizeIsEstimate: Boolean = false,
     ) : ResolvedLink()
     data class Failed(val message: String) : ResolvedLink()
 }
@@ -122,9 +134,14 @@ internal fun qualityFloorFor(requestedHeight: Int): Int {
     return QUALITY_LADDER.getOrElse(stepIndex + 1) { QUALITY_LADDER[stepIndex] }
 }
 
-// Unknown offered quality (null) MEETS the floor: the server didn't
-// say, so the race can't reject it — the post-download
-// MediaExtractor check is the backstop for those links.
+// Unknown offered quality (null) MEETS the floor in the abstract:
+// the server didn't say, so the race can't reject it on the number
+// alone. 2.0-dev2.6: that is NOT a free win any more — raceGroup
+// parks an unknown-quality link (after probing it once, see
+// enrichLink) and lets any known-quality link that meets the floor
+// win first; the unknown link is served only when the whole race
+// ends with no known winner. The post-download MediaExtractor
+// check stays the backstop for those links.
 internal fun offeredMeetsFloor(offeredHeight: Int?, requestedHeight: Int): Boolean =
     offeredHeight == null || offeredHeight >= qualityFloorFor(requestedHeight)
 
@@ -132,6 +149,42 @@ internal fun ResolvedLink.offeredHeight(): Int? = when (this) {
     is ResolvedLink.DirectMp4 -> actualQuality
     is ResolvedLink.Hls -> actualQuality
     is ResolvedLink.Failed -> null
+}
+
+// 2.0-dev2.6 — file size, when known BEFORE downloading. Null =
+// genuinely unknown: the UI must show NOTHING for it, never invent
+// a size. `sizeLabel()` is the display string ("240 MB" exact,
+// "~240 MB" estimate) or null when unknown.
+internal fun ResolvedLink.sizeBytes(): Long? = when (this) {
+    is ResolvedLink.DirectMp4 -> estimatedSizeBytes
+    is ResolvedLink.Hls -> estimatedSizeBytes
+    is ResolvedLink.Failed -> null
+}
+
+internal fun ResolvedLink.sizeIsEstimate(): Boolean = when (this) {
+    is ResolvedLink.DirectMp4 -> sizeIsEstimate
+    is ResolvedLink.Hls -> sizeIsEstimate
+    is ResolvedLink.Failed -> false
+}
+
+internal fun ResolvedLink.sizeLabel(): String? =
+    sizeBytes()?.let { formatSizeBytes(it, sizeIsEstimate()) }
+
+// Human size: B / KB / whole MB at >= 100 MB else one decimal / GB.
+// Estimates carry a "~" prefix (hard rule: never show an estimate
+// as if it were exact).
+internal fun formatSizeBytes(bytes: Long, estimate: Boolean): String {
+    val prefix = if (estimate) "~" else ""
+    return prefix + when {
+        bytes < 1024 -> "$bytes B"
+        bytes < 1024L * 1024L -> "${bytes / 1024} KB"
+        bytes < 1024L * 1024L * 1024L -> {
+            val mb = bytes / (1024.0 * 1024.0)
+            if (mb >= 100) "${mb.toInt()} MB"
+            else "%.1f MB".format(java.util.Locale.US, mb)
+        }
+        else -> "%.1f GB".format(java.util.Locale.US, bytes / (1024.0 * 1024.0 * 1024.0))
+    }
 }
 
 // Thrown (never auto-retried) when the stream/file that actually
@@ -243,15 +296,31 @@ object MultiSourceResolver {
         // downloading the wrong quality (brief: never silently
         // deliver a lower quality than selected).
         var bestFallback: ResolvedDownload? = null
+        // 2.0-dev2.6: best UNKNOWN-quality link seen across ALL
+        // batches (probed once, still unprovable). It ranks ABOVE
+        // the known sub-floor fallback — it might meet the floor —
+        // but BELOW any known meeting-floor win, and it is only
+        // served after every batch has run, so a slower server that
+        // CAN prove its quality always gets its chance first.
+        var bestUnknown: ResolvedDownload? = null
         for (group in candidates.chunked(RESOLVE_RACE_BATCH)) {
-            val (winner, fallback, groupLast) = raceGroup(group, title, anilistId, number, audio, quality, onAttempt)
-            last = groupLast
-            if (winner != null) return winner
-            if (fallback != null) {
-                val offered = fallback.link.offeredHeight() ?: 0
+            val result = raceGroup(group, title, anilistId, number, audio, quality, onAttempt)
+            last = result.last
+            if (result.winner != null) return result.winner
+            if (result.fallback != null) {
+                val offered = result.fallback.link.offeredHeight() ?: 0
                 val bestOffered = bestFallback?.link?.offeredHeight() ?: 0
-                if (bestFallback == null || offered > bestOffered) bestFallback = fallback
+                if (bestFallback == null || offered > bestOffered) bestFallback = result.fallback
             }
+            if (result.unknownFallback != null && bestUnknown == null) bestUnknown = result.unknownFallback
+        }
+        if (bestUnknown != null) {
+            DownloadLogs.log(
+                "RESOLVE",
+                "no server could PROVE ${qualityFloorFor(qualityHeight(quality))}p for $quality — " +
+                    "serving the unprovable link from Server ${bestUnknown.serverNumber} as a last resort (post-download check is the backstop)",
+            )
+            return bestUnknown
         }
         if (bestFallback != null) {
             val offered = bestFallback.link.offeredHeight()
@@ -270,15 +339,49 @@ object MultiSourceResolver {
     }
 
     // One batch of the race. Returns the winning download (a link
-    // meeting the quality floor — or of unknown quality, which
-    // can't be rejected), the best sub-floor link parked in this
-    // batch (or null), plus the last failure seen, so the caller
-    // can report it when every batch fails. Every racer logs its
-    // own result + latency. A meeting-floor win still ends the
-    // batch immediately (fast path preserved); a sub-floor win
-    // only parks and the batch keeps racing until its racers are
-    // done, so a slower server that CAN meet the quality still
-    // gets its chance.
+    // whose PROVEN quality meets the floor), the best sub-floor link
+    // parked in this batch (or null), the best still-unknown-quality
+    // link parked in this batch (or null), plus the last failure
+    // seen, so the caller can report it when every batch fails.
+    // Every racer logs its own result + latency. A meeting-floor
+    // win still ends the batch immediately (fast path preserved); a
+    // sub-floor win only parks and the batch keeps racing until its
+    // racers are done, so a slower server that CAN meet the quality
+    // still gets its chance. 2.0-dev2.6: an UNKNOWN-quality win
+    // parks exactly the same way — a fast unprovable DDL must never
+    // beat a slower provable HLS just by answering first.
+    private data class RaceResult(
+        val winner: ResolvedDownload?,
+        val fallback: ResolvedDownload?,
+        val unknownFallback: ResolvedDownload?,
+        val last: ResolvedLink,
+    )
+
+    // 2.0-dev2.6 — the reliability gate, run inside each racer
+    // BEFORE the floor decision sees the link. ONLY unknown-quality
+    // DDLs are probed here: a known-quality link passes through
+    // untouched (zero added latency on the fast path — speed is
+    // non-negotiable, and HLS size estimates deliberately do NOT
+    // run here; estimateHlsSizeBytes is a public API for lazy,
+    // off-hot-path callers only). A successful probe is ground
+    // truth: its height replaces the unknown, and its exact total
+    // size rides along for the sheet. A failed probe returns the
+    // link unchanged — unknown stays unknown and the parking rule
+    // below, not the probe, decides its fate.
+    private suspend fun enrichLink(link: ResolvedLink): ResolvedLink {
+        if (link !is ResolvedLink.DirectMp4) return link
+        if (link.actualQuality != null) return link
+        val probe = DdlQualityProbe.probeDdlQuality(
+            link.url,
+            mapOf("Referer" to link.referer),
+        ) ?: return link
+        return link.copy(
+            actualQuality = probe.height ?: link.actualQuality,
+            estimatedSizeBytes = probe.totalBytes ?: link.estimatedSizeBytes,
+            sizeIsEstimate = false,
+        )
+    }
+
     private suspend fun raceGroup(
         group: List<EpisodeSource>,
         title: ApiTitle,
@@ -287,20 +390,25 @@ object MultiSourceResolver {
         audio: String,
         quality: String,
         onAttempt: ((Int) -> Unit)?,
-    ): Triple<ResolvedDownload?, ResolvedDownload?, ResolvedLink> {
+    ): RaceResult {
         val scope = CoroutineScope(currentCoroutineContext())
         val deferreds = group.map { src ->
             scope.async {
                 onAttempt?.invoke(src.serverNumber)
                 val startedMs = System.currentTimeMillis()
                 try {
-                    val r = withTimeoutOrNull(RESOLVE_ATTEMPT_TIMEOUT_MS) {
+                    val raw = withTimeoutOrNull(RESOLVE_ATTEMPT_TIMEOUT_MS) {
                         src.resolveEpisode(title, anilistId, number, audio, quality)
                     } ?: ResolvedLink.Failed("Server ${src.serverNumber} timed out.")
+                    // 2.0-dev2.6: probe an unknown-quality DDL now —
+                    // a 360p file hiding behind an unknown label is
+                    // parked below, never crowned. Known links and
+                    // HLS links are untouched (no added latency).
+                    val r = enrichLink(raw)
                     val tookMs = System.currentTimeMillis() - startedMs
                     when (r) {
                         is ResolvedLink.DirectMp4 -> {
-                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — DDL mp4, offered ${r.offeredHeight() ?: "?"}p (${DownloadLogs.sanitizeUrl(r.url)})")
+                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — DDL mp4, offered ${r.offeredHeight() ?: "?"}p (${DownloadLogs.sanitizeUrl(r.url)})" + (r.sizeBytes()?.let { " size=${formatSizeBytes(it, r.sizeIsEstimate())}" } ?: ""))
                         }
                         is ResolvedLink.Hls -> {
                             DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — HLS master, offered ${r.offeredHeight() ?: "?"}p (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})")
@@ -320,6 +428,7 @@ object MultiSourceResolver {
         var last: ResolvedLink = ResolvedLink.Failed("All servers failed — tap Retry.")
         var winner: ResolvedDownload? = null
         var fallback: ResolvedDownload? = null
+        var unknownFallback: ResolvedDownload? = null
         val pending = deferreds.toMutableList()
         val requestedHeight = qualityHeight(quality)
         while (pending.isNotEmpty() && winner == null) {
@@ -331,16 +440,28 @@ object MultiSourceResolver {
                             is ResolvedLink.DirectMp4, is ResolvedLink.Hls -> {
                                 val offered = r.offeredHeight()
                                 val download = ResolvedDownload(r, src.serverNumber)
-                                if (offeredMeetsFloor(offered, requestedHeight)) {
+                                if (offered == null) {
+                                    // 2.0-dev2.6: still unprovable after
+                                    // the probe — park it. A known link
+                                    // meeting the floor beats it even if
+                                    // it arrives later in this batch; it
+                                    // wins only if the batch ends with no
+                                    // known winner at all.
+                                    DownloadLogs.log(
+                                        "RESOLVE",
+                                        "Server ${src.serverNumber}: quality still unknown after probing — parked, a known-quality link wins first",
+                                    )
+                                    if (unknownFallback == null) unknownFallback = download
+                                } else if (offered >= qualityFloorFor(requestedHeight)) {
                                     winner = download
                                 } else {
                                     DownloadLogs.log(
                                         "RESOLVE",
-                                        "Server ${src.serverNumber}: only ${offered ?: "?"}p for $quality " +
+                                        "Server ${src.serverNumber}: only ${offered}p for $quality " +
                                             "(floor ${qualityFloorFor(requestedHeight)}p) — parked, still racing",
                                     )
                                     val fallbackOffered = fallback?.link?.offeredHeight() ?: 0
-                                    if (fallback == null || (offered ?: 0) > fallbackOffered) fallback = download
+                                    if (fallback == null || offered > fallbackOffered) fallback = download
                                 }
                             }
                             is ResolvedLink.Failed -> last = r
@@ -352,7 +473,7 @@ object MultiSourceResolver {
         // Best-effort cancel of the losers; their blocking I/O
         // finishes on its own threads and the results are discarded.
         pending.forEach { it.cancel() }
-        return Triple(winner, fallback, last)
+        return RaceResult(winner, fallback, unknownFallback, last)
     }
 
     suspend fun loadEpisodesWithFailover(

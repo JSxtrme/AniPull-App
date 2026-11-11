@@ -28,15 +28,22 @@ import java.net.URL
 
 // 2.0-dev1.0 ENGINE — queue, jobs, persistence, DDL + HLS execution.
 //
-// Folder setting (read from Settings.kt first, as specified):
-// "folder" is a DISPLAY string (default "Downloads/Anipull") and
-// "folder_uri" is the real handle — a SAF tree URI picked with the
-// Browse picker. Under scoped storage the display string is NOT a
-// writable path, so: if folder_uri is set, files go into that SAF
-// tree (via DocumentsContract, no new dependency); otherwise they
-// go to getExternalFilesDir(DIRECTORY_DOWNLOADS)/Anipull/<title>/,
-// which FileProvider can serve. A revoked SAF permission falls
-// back to the app-private dir rather than failing the download.
+// 2.0-dev2.6 STORAGE: completed downloads live in the PUBLIC
+// Downloads folder, not the app-private dir. Downloads still stage
+// into getExternalFilesDir(DIRECTORY_DOWNLOADS)/.staging/<id>.part
+// (DDL Range resume + HLS remux both need a real File, so direct
+// MediaStore append was rejected — see DownloadStorage.kt), and
+// on success — only after the dev2.5 quality probe passes — the
+// finished file is published to MediaStore.Downloads with
+// RELATIVE_PATH "Download/Anipull/<Title>" (IS_PENDING=1 during
+// the copy, 0 after), so Gallery and Files see it. The persisted
+// filePath is then the MediaStore content:// Uri; Open/Delete
+// handle that, plain file paths (legacy / SAF fallback), and SAF
+// document Uris. A user-picked SAF tree (folder_uri) still wins:
+// those files copy into the chosen tree instead of Downloads.
+// First launch after the update migrates already-completed legacy
+// files into Downloads (see migrateLegacyCompleted); unfinished
+// legacy files are adopted into staging when their job next runs.
 //
 // m3u8 expiry caveat: resolveDownload returns a playlist URL that
 // dies in 3-5 min, so the UI must resolve immediately before
@@ -84,6 +91,12 @@ data class DownloadJob(
     // stated one). The file is named from this when set, never
     // from the requested quality.
     val actualQuality: String? = null,
+    // 2.0-dev2.6 SIZE: true when totalBytes is an ESTIMATE, not a
+    // measured total — HLS totals are segment-count x average
+    // segment size, DDL totals are exact Content-Length. The UI
+    // must label an estimated total with "~" and never present it
+    // as exact. Defaults false so old persisted jobs parse.
+    val totalEstimated: Boolean = false,
 )
 
 enum class JobState { QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELLED }
@@ -203,6 +216,8 @@ object DownloadEngine {
         // 2.0-dev2.5: actual delivered quality, so a completed
         // job keeps its honest name across restarts.
         job.actualQuality?.let { put("actual_quality", it) }
+        // 2.0-dev2.6: whether totalBytes is an HLS estimate.
+        if (job.totalEstimated) put("total_estimated", true)
         links[job.id]?.let { link ->
             val linkSubs: List<SubtitleTrack> = when (link) {
                 is ResolvedLink.DirectMp4 -> link.subtitles
@@ -226,6 +241,8 @@ object DownloadEngine {
                     put("link_url", link.url)
                     put("link_referer", link.referer)
                     link.actualQuality?.let { put("link_quality", it) }
+                    link.estimatedSizeBytes?.let { put("link_size", it) }
+                    if (link.sizeIsEstimate) put("link_size_est", true)
                 }
                 is ResolvedLink.Hls -> {
                     put("link_type", "hls")
@@ -235,6 +252,8 @@ object DownloadEngine {
                     link.referer?.let { put("link_referer", it) }
                     link.origin?.let { put("link_origin", it) }
                     link.actualQuality?.let { put("link_quality", it) }
+                    link.estimatedSizeBytes?.let { put("link_size", it) }
+                    if (link.sizeIsEstimate) put("link_size_est", true)
                 }
                 else -> {}
             }
@@ -260,8 +279,10 @@ object DownloadEngine {
         return try {
             val id = obj.optString("id").takeIf { it.isNotBlank() } ?: return null
             val linkQuality = obj.optInt("link_quality", 0).takeIf { it > 0 }
+            val linkSize = obj.optLong("link_size", 0).takeIf { it > 0 }
+            val linkSizeEst = obj.optBoolean("link_size_est", false)
             when (obj.optString("link_type")) {
-                "mp4" -> links[id] = ResolvedLink.DirectMp4(obj.optString("link_url"), obj.optString("link_referer"), subsFromJson(obj), actualQuality = linkQuality)
+                "mp4" -> links[id] = ResolvedLink.DirectMp4(obj.optString("link_url"), obj.optString("link_referer"), subsFromJson(obj), actualQuality = linkQuality, estimatedSizeBytes = linkSize, sizeIsEstimate = linkSizeEst)
                 "hls" -> links[id] = ResolvedLink.Hls(
                     obj.optString("link_url"),
                     subsFromJson(obj),
@@ -270,6 +291,8 @@ object DownloadEngine {
                     obj.optString("link_referer").takeIf { it.isNotBlank() },
                     obj.optString("link_origin").takeIf { it.isNotBlank() },
                     actualQuality = linkQuality,
+                    estimatedSizeBytes = linkSize,
+                    sizeIsEstimate = linkSizeEst,
                 )
             }
             DownloadJob(
@@ -294,6 +317,7 @@ object DownloadEngine {
                 fromMediaIndex = obj.optBoolean("from_media_index", false),
                 listServer = obj.optInt("list_server", -1).takeIf { it in 1..9 },
                 actualQuality = obj.optString("actual_quality").takeIf { it.isNotBlank() },
+                totalEstimated = obj.optBoolean("total_estimated", false),
             )
         } catch (_: Exception) {
             null
@@ -343,10 +367,50 @@ object DownloadEngine {
         }
         _jobs.value = restored
         DownloadLogs.log("ENGINE", "init: restored ${restored.size} job(s), ${restored.count { it.state == JobState.QUEUED }} queued")
+        migrateLegacyCompleted(ctx)
         if (restored.any { it.state == JobState.QUEUED }) pump()
     }
 
-    private fun updateJob(id: String, transform: (DownloadJob) -> DownloadJob, persistNow: Boolean = false) {
+    // 2.0-dev2.6 MIGRATION (once, first launch after the update):
+    // completed jobs whose file still sits in the old app-private
+    // dir are published to the public Downloads folder and their
+    // filePath is re-pointed at the MediaStore Uri — silently
+    // (notify=false: re-posting a completion ping per old download
+    // would spam the user). Unfinished jobs are NOT touched: their
+    // legacy file is resume state, adopted into staging by
+    // resolveDestination when the job next runs, and published when
+    // it finishes. A file that fails to publish stays put and is
+    // retried next launch (the flag is only set after a full pass).
+    private fun migrateLegacyCompleted(context: Context) {
+        scope.launch {
+            try {
+                val settings = prefs(context)
+                if (settings.getBoolean("public_dl_migrated_v1", false)) return@launch
+                var moved = 0
+                val legacyRoot = DownloadStorage.legacyDownloadDir(context)
+                for (job in _jobs.value.filter { it.state == JobState.COMPLETED }) {
+                    val path = job.filePath ?: continue
+                    if (path.startsWith("content://")) continue
+                    val file = File(path)
+                    if (!file.exists() || !file.isFile) continue
+                    // Only files actually under the old Anipull dir.
+                    if (!file.absolutePath.startsWith(legacyRoot.absolutePath)) continue
+                    val uri = DownloadStorage.publishVideoFile(context, file, job.animeTitle, file.name)
+                    if (uri != null) {
+                        try { file.delete() } catch (_: Exception) { }
+                        updateJob(job.id, { it.copy(filePath = uri.toString()) }, persistNow = true, notify = false)
+                        moved++
+                    }
+                }
+                settings.edit().putBoolean("public_dl_migrated_v1", true).apply()
+                DownloadLogs.log("ENGINE", "migration: moved $moved completed file(s) to public Downloads; ${DownloadStorage.countLegacyVideoFiles(context)} legacy video file(s) remain (unfinished/orphaned)")
+            } catch (e: Exception) {
+                DownloadLogs.log("ENGINE", "migration FAILED: ${e.javaClass.simpleName}: ${e.message ?: ""} (retries next launch)")
+            }
+        }
+    }
+
+    private fun updateJob(id: String, transform: (DownloadJob) -> DownloadJob, persistNow: Boolean = false, notify: Boolean = true) {
         val ctx = appContext
         var changed: DownloadJob? = null
         synchronized(lock) {
@@ -356,7 +420,7 @@ object DownloadEngine {
         }
         changed?.let { job ->
             if (persistNow) ctx?.let { persist(it) }
-            notifyJob(job)
+            if (notify) notifyJob(job)
         }
     }
 
@@ -550,15 +614,8 @@ object DownloadEngine {
     }
 
     fun openFile(context: Context, job: DownloadJob): Boolean {
-        val path = job.filePath ?: return false
+        val uri = resolveOpenUri(context, job) ?: return false
         return try {
-            val uri = if (path.startsWith("content://")) {
-                Uri.parse(path)
-            } else {
-                val file = File(path)
-                if (!file.exists()) return false
-                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-            }
             val intent = Intent(Intent.ACTION_VIEW).apply {
                 setDataAndType(uri, "video/mp4")
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -569,6 +626,76 @@ object DownloadEngine {
         } catch (_: Exception) {
             false
         }
+    }
+
+    // 2.0-dev2.6 SIZE: the honest size of a FINISHED download, read
+    // from the actual file — MediaStore SIZE for a published file,
+    // File.length for a legacy / publish-fallback path. When the
+    // file is provably gone (row deleted, file deleted) this returns
+    // null instead of a stale number. Only a path type that can't
+    // be stat-ed (SAF document Uri) falls back to the totals
+    // stamped at completion — those are the real finished length,
+    // not progress bytes. Null = genuinely unknown: the caller
+    // must show nothing or "size unknown", never a made-up number.
+    // NOT for in-progress jobs: use job.downloadedBytes /
+    // job.totalBytes there (totalBytes 0 = unknown), and label an
+    // estimated total with "~" (see totalEstimated).
+    fun completedSizeBytes(context: Context, job: DownloadJob): Long? {
+        val path = job.filePath
+        if (!path.isNullOrBlank()) {
+            when {
+                DownloadStorage.isMediaStoreUri(path) -> {
+                    DownloadStorage.publishedSize(context, path)?.let { return it }
+                    val name = fileNameFor(job.animeTitle, job.episodeNumber, job.actualQuality ?: job.quality, job.audio)
+                    val found = DownloadStorage.findPublicFile(context, name)
+                    if (found != null) return DownloadStorage.publishedSize(context, found.toString())
+                    return null
+                }
+                path.startsWith("content://") -> {
+                    // SAF document Uri — can't stat cheaply; fall
+                    // through to the stamped totals below.
+                }
+                else -> {
+                    val file = File(path)
+                    if (file.exists()) return file.length().takeIf { it > 0 }
+                    return null
+                }
+            }
+        }
+        if (job.state == JobState.COMPLETED) {
+            if (job.totalBytes > 0) return job.totalBytes
+            if (job.downloadedBytes > 0) return job.downloadedBytes
+        }
+        return null
+    }
+
+    // 2.0-dev2.6: resolve the Uri to open. A persisted MediaStore
+    // Uri can go stale (file deleted in Files, row recreated), and
+    // a legacy file path can vanish once migration moves it — in
+    // both cases fall back to a live lookup by file name before
+    // giving up, so Open keeps working after the move.
+    private fun resolveOpenUri(context: Context, job: DownloadJob): Uri? {
+        val path = job.filePath ?: return null
+        val expectedName = fileNameFor(job.animeTitle, job.episodeNumber, job.actualQuality ?: job.quality, job.audio)
+        if (path.startsWith("content://")) {
+            val uri = Uri.parse(path)
+            val stillThere = try {
+                context.contentResolver.query(uri, arrayOf("_id"), null, null, null)?.use { it.moveToFirst() } ?: false
+            } catch (_: Exception) {
+                false
+            }
+            if (stillThere) return uri
+            return DownloadStorage.findPublicFile(context, expectedName)
+        }
+        val file = File(path)
+        if (file.exists()) {
+            return try {
+                FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            } catch (_: Exception) {
+                null
+            }
+        }
+        return DownloadStorage.findPublicFile(context, expectedName)
     }
 
     // --- Pump / runner ---------------------------------------------------
@@ -638,7 +765,7 @@ object DownloadEngine {
                 failOrRetry(id, "No connection — check your network and retry.")
                 return
             }
-            updateJob(id, { it.copy(state = JobState.DOWNLOADING, error = null) }, persistNow = true)
+            updateJob(id, { it.copy(state = JobState.DOWNLOADING, error = null, totalEstimated = link is ResolvedLink.Hls) }, persistNow = true)
             // 2.0-dev2.5 DEFECT 5: post-resolve silence. The first
             // progress callback used to arrive only with the first
             // segment / first DDL chunk — until then the UI sat at
@@ -661,7 +788,24 @@ object DownloadEngine {
             var hlsActualHeight: Int? = null
             try {
                 when (link) {
-                    is ResolvedLink.DirectMp4 -> downloadMp4(
+                    is ResolvedLink.DirectMp4 -> {
+                        // 2.0-dev2.6 (coordinator patch): last-chance probe — an
+                        // unknown-quality DDL that reaches the engine gets ONE
+                        // bounded probe before any byte is downloaded. A probed
+                        // height below the floor fails over (QualityMismatchException
+                        // -> FAILED, no auto-retry, Retry re-resolves fresh) instead
+                        // of downloading then deleting. A failed probe (null) proceeds
+                        // with the download as before; the post-download check stays
+                        // the backstop.
+                        if (link.actualQuality == null) {
+                            val probe = DdlQualityProbe.probeDdlQuality(link.url, mapOf("Referer" to link.referer))
+                            val probed = probe?.height
+                            if (probed != null && probed < qualityFloorFor(qualityHeight(job.quality))) {
+                                DownloadLogs.logJob(id, "ENGINE", "QUALITY MISMATCH (pre-download probe): DDL is ${probed}p, requested ${job.quality} (floor ${qualityFloorFor(qualityHeight(job.quality))}p) — failing, not downloading")
+                                throw QualityMismatchException("Only ${probed}p is available for this episode — try a lower quality.")
+                            }
+                        }
+                        downloadMp4(
                         url = link.url,
                         referer = link.referer,
                         workFile = dest.workFile,
@@ -670,6 +814,7 @@ object DownloadEngine {
                         speedLimitMBps = speedLimit,
                         onProgress = { bytes, total, speed -> reportProgress(id, bytes, total, speed) },
                     )
+                    }
                     is ResolvedLink.Hls -> {
                         val hlsResult = HlsDownloader.download(
                             masterUrl = link.masterPlaylistUrl,
@@ -716,34 +861,35 @@ object DownloadEngine {
                 val actualHeight = deliveredHeight ?: hlsActualHeight ?: link.offeredHeight()
                 val actualLabel = actualHeight?.let { "${it}p" } ?: job.quality
                 // 2.0-dev2.5 DEFECT 3 — name the file from the
-                // ACTUAL quality. In SAF mode the staged file is
-                // copied under the final name, so only the name
-                // passed to finish() changes. In file mode the
-                // work file IS the final file, so rename it.
+                // ACTUAL quality. The work file is a staging
+                // partial in both modes now (2.0-dev2.6), so there
+                // is no file to rename — only the name passed to
+                // finish() changes, exactly like SAF mode before.
                 var finalFileName = fileName
                 if (actualLabel != namingQuality) {
-                    val renamed = fileNameFor(job.animeTitle, job.episodeNumber, actualLabel, job.audio)
-                    if (safTreeUri(ctx) == null) {
-                        val target = File(dest.workFile.parentFile, renamed)
-                        if (dest.workFile.renameTo(target)) {
-                            dest.workFile = target
-                            DownloadLogs.logJob(id, "ENGINE", "renamed to actual quality: $fileName -> $renamed")
-                        } else {
-                            DownloadLogs.logJob(id, "ENGINE", "rename to actual quality FAILED ($fileName -> $renamed) — keeping requested name")
-                        }
-                    }
-                    finalFileName = renamed
+                    finalFileName = fileNameFor(job.animeTitle, job.episodeNumber, actualLabel, job.audio)
+                    DownloadLogs.logJob(id, "ENGINE", "publishing under actual quality name: $fileName -> $finalFileName")
                 }
-                // SAF mode: copy the finished file into the chosen tree.
-                // Size is read BEFORE finish(): a successful SAF copy
-                // deletes the staged file, so reading after would be 0.
+                // Size is read BEFORE finish(): a successful SAF
+                // copy or MediaStore publish deletes the staged
+                // file, so reading after would be 0.
                 val finishedBytes = dest.workFile.length()
                 val finalPath = dest.finish(ctx, finalFileName)
                 DownloadLogs.logJob(id, "ENGINE", "COMPLETED: ${finishedBytes / 1024} KB -> $finalPath (requested ${job.quality}, delivered $actualLabel)")
                 updateJob(id, {
                     it.copy(
                         state = JobState.COMPLETED, progress = 100,
-                        downloadedBytes = it.totalBytes.coerceAtLeast(it.downloadedBytes),
+                        // 2.0-dev2.6 SIZE: stamp the REAL finished
+                        // file length, not the progress bytes — the
+                        // HLS progress total is a segment-bytes sum,
+                        // not the remuxed mp4 size, and an unknown
+                        // DDL total left totalBytes at 0. The
+                        // completed row reads totalBytes first, so
+                        // this is what makes its size true after the
+                        // storage move (publish copies byte-for-byte;
+                        // publishVideoFile verifies the count).
+                        downloadedBytes = finishedBytes,
+                        totalBytes = finishedBytes,
                         speedMBps = 0.0, error = null, filePath = finalPath,
                         actualQuality = actualLabel,
                     )
@@ -939,49 +1085,85 @@ object DownloadEngine {
     // --- Destination (file mode vs SAF tree) -----------------------------
 
     private class Dest(
-        // 2.0-dev2.5: var, not val — runJob renames the work file
-        // to the ACTUAL quality name in file mode after the
-        // post-download verification.
-        var workFile: File,
+        // 2.0-dev2.6: the work file is always a staging partial
+        // now (both modes) — the final file is a MediaStore publish
+        // or a SAF copy, never the work file itself.
+        val workFile: File,
         val tempDir: File,
         private val safTreeUri: Uri?,
         private val safDirName: String,
         private val fileDir: File,
     ) {
-        // On success: file mode already wrote the final file; SAF
-        // mode copies the finished file into the chosen tree and
-        // returns the document URI string as the file path.
+        // On success: SAF mode copies the finished file into the
+        // chosen tree and returns the document URI string; default
+        // mode publishes it to the public Downloads collection
+        // (MediaStore) and returns the content:// Uri string, so
+        // Gallery/Files see it. The staged file is deleted once
+        // the publish succeeds. If publish fails, the file is
+        // moved to the legacy final location (FileProvider-covered)
+        // instead of failing the job — Open still works, and
+        // Settings > Storage counts it among older files.
         fun finish(context: Context, fileName: String): String {
-            val tree = safTreeUri ?: return workFile.absolutePath
-            val docUri = safCreateFile(context, tree, safDirName, fileName, workFile)
-            if (docUri == null) {
-                // 2.0-dev1.9 diagnostics: the SAF copy failed, so
-                // the staged file is kept as the result instead of
-                // failing the job — the log says which happened.
-                DownloadLogs.log("ENGINE", "SAF copy failed for $fileName — keeping staged file ${workFile.absolutePath}")
-                return workFile.absolutePath
+            val tree = safTreeUri
+            if (tree != null) {
+                val docUri = safCreateFile(context, tree, safDirName, fileName, workFile)
+                if (docUri == null) {
+                    // 2.0-dev1.9 diagnostics: the SAF copy failed, so
+                    // the staged file is kept as the result instead of
+                    // failing the job — the log says which happened.
+                    DownloadLogs.log("ENGINE", "SAF copy failed for $fileName — keeping staged file ${workFile.absolutePath}")
+                    return workFile.absolutePath
+                }
+                DownloadLogs.log("ENGINE", "SAF copy done: $fileName -> ${docUri.host ?: "tree"}")
+                return docUri.toString()
             }
-            DownloadLogs.log("ENGINE", "SAF copy done: $fileName -> ${docUri.host ?: "tree"}")
-            return docUri.toString()
+            val uri = DownloadStorage.publishVideoFile(context, workFile, safDirName, fileName)
+            if (uri != null) {
+                try { workFile.delete() } catch (_: Exception) { }
+                DownloadLogs.log("ENGINE", "published to public Downloads: $fileName -> $uri")
+                return uri.toString()
+            }
+            DownloadLogs.log("ENGINE", "MediaStore publish failed for $fileName — keeping file in legacy location ${fileDir.absolutePath}")
+            return try {
+                val legacy = File(fileDir, fileName)
+                if (workFile.renameTo(legacy)) legacy.absolutePath else workFile.absolutePath
+            } catch (_: Exception) {
+                workFile.absolutePath
+            }
         }
     }
 
     private fun resolveDestination(context: Context, job: DownloadJob, dir: File, fileName: String): Dest {
         val tree = safTreeUri(context)
-        val workFile = if (tree != null) {
-            // SAF mode: stage locally, copy into the tree on success.
-            // 2.0-dev1.9 FIX (provable from code): the .staging
-            // parent was NEVER created — runJob only mkdirs() the
-            // anime dir, and downloadMp4 opens a FileOutputStream
-            // on this file, so EVERY DDL download with a custom
-            // SAF folder picked died with FileNotFoundException
-            // before a single byte was written. (HLS survived only
-            // because remux() mkdirs() the output parent.) Create
-            // it here so both paths share the guarantee.
-            File(File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, ".staging"), "${job.id}.part")
-                .also { it.parentFile?.mkdirs() }
+        // 2.0-dev2.6: BOTH modes stage in .staging now — the default
+        // mode used to download straight into the final file, but
+        // the final file is now a MediaStore publish, not a File,
+        // so the work file must be a staging partial (DDL Range
+        // resume and the HLS remux both need a real File path).
+        // The .staging parent is created here so both paths share
+        // the guarantee (see the 2.0-dev1.9 fix note below).
+        val staging = File(
+            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, ".staging"),
+            "${job.id}.part",
+        ).also { it.parentFile?.mkdirs() }
+        val workFile = if (!staging.exists()) {
+            // Adopt a legacy resume file: a job paused/failed before
+            // this update has its partial at the old final path
+            // (File(dir, fileName)) — move it into staging instead
+            // of restarting from zero. Same volume, so renameTo.
+            val legacy = File(dir, fileName)
+            if (tree == null && legacy.exists() && legacy.isFile) {
+                if (legacy.renameTo(staging)) {
+                    DownloadLogs.logJob(job.id, "ENGINE", "adopted legacy partial ${legacy.name} into staging (${staging.length() / 1024} KB) — resume, not restart")
+                    staging
+                } else {
+                    legacy
+                }
+            } else {
+                staging
+            }
         } else {
-            File(dir, fileName)
+            staging
         }
         val tempDir = File(dir, ".tmp-${job.id}")
         return Dest(workFile, tempDir, tree, sanitizeFileName(job.animeTitle), dir)
@@ -1042,7 +1224,16 @@ object DownloadEngine {
         if (path.isNullOrBlank()) return
         try {
             if (path.startsWith("content://")) {
-                DocumentsContract.deleteDocument(context.contentResolver, Uri.parse(path))
+                // 2.0-dev2.6: a MediaStore Uri (authority "media")
+                // is deleted through the resolver — that removes
+                // both the file and its MediaStore row, so Gallery
+                // never keeps a ghost entry. A SAF document Uri
+                // still goes through DocumentsContract.
+                if (DownloadStorage.isMediaStoreUri(path)) {
+                    DownloadStorage.deletePublicFile(context, path)
+                } else {
+                    DocumentsContract.deleteDocument(context.contentResolver, Uri.parse(path))
+                }
             } else {
                 File(path).delete()
             }
@@ -1085,14 +1276,22 @@ object DownloadEngine {
                     null
                 } ?: continue
                 if (finalPath.startsWith("content://")) {
-                    val tree = safTreeUri(context) ?: continue
-                    val staging = File(
-                        File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, ".staging"),
-                        "${job.id}-$vttName",
-                    )
-                    staging.parentFile?.mkdirs()
-                    staging.writeBytes(bytes)
-                    safCreateFile(context, tree, sanitizeFileName(job.animeTitle), vttName, staging, mimeType = "text/vtt")
+                    // 2.0-dev2.6: a MediaStore finalPath (authority
+                    // "media") gets its sidecar published into the
+                    // same public folder; a SAF document Uri still
+                    // goes through the chosen tree.
+                    if (DownloadStorage.isMediaStoreUri(finalPath)) {
+                        DownloadStorage.publishBytes(context, bytes, job.animeTitle, vttName, "text/vtt")
+                    } else {
+                        val tree = safTreeUri(context) ?: continue
+                        val staging = File(
+                            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, ".staging"),
+                            "${job.id}-$vttName",
+                        )
+                        staging.parentFile?.mkdirs()
+                        staging.writeBytes(bytes)
+                        safCreateFile(context, tree, sanitizeFileName(job.animeTitle), vttName, staging, mimeType = "text/vtt")
+                    }
                 } else {
                     val dir = File(finalPath).parentFile ?: continue
                     File(dir, vttName).writeBytes(bytes)

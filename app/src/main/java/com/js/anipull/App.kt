@@ -3645,6 +3645,14 @@ private fun retryDownloadJob(
         // BEFORE the fresh resolve — a retry re-resolves across the
         // chain and can take seconds. No second snackbar on Enqueued.
         onDownloadStarted?.invoke("Download queued — Episode ${job.episodeNumber}") ?: showToast(context, "Downloading Episode ${job.episodeNumber}")
+        // 2.0-dev2.6 (E): a retry is a deliberate fresh resolve,
+        // but it must still not run concurrently with a pre-resolve
+        // warm for the same episode+choices (detail/sheet may
+        // still be composed underneath the Downloads tab). Await
+        // the shared in-flight resolve first; its fresh win lands
+        // in ResolveCache, so the resolveAndEnqueue below reuses
+        // it instead of doubling the work.
+        awaitInFlightResolve(job.titleId, job.episodeNumber, episode.audio, job.quality, job.serverNumber.takeIf { it in 1..9 })
         val outcome = resolveAndEnqueue(
             context, title, episode, job.quality,
             serverOverride = job.serverNumber.takeIf { it in 1..9 },
@@ -3714,11 +3722,13 @@ private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Uni
                     JobState.DOWNLOADING -> when {
                         job.downloadedBytes <= 0L -> "Connecting…"
                         job.progress < 0 -> "${formatBytes(job.downloadedBytes)} · ${"%.1f".format(job.speedMBps)} MB/s"
+                        job.totalBytes > 0L -> "${job.progress}% · ${formatBytes(job.downloadedBytes)} / ${if (job.totalEstimated) "~" else ""}${formatBytes(job.totalBytes)} · ${"%.1f".format(job.speedMBps)} MB/s"
                         else -> "${job.progress}% · ${"%.1f".format(job.speedMBps)} MB/s"
                     }
                     JobState.PAUSED -> when {
                         job.progress < 0 && job.downloadedBytes > 0L -> "Paused · ${formatBytes(job.downloadedBytes)}"
                         job.progress < 0 -> "Paused"
+                        job.totalBytes > 0L -> "Paused · ${job.progress}% · ${formatBytes(job.downloadedBytes)} / ${if (job.totalEstimated) "~" else ""}${formatBytes(job.totalBytes)}"
                         else -> "Paused · ${job.progress}%"
                     }
                     JobState.QUEUED -> "Queued…"
@@ -4239,6 +4249,18 @@ private fun EpisodeDownloadSheet(
                     ) { Text("${q}p", fontSize = 13.sp) }
                 }
             }
+            // 2.0-dev2.6: size for the SELECTED quality only, when
+            // the pre-resolve already cached a link for these exact
+            // choices. Null -> show nothing (never an invented size).
+            // Read inline (not remember) so a pre-resolve landing
+            // after the sheet opened shows up on recomposition.
+            // NOTE: the season DownloadSheet has no single-episode
+            // size, so it deliberately shows none there.
+            val sheetSizeLabel = ResolveCache.lookup(LocalContext.current, title.id, row.number, audio, quality, server, null)?.link?.sizeLabel()
+            if (sheetSizeLabel != null) {
+                Spacer(Modifier.height(6.dp))
+                Text("Size: $sheetSizeLabel", color = Muted, fontSize = 12.sp)
+            }
             Spacer(Modifier.height(10.dp))
             Text("Audio", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
@@ -4345,15 +4367,68 @@ private data class PendingPull(
 // No behaviour change: same 20s race / 8s per-source timeouts,
 // same lazy clearance, kept AniList id, dedup, ranges, toggle,
 // multi-select + batch, resolving labels, row errors, Retry.
+// 2.0-dev2.6 (C): application-lifetime scope for PRE-RESOLVE
+// ONLY. The old code launched pre-resolve on the
+// EpisodeListState's rememberCoroutineScope, which dies when its
+// composable leaves composition (detail popped / sheet dismissed
+// mid-warm) — the in-flight resolve then died with
+// "rememberCoroutineScope left the composition" (JS log
+// 2026-11-11 17:38, Server 2 EXCEPTION after 8770ms). A
+// pre-resolve is background cache warming with no UI attached,
+// so it runs here: a SupervisorJob + Dispatchers.IO scope that
+// lives until process death and is never cancelled on
+// recomposition/navigation. Pulls (pull / downloadSelected /
+// clearance retry) still use the state's composable scope —
+// they are user-initiated UI work, not warming.
+private val preResolveScope = kotlinx.coroutines.CoroutineScope(
+    kotlinx.coroutines.SupervisorJob() + kotlinx.coroutines.Dispatchers.IO,
+)
+
+// 2.0-dev2.6 (E): ONE in-flight resolve per episode+quality+
+// audio+server choice, SHARED by every EpisodeListState. The old
+// map lived on the state, but DetailScreen and its DownloadSheet
+// each own a state for the same title (the sheet overlays the
+// still-composed detail — see AnipullAppInner's sheetFor block),
+// so two maps warmed the same rows concurrently with no
+// coalescing between them. A ConcurrentHashMap + putIfAbsent
+// also closes the check-then-act race between two states
+// warming the same row at the same instant.
+private val resolveInFlight = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Deferred<ResolveAttempt?>>()
+
+// 2.0-dev2.6 (E): await a shared in-flight resolve for these
+// choices instead of starting a second one. Returns once the
+// in-flight resolve has landed in ResolveCache (or failed —
+// the caller then resolves normally). No-op when nothing is in
+// flight for this key.
+private suspend fun awaitInFlightResolve(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?) {
+    resolveInFlight[resolveCoalesceKey(titleId, number, audio, quality, serverOverride)]?.let { deferred ->
+        runCatching { deferred.await() }
+    }
+}
+
 // 2.0-dev2.5 Defect 5 tax 3 — the coalesce key for a resolve:
 // the ResolveCache key (title | episode | audio | quality) PLUS
-// the first server lookup() requires (list server, else the
-// explicit preferred server, else any). Two resolves share a key
-// exactly when the confirm would reuse the pre-resolve's cached
-// win — so a changed chip in the sheet misses the key and
-// resolves fresh, as before.
-private fun resolveCoalesceKey(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, listServer: Int?): String {
-    val first = listServer ?: serverOverride?.takeIf { it in 1..9 } ?: 0
+// the first server lookup() requires (the explicit preferred
+// server, else any). Two resolves share a key exactly when the
+// confirm would reuse the pre-resolve's cached win — so a
+// changed chip in the sheet misses the key and resolves fresh,
+// as before.
+// 2.0-dev2.6 (E): listServer is NOT in the key. It is list
+// provenance that settles only as the episode-list race lands:
+// a warm fired while fallbackServer was still null and the
+// confirm fired with fallbackServer = 2 keyed differently, so
+// the confirm ran a second full resolve in parallel with the
+// warm (JS log 2026-11-11 15:37: two "start: ep 1 jpn 1080"
+// 39ms apart, both winning Server 2). The key is now exactly
+// episode+quality+audio+server choice. The resolve itself still
+// uses listServer for serving-first ordering; only the
+// coalescing ignores it. After awaiting, the caller's own
+// ResolveCache lookup (which IS listServer-aware) decides hit
+// vs fresh resolve, so a cached win from the "wrong" list
+// server is never served — the confirm just resolves fresh,
+// sequentially, instead of concurrently.
+private fun resolveCoalesceKey(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?): String {
+    val first = serverOverride?.takeIf { it in 1..9 } ?: 0
     return "$titleId|$number|${audioCode(audio)}|$quality|$first"
 }
 
@@ -4387,7 +4462,11 @@ private class EpisodeListState(
     // the exact resolve parameters a confirm will use. A confirm
     // whose key matches awaits the running pre-resolve instead of
     // starting a second concurrent full resolve.
-    private val preResolveInFlight = mutableMapOf<String, kotlinx.coroutines.Deferred<ResolveAttempt?>>()
+    // 2.0-dev2.6 (E): the map itself moved out of this class to
+    // the file-private shared resolveInFlight above (see
+    // resolveCoalesceKey) — one map for every EpisodeListState,
+    // so detail + sheet can no longer warm the same episode
+    // concurrently.
     // Loaded-list state — was remember(title.id) in EpisodeList.
     var mediaResult by mutableStateOf<MediaIndexResult?>(null)
     var fallbackResult by mutableStateOf<EpisodeResult?>(null)
@@ -4463,9 +4542,10 @@ private class EpisodeListState(
         // below hits the cache; a failed pre-resolve just falls
         // through to a normal resolve. A changed chip in the sheet
         // misses the key and resolves fresh, as before.
-        preResolveInFlight[resolveCoalesceKey(title.id, episode.number, episode.audio, quality, serverOverride, listServer)]?.let { deferred ->
-            runCatching { deferred.await() }
-        }
+        // 2.0-dev2.6 (E): the await now reads the SHARED map
+        // (awaitInFlightResolve), so a warm started by the OTHER
+        // state (detail vs sheet) coalesces too.
+        awaitInFlightResolve(title.id, episode.number, episode.audio, quality, serverOverride)
         val outcome = resolveAndEnqueue(
             context, title, episode, quality,
             serverOverride = serverOverride,
@@ -4544,9 +4624,16 @@ private class EpisodeListState(
     // one (coalesce) instead of doubling the resolve, and a second
     // pre-resolve for the same choices is never started.
     fun preResolveRow(row: EpisodeRow) {
-        val key = resolveCoalesceKey(title.id, row.number, pullAudio, quality, initialServer, if (row.fromMediaIndex) null else fallbackServer)
-        if (preResolveInFlight.containsKey(key)) return
-        val deferred = scope.async {
+        // 2.0-dev2.6 (C+E): runs on the application-lifetime
+        // preResolveScope, NOT the state's rememberCoroutineScope
+        // (see the scope above resolveCoalesceKey) — navigating
+        // away mid-warm no longer kills the resolve. The deferred
+        // is LAZY and registered with putIfAbsent: two states
+        // warming the same row at once keep exactly one resolve
+        // (the loser's block never starts), and the entry is
+        // removed only when THIS deferred completes.
+        val key = resolveCoalesceKey(title.id, row.number, pullAudio, quality, initialServer)
+        val deferred = preResolveScope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             runCatching {
                 resolveOnly(
                     context, title, row.info.copy(audio = pullAudio),
@@ -4556,10 +4643,11 @@ private class EpisodeListState(
                 )
             }.getOrNull()
         }
-        preResolveInFlight[key] = deferred
+        if (resolveInFlight.putIfAbsent(key, deferred) != null) return
         deferred.invokeOnCompletion {
-            if (preResolveInFlight[key] === deferred) preResolveInFlight.remove(key)
+            resolveInFlight.remove(key, deferred)
         }
+        deferred.start()
     }
 
     // 2.0-dev2.5 Defect 5 tax 3d — pre-resolve EARLIER: when the
@@ -5150,16 +5238,22 @@ private fun jobForRow(jobs: List<DownloadJob>, animeTitle: String, row: EpisodeR
     }
 }
 
-private fun jobStateText(job: DownloadJob): String = when (job.state) {
-    JobState.COMPLETED -> "Downloaded"
+private fun jobStateText(job: DownloadJob, completedSize: String? = null): String = when (job.state) {
+    // 2.0-dev2.6: a completed episode shows its real file size
+    // ("Downloaded · 240 MB") when the caller could read it;
+    // null -> plain "Downloaded", never an invented size.
+    JobState.COMPLETED -> if (completedSize != null) "Downloaded · $completedSize" else "Downloaded"
     // 2.0-dev2.5: same indeterminate rule as DownloadJobRow —
     // progress < 0 means the total is unknown (PROGRESS_INDETERMINATE),
     // so show bytes + speed with no % (never "-1%", never clamp to
     // 0). A 0-byte DOWNLOADING job is still in the connecting /
     // playlist phase, so it reads "Connecting…" either way.
+    // 2.0-dev2.6: when the total IS known, show "X MB / Y MB"
+    // (total prefixed "~" when it's an HLS estimate).
     JobState.DOWNLOADING -> when {
         job.downloadedBytes <= 0L -> "Connecting…"
         job.progress < 0 -> "${formatBytes(job.downloadedBytes)} · ${"%.1f".format(job.speedMBps)} MB/s"
+        job.totalBytes > 0L -> "${job.progress}% · ${formatBytes(job.downloadedBytes)} / ${if (job.totalEstimated) "~" else ""}${formatBytes(job.totalBytes)}"
         else -> "${job.progress}%"
     }
     JobState.PAUSED -> "Paused"
@@ -5387,6 +5481,10 @@ private fun EpisodeListRow(
     onTap: () -> Unit,
     onLongPress: () -> Unit,
 ) {
+    // 2.0-dev2.6: a completed episode shows its real file size
+    // next to "Downloaded" (read from the actual published file;
+    // null -> no size shown, never invented).
+    val rowContext = LocalContext.current
     Column(
         // 2.0-dev1.7: the whole row taps (confirm sheet, or toggle
         // while selecting) and long-presses to select. Selected
@@ -5419,8 +5517,9 @@ private fun EpisodeListRow(
             }
             Spacer(Modifier.width(12.dp))
             if (job != null) {
+                val completedSize = if (job.state == JobState.COMPLETED) DownloadEngine.completedSizeBytes(rowContext, job)?.let { formatBytes(it) } else null
                 Text(
-                    jobStateText(job),
+                    jobStateText(job, completedSize),
                     color = if (job.state == JobState.COMPLETED) Teal else Muted,
                     fontSize = 13.sp, fontWeight = FontWeight.Bold,
                 )
@@ -5459,6 +5558,9 @@ private fun RowScope.EpisodeGridCell(
     // nothing to download. Everything else taps the whole cell
     // (confirm sheet, or toggle while selecting). Long-press always
     // selects, even on a cell with a job.
+    // 2.0-dev2.6: a completed episode shows its real file size
+    // next to "Downloaded" (null -> no size shown, never invented).
+    val cellContext = LocalContext.current
     val canPull = job == null && !isResolving
     Column(
         modifier = Modifier.weight(1f)
@@ -5490,7 +5592,10 @@ private fun RowScope.EpisodeGridCell(
         }
         Spacer(Modifier.height(6.dp))
         when {
-            job != null -> Text(jobStateText(job), color = if (job.state == JobState.COMPLETED) Teal else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            job != null -> {
+                val completedSize = if (job.state == JobState.COMPLETED) DownloadEngine.completedSizeBytes(cellContext, job)?.let { formatBytes(it) } else null
+                Text(jobStateText(job, completedSize), color = if (job.state == JobState.COMPLETED) Teal else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            }
             isResolving -> Text(if (resolvingServer != null) "Resolving… · Server $resolvingServer" else "Resolving…", color = Muted, fontSize = 13.sp)
             else -> Text("Pull ↓", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
         }
@@ -5924,6 +6029,13 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, onDownloadStarted: ((S
             var downgraded = 0
             var downgradedQuality: Int? = null
             for (ep in eps) {
+                // 2.0-dev2.6 (E): the season loop used to bypass
+                // runPull's coalescing entirely, so it re-resolved
+                // episodes 1–3 concurrently with their in-flight
+                // pre-resolve warms. Await the shared in-flight
+                // resolve first; its win lands in ResolveCache, so
+                // the resolveAndEnqueue below is a cache hit.
+                awaitInFlightResolve(title.id, ep.number, ep.audio, quality, serverChoice)
                 when (val outcome = resolveAndEnqueue(
                     context, title, ep, quality,
                     serverOverride = serverChoice,

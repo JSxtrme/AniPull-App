@@ -280,6 +280,11 @@ object DownloadLogs {
         val serverNumber: Int,
         val subServer: String,
         val linkKind: String,
+        // 2.0-dev2.6 (D): the resolved link URL itself (host+path
+        // only — already query-stripped at log time), from the
+        // winning server's OK line (or the DDL GET line). Blank
+        // when the log genuinely has no URL for the job.
+        val linkUrl: String,
         val playlistHost: String,
         val segmentHost: String,
         val segmentTotal: Int?,
@@ -291,10 +296,23 @@ object DownloadLogs {
     )
 
     private val jobIdRegex = Regex("""^\[job (\S+)\] (.*)$""")
-    private val enqueueRegex = Regex("""enqueue: (.+) E(\d+) (\d+p) (Sub|Dub), server=(\d+), link=([^,]+)""")
+    // 2.0-dev2.6 (D): the enqueue quality has NO "p" suffix in the
+    // real line ("enqueue: Death Note E1 1080 Sub, ...") — the old
+    // (\d+p) never matched, so every summary read "unknown" for a
+    // job the entries clearly identified. (\d+p?) takes both.
+    private val enqueueRegex = Regex("""enqueue: (.+) E(\d+) (\d+p?) (Sub|Dub), server=(\d+), link=([^,]+)""")
     private val runJobRegex = Regex("""runJob start: server=(\d+), link=([^,]+), quality=(\S+) (\S+)""")
     private val resolveStartRegex = Regex("""start: ep (\d+) (\S+) (\S+), candidates=""")
-    private val resolveOkRegex = Regex("""Server (\d+)(?: \(([^)]+)\))?: OK in \d+ms — (HLS master|DDL mp4) \((https?://[^)]+)\)""")
+    // 2.0-dev2.6 (D): the real OK line carries the offered height
+    // between the kind and the URL ("— DDL mp4, offered 1080p
+    // (https://…)") — the old regex required the URL immediately
+    // after the kind, so it never matched and sub-server /
+    // playlist host stayed "unknown".
+    private val resolveOkRegex = Regex("""Server (\d+)(?: \(([^)]+)\))?: OK in \d+ms — (HLS master|DDL mp4)(?:, offered \d+p)? \((https?://[^)]+)\)""")
+    // Job ids carry episode/audio/quality themselves
+    // (dl_<titleId>_<ep>_<jpn|eng>_<quality>) — the fallback when
+    // the enqueue line was trimmed out of the kept window.
+    private val jobIdPartsRegex = Regex("""^dl_\d+_(\d+)_([a-z]+)_(\S+)$""")
     private val hlsStartRegex = Regex("""start: master=(\S+) quality=(\S+) audio=(\S+)(?: referer=(\S+) origin=(\S+))?""")
     private val mediaPlaylistRegex = Regex("""media playlist: (\d+) segments,.*first segment host=(\S+)""")
     private val mediaPlaylistOldRegex = Regex("""media playlist: (\d+) segments""")
@@ -352,6 +370,19 @@ object DownloadLogs {
                 }
             }
         }
+        // 2.0-dev2.6 (D): whatever the enqueue/runJob lines did
+        // not supply, the job id itself carries (episode, audio
+        // code, quality) — so a job whose enqueue line was trimmed
+        // out of the kept window still resolves its episode
+        // instead of reading "episode ?". Title and server have no
+        // job-id source and stay "unknown" when genuinely absent.
+        if (episode == 0 || quality == "?" || audio == "?") {
+            jobIdPartsRegex.find(jobId)?.let { m ->
+                if (episode == 0) episode = m.groupValues[1].toIntOrNull() ?: 0
+                if (audio == "?") audio = if (m.groupValues[2] == "eng") "Dub" else "Sub"
+                if (quality == "?") quality = m.groupValues[3]
+            }
+        }
         val isHls = linkKind.contains("HLS", ignoreCase = true)
         val isDdl = linkKind.contains("DDL", ignoreCase = true) || linkKind.contains("mp4", ignoreCase = true)
 
@@ -359,6 +390,7 @@ object DownloadLogs {
         // episode/audio/quality, then its OK line (name + URL).
         var subServer = "unknown"
         var playlistHost = "unknown"
+        var linkUrl = ""
         if (episode > 0) {
             val audioLower = when (audio) { "Sub" -> "jpn"; "Dub" -> "eng"; else -> audio.lowercase() }
             val searchEnd = if (enqueueIdx >= 0) enqueueIdx else entries.size
@@ -372,14 +404,26 @@ object DownloadLogs {
                 ) { resolveStartIdx = i; break }
             }
             if (resolveStartIdx >= 0) {
+                // 2.0-dev2.6 (D): the race logs an OK line for
+                // EVERY server that returned a link (a sub-floor
+                // win is parked, not the winner), so the FIRST ok
+                // is not necessarily this job's winner. Prefer
+                // the OK line whose server matches the enqueue
+                // server — that is the link the job actually
+                // downloaded — and fall back to the first OK.
+                val okLines = ArrayList<kotlin.text.MatchResult>()
                 for (i in resolveStartIdx + 1 until searchEnd) {
                     val e = entries[i]
                     if (e.stage != "RESOLVE") continue
                     if (e.message.startsWith("start:")) break // next resolve block
-                    val m = resolveOkRegex.find(e.message) ?: continue
+                    resolveOkRegex.find(e.message)?.let { okLines += it }
+                }
+                val ok = okLines.firstOrNull { it.groupValues[1].toIntOrNull() == server && server != 0 }
+                    ?: okLines.firstOrNull()
+                ok?.let { m ->
                     subServer = m.groupValues[2].ifBlank { "unknown" }
+                    linkUrl = sanitizeUrl(m.groupValues[4])
                     playlistHost = hostOf(m.groupValues[4]) ?: "unknown"
-                    break
                 }
             }
         }
@@ -433,9 +477,12 @@ object DownloadLogs {
             }
         }
         // DDL playlist host fallback: the DDL GET line carries it.
-        if (isDdl && playlistHost == "unknown") {
+        if (isDdl && (playlistHost == "unknown" || linkUrl.isBlank())) {
             tagged.firstOrNull { (_, e) -> e.stage == "DDL" }?.second?.message?.let { msg ->
-                ddlGetRegex.find(msg)?.let { m -> playlistHost = hostOf(m.groupValues[1]) ?: playlistHost }
+                ddlGetRegex.find(msg)?.let { m ->
+                    if (playlistHost == "unknown") playlistHost = hostOf(m.groupValues[1]) ?: playlistHost
+                    if (linkUrl.isBlank()) linkUrl = sanitizeUrl(m.groupValues[1])
+                }
             }
         }
         // First failure fallback: a job-tagged ENGINE FAILED line
@@ -467,7 +514,7 @@ object DownloadLogs {
         return JobSummary(
             jobId = jobId, title = title, episodeNumber = episode,
             quality = quality, audio = audio, serverNumber = server,
-            subServer = subServer, linkKind = linkKind,
+            subServer = subServer, linkKind = linkKind, linkUrl = linkUrl,
             playlistHost = playlistHost, segmentHost = segmentHost,
             segmentTotal = segmentTotal, referer = referer, origin = origin,
             firstFailure = firstFailure, firstFailureCode = firstFailureCode,
@@ -487,7 +534,7 @@ object DownloadLogs {
         appendLine("  Title: ${latest.title} — episode ${if (latest.episodeNumber > 0) latest.episodeNumber else "?"}")
         appendLine("  Quality/audio: ${latest.quality} ${latest.audio}")
         appendLine("  Winning server: Server ${latest.serverNumber} (${latest.subServer})")
-        appendLine("  Link: ${latest.linkKind}")
+        appendLine("  Link: ${latest.linkKind}${if (latest.linkUrl.isNotBlank()) " (${latest.linkUrl})" else ""}")
         appendLine("  Playlist host: ${latest.playlistHost}")
         appendLine("  Segment host: ${latest.segmentHost}${latest.segmentTotal?.let { " ($it segments)" } ?: ""}")
         if (latest.linkKind.contains("HLS", ignoreCase = true)) {

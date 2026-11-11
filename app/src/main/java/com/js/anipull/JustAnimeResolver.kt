@@ -136,7 +136,12 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
         }
     }
 
-    private data class StreamSource(val url: String, val quality: Int, val isM3u8: Boolean)
+    // 2.0-dev2.6: `quality` is null when the API states none
+    // ("auto", blank, or missing): UNKNOWN, not 1080. The old
+    // code ran the raw string through qualityHeight(), whose
+    // no-digits fallback is 1080 — so an unstated leg was silently
+    // promoted to 1080p and a 360p DDL could win on a lie.
+    private data class StreamSource(val url: String, val quality: Int?, val isM3u8: Boolean)
     // `headers` is the stream response's own `headers` object, taken
     // VERBATIM: the segment CDN enforces the upstream-player origin
     // via Cloudflare and 403s headerless fetches (proven 2026-11-11:
@@ -160,7 +165,10 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                 val url = s.optString("url").takeIf { it.isNotBlank() }
                     ?: s.optString("file").takeIf { it.isNotBlank() }
                     ?: continue
-                val q = s.optString("quality").let { qualityHeight(it) }
+                // Digits only — "auto" / blank / missing is null
+                // (unknown), never the old silent 1080 default.
+                val q = s.optString("quality").takeIf { it.isNotBlank() }
+                    ?.let { raw -> Regex("""(\d+)""").find(raw)?.groupValues?.getOrNull(1)?.toIntOrNull() }
                 val isM3u8 = if (s.has("isM3U8")) s.optBoolean("isM3U8") else url.contains(".m3u8")
                 sources += StreamSource(url, q, isM3u8)
             }
@@ -199,12 +207,18 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
         return ServerStream(sources, subs, referer, origin)
     }
 
+    // Null quality sorts below every known height: prefer the
+    // highest known height at/below wanted, else the lowest known
+    // height, else an unstated source (the caller / race probes it
+    // or HlsDownloader re-parses the master — it is never trusted
+    // as 1080 on the label alone).
     private fun pickSource(sources: List<StreamSource>, quality: String, wantM3u8: Boolean): StreamSource? {
         val pool = sources.filter { it.isM3u8 == wantM3u8 }.ifEmpty { sources }
         if (pool.isEmpty()) return null
         val wanted = qualityHeight(quality)
-        return pool.filter { it.quality <= wanted }.maxByOrNull { it.quality }
-            ?: pool.minByOrNull { it.quality }
+        return pool.filter { (it.quality ?: 0) in 1..wanted }.maxByOrNull { it.quality ?: 0 }
+            ?: pool.filter { it.quality != null }.minByOrNull { it.quality ?: 0 }
+            ?: pool.firstOrNull()
     }
 
     override suspend fun resolveEpisode(
@@ -233,16 +247,22 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                 return s.optBoolean(audioKey, false)
             }
 
-            // 2.0-dev2.5 DEFECT 3: quality-aware legs. A sub-floor
+            // 2.0-dev2.6: quality-aware legs, PROBED. A sub-floor
             // DDL must NOT win just by returning first — a 360p
             // DDL used to beat a 1080p HLS leg. So collect
-            // candidates instead of returning: a DDL that meets
-            // the floor returns immediately (DDL-first is kept);
+            // candidates instead of returning: a DDL whose PROBED
+            // height meets the floor returns immediately (DDL-first
+            // is kept when the DDL is genuinely the best leg);
             // otherwise HLS legs are tried for one that meets it;
             // only when nothing meets the floor is the best
             // (highest) sub-floor candidate returned, tagged with
             // its actual quality so the race can still prefer a
-            // better server and the file is named honestly.
+            // better server and the file is named honestly. The
+            // probe is what makes this airtight: the /download
+            // endpoint sometimes states NO resolution (or a wrong
+            // one) for a file that is really 360p, so the stated
+            // number is never trusted on its own — the mp4 header
+            // is read first (Range request, no full download).
             val wanted = qualityHeight(quality)
             val floor = qualityFloorFor(wanted)
             var bestCandidate: ResolvedLink? = null
@@ -263,36 +283,58 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                 if (dlResp.code == 200) {
                     val downloads = runCatching { JSONObject(dlResp.text).optJSONArray("downloads") }.getOrNull()
                     if (downloads != null) {
-                        var bestUrl: String? = null
-                        var bestRes = -1
+                        // (url, stated height or null when the API
+                        // states none). Unstated entries used to be
+                        // SKIPPED outright — now they are kept and
+                        // the probe decides them, so a good DDL is
+                        // never hidden by a missing label.
+                        val options = mutableListOf<Pair<String, Int?>>()
                         for (i in 0 until downloads.length()) {
                             val d = downloads.optJSONObject(i) ?: continue
                             if (d.optBoolean("isDub") != wantDub) continue
-                            val res = d.optInt("resolution", 0)
                             val url = d.optString("download").takeIf { it.isNotBlank() } ?: continue
-                            if (res in 1..wanted && res > bestRes) {
-                                bestRes = res
-                                bestUrl = url
-                            }
+                            val res = d.optInt("resolution", 0).takeIf { it > 0 }
+                                ?: Regex("""(\d+)""").find(d.optString("resolution"))
+                                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                                ?: Regex("""(\d+)""").find(d.optString("quality"))
+                                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                            options += url to res
                         }
-                        if (bestUrl == null) {
-                            // No quality at/below wanted: take the lowest available.
-                            var lowest = Int.MAX_VALUE
-                            for (i in 0 until downloads.length()) {
-                                val d = downloads.optJSONObject(i) ?: continue
-                                if (d.optBoolean("isDub") != wantDub) continue
-                                val res = d.optInt("resolution", 0)
-                                val url = d.optString("download").takeIf { it.isNotBlank() } ?: continue
-                                if (res in 1..lowest) {
-                                    lowest = res
-                                    bestUrl = url
-                                }
-                            }
-                            if (bestUrl != null) bestRes = lowest
-                        }
-                        if (bestUrl != null && bestRes > 0) {
-                            val ddl = ResolvedLink.DirectMp4(bestUrl, ORIGIN, actualQuality = bestRes)
-                            if (bestRes >= floor) return ddl
+                        // Highest stated height at/below wanted;
+                        // else the lowest stated height; else an
+                        // unstated URL — the probe, not the listing,
+                        // decides that one.
+                        val pick = options.filter { (it.second ?: 0) in 1..wanted }.maxByOrNull { it.second ?: 0 }
+                            ?: options.filter { it.second != null }.minByOrNull { it.second ?: 0 }
+                            ?: options.firstOrNull()
+                        if (pick != null) {
+                            val (bestUrl, statedRes) = pick
+                            // Probe BEFORE the floor decision: a
+                            // probed height overrides the stated one
+                            // (a lying 1080 label loses to a real
+                            // 360 header). Bounded 4 s; a failed
+                            // probe keeps the stated quality (or
+                            // unknown) and the race re-probes / the
+                            // post-download check stays the backstop.
+                            // The probe's exact total size rides
+                            // along for the sheet, free.
+                            val probe = DdlQualityProbe.probeDdlQuality(
+                                bestUrl,
+                                mapOf("Referer" to ORIGIN),
+                                timeoutMs = 4_000,
+                            )
+                            val realHeight = probe?.height ?: statedRes
+                            val ddl = ResolvedLink.DirectMp4(
+                                bestUrl, ORIGIN,
+                                actualQuality = realHeight,
+                                estimatedSizeBytes = probe?.totalBytes,
+                                sizeIsEstimate = false,
+                            )
+                            if (realHeight != null && realHeight >= floor) return ddl
+                            DownloadLogs.log(
+                                "RESOLVE",
+                                "JustAnime gigi: DDL probed ${probe?.height?.let { "${it}p" } ?: "unknown"} (stated ${statedRes?.let { "${it}p" } ?: "none"}) for $quality — below floor or unprovable, trying HLS legs",
+                            )
                             consider(ddl)
                         }
                     }
@@ -319,16 +361,21 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                 val picked = pickSource(stream.sources, quality, wantM3u8 = true) ?: continue
                 DownloadLogs.log(
                     "RESOLVE",
-                    "JustAnime $server: HLS, offered ${picked.quality}p, Referer=${stream.referer ?: "none"} Origin=${stream.origin ?: "none"}",
+                    "JustAnime $server: HLS, offered ${picked.quality?.let { "${it}p" } ?: "?"}, Referer=${stream.referer ?: "none"} Origin=${stream.origin ?: "none"}",
                 )
                 val hls = ResolvedLink.Hls(
                     picked.url,
                     subtitles = stream.subtitles,
                     referer = stream.referer,
                     origin = stream.origin,
-                    actualQuality = picked.quality.takeIf { it > 0 },
+                    actualQuality = picked.quality?.takeIf { it > 0 },
                 )
-                if (picked.quality >= floor) return hls
+                // Null quality is NOT a floor pass here: an unstated
+                // HLS leg is considered (race parks unknowns below
+                // known winners) but never returns early as a
+                // proven win — HlsDownloader re-parses the master
+                // and enforces the floor before any segment lands.
+                if (picked.quality != null && picked.quality >= floor) return hls
                 consider(hls)
             }
 
@@ -342,8 +389,10 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                     val stream = parseServerStream(streamObj)
                     val picked = pickSource(stream.sources, quality, wantM3u8 = false)
                     if (picked != null) {
-                        val ddl = ResolvedLink.DirectMp4(picked.url, "https://www.animegg.org/", actualQuality = picked.quality.takeIf { it > 0 })
-                        if (picked.quality >= floor) return ddl
+                        // Unstated quality (null) is unknown, not
+                        // 1080: the race probes it before it can win.
+                        val ddl = ResolvedLink.DirectMp4(picked.url, "https://www.animegg.org/", actualQuality = picked.quality?.takeIf { it > 0 })
+                        if (picked.quality != null && picked.quality >= floor) return ddl
                         consider(ddl)
                     }
                 }

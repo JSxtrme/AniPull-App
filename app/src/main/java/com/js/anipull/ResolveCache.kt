@@ -84,6 +84,13 @@ object ResolveCache {
         val link = resolved.link
         val server = resolved.serverNumber ?: return
         if (link is ResolvedLink.Failed) return
+        // 2.0-dev2.6 (probe findings): never cache an unknown-quality
+        // DDL link. A cached link is served directly, bypassing the
+        // race's probe — a pre-fix DDL entry (no quality tag) would
+        // keep winning for up to 24 h (JustAnime TTL) and only the
+        // post-download check would catch it, exactly the Death Note
+        // loop. Unknown DDLs re-resolve (and re-probe) every time.
+        if (link is ResolvedLink.DirectMp4 && link.actualQuality == null) return
         loadLocked(context)
         val key = cacheKey(titleId, number, audio, quality)
         mem[key] = Entry(link, server, System.currentTimeMillis())
@@ -107,6 +114,16 @@ object ResolveCache {
                 try {
                     val e = obj.getJSONObject(key)
                     val link = parseLink(e) ?: return@forEach
+                    // 2.0-dev2.6 (probe findings): drop cached DDL
+                    // links with no quality tag — these were resolved
+                    // before dev2.5's quality tagging (no "aq"
+                    // field), so serving them would bypass the
+                    // quality-aware race for up to 24 h and replay
+                    // the Death Note 360p loop. They re-resolve
+                    // (and re-probe) fresh. HLS links are kept: the
+                    // HLS downloader enforces the variant floor
+                    // pre-download, so an untagged HLS link is safe.
+                    if (link is ResolvedLink.DirectMp4 && link.actualQuality == null) return@forEach
                     val server = e.optInt("server", 0).takeIf { it in 1..9 } ?: return@forEach
                     val at = e.optLong("at", 0)
                     if (at <= 0 || now - at < 0 || now - at > ttlMs(server)) return@forEach
@@ -140,6 +157,8 @@ object ResolveCache {
             // cached hit is judged by the race exactly like a
             // fresh resolve.
             link.actualQuality?.let { put("aq", it) }
+            link.estimatedSizeBytes?.let { put("size", it) }
+            if (link.sizeIsEstimate) put("sizeEst", true)
             put("subs", subsToJson(link.subtitles))
         }
         is ResolvedLink.Hls -> JSONObject().apply {
@@ -150,6 +169,8 @@ object ResolveCache {
             link.referer?.let { put("referer", it) }
             link.origin?.let { put("origin", it) }
             link.actualQuality?.let { put("aq", it) }
+            link.estimatedSizeBytes?.let { put("size", it) }
+            if (link.sizeIsEstimate) put("sizeEst", true)
             put("subs", subsToJson(link.subtitles))
         }
         is ResolvedLink.Failed -> JSONObject().put("kind", "failed")
@@ -168,12 +189,16 @@ object ResolveCache {
 
     private fun parseLink(e: JSONObject): ResolvedLink? = try {
         val aq = e.optInt("aq", 0).takeIf { it > 0 }
+        val size = e.optLong("size", 0).takeIf { it > 0 }
+        val sizeEst = e.optBoolean("sizeEst", false)
         when (e.optString("kind")) {
             "mp4" -> ResolvedLink.DirectMp4(
                 url = e.getString("url"),
                 referer = e.optString("referer", ""),
                 subtitles = parseSubs(e.optJSONArray("subs")),
                 actualQuality = aq,
+                estimatedSizeBytes = size,
+                sizeIsEstimate = sizeEst,
             )
             "hls" -> ResolvedLink.Hls(
                 masterPlaylistUrl = e.getString("master"),
@@ -183,6 +208,8 @@ object ResolveCache {
                 referer = e.optString("referer", null).takeIf { !it.isNullOrEmpty() },
                 origin = e.optString("origin", null).takeIf { !it.isNullOrEmpty() },
                 actualQuality = aq,
+                estimatedSizeBytes = size,
+                sizeIsEstimate = sizeEst,
             )
             else -> null
         }

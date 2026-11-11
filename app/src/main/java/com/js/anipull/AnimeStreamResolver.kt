@@ -148,9 +148,10 @@ internal class AnimeStreamEpisodeSource : BaseEpisodeSource(
     private suspend fun fetchSeasonEpisodes(seasonId: String): List<SeasonEpisode> {
         val out = mutableListOf<SeasonEpisode>()
         var page = 1
-        // 100/page where the API allows it; paginate to the end.
+        // 2.0-dev2.6: the API now enforces limit <= 20 (limit=100
+        // returns HTTP 422); paginate at 20 to the end.
         while (page <= 50) {
-            val resp = apiGet("/season/$seasonId/episodes?page=$page&limit=100")
+            val resp = apiGet("/season/$seasonId/episodes?page=$page&limit=20")
             if (resp.code != 200) break
             val arr = runCatching { JSONObject(resp.text).optJSONArray("episodes") }.getOrNull()
                 ?: runCatching { org.json.JSONArray(resp.text) }.getOrNull()
@@ -168,7 +169,7 @@ internal class AnimeStreamEpisodeSource : BaseEpisodeSource(
                 )
             }
             // A short page is the last page.
-            if (arr.length() < 100) break
+            if (arr.length() < 20) break
             page++
         }
         return out.sortedBy { it.number }

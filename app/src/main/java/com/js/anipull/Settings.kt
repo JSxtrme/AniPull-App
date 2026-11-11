@@ -550,7 +550,7 @@ fun DownloadsSettingsPage() {
                     Text("Browse", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
                 }
             }
-            Text("Tap Browse to pick a folder from your phone — no need to type a path by hand.", color = Faint, fontSize = 12.sp)
+            Text("Default is the public Downloads/Anipull folder — finished videos show in Gallery and in Files › Downloads › Anipull. Tap Browse to pick a custom folder instead.", color = Faint, fontSize = 12.sp)
         }
     }
     Spacer(Modifier.height(20.dp))
@@ -822,7 +822,32 @@ fun StoragePage() {
     SettingsSectionLabel("DOWNLOAD FOLDER")
     SettingsCard {
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
-            Text(folder, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            // 2.0-dev2.6: show the REAL location. Default is the
+            // public Downloads/Anipull folder (visible in Gallery
+            // and Files) — the old label said the same words while
+            // files actually went to the app-private folder. A
+            // Browse-picked folder shows its own display name.
+            val hasCustomFolder = (prefs.getString("folder_uri", null)?.isNotBlank() == true)
+            // 2.0-dev2.6: files left in the old private folder —
+            // unfinished downloads move automatically when they
+            // finish; anything else here is a partial from a failed
+            // or cancelled download. Counted once per visit.
+            val legacyCount = remember { DownloadStorage.countLegacyVideoFiles(ctx) }
+            if (hasCustomFolder) {
+                Text(folder, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("Custom folder, picked in Downloads settings — files go there instead of the public Downloads folder.", color = Muted, fontSize = 13.sp)
+            } else {
+                Text("Download/Anipull", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                Text("Public Downloads folder — finished videos appear in Gallery and in Files › Downloads › Anipull.", color = Muted, fontSize = 13.sp)
+            }
+            if (legacyCount > 0) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    if (legacyCount == 1) "1 older file is still in the app's private folder — an unfinished download moves here automatically when it finishes."
+                    else "$legacyCount older files are still in the app's private folder — unfinished downloads move here automatically when they finish.",
+                    color = Muted, fontSize = 13.sp,
+                )
+            }
             Text("Change it in Downloads settings, with the Browse picker.", color = Muted, fontSize = 13.sp)
         }
     }

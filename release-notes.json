@@ -1,1 +1,16 @@
-{"features":["Download start now shows a Snackbar with a View action — tap it to jump straight to the Downloads tab","Tapping Download shows 'Download queued' instantly, before any resolving — the job appears in the Downloads tab right away","Episode range selector now defaults to 1–100 on long titles, and the pill is bigger and clearer with an Episodes label","Downloads show honest progress while connecting — 'Connecting…' with real bytes and speed instead of a frozen 0%"],"fixes":["Fixed two notifications for one download — the foreground service notification is now the single group summary, so the shade shows one entry","Fixed the download notification flickering and sliding in the status bar — one stable notification, updated in place and throttled, only when its content changes","Fixed progress stuck at 0% on downloads with no total size — they now show an indeterminate state with real bytes and speed, never a fake 0%","Fixed downloads silently delivering the wrong quality — if no server can provide the selected quality the download now fails honestly instead of saving a lower-quality file, and delivered files are verified and named from their actual quality","Fixed Recently downloaded showing the same anime twice — it now dedups by anime","Fixed resolving still being slow — Pahe clearance now only solves if the other servers fail first, the serving-first resolve is capped at 15 seconds, and pre-resolve warms earlier with confirm reusing it instead of starting a second resolve"]}
+{
+"features": [
+"Downloads now land in your public Downloads folder \u2014 Files > Downloads > Anipull \u2014 so finished videos show up in Gallery and file managers, not hidden inside the app's private folder",
+"Download sheet now shows the file size for the selected quality before you tap download (e.g. \"1080p \u00b7 240 MB\"), so a wrong-quality link is visible at a glance",
+"Downloads tab now shows \"downloaded X MB / Y MB\" while downloading, and completed episodes show their real file size on the episode row"
+],
+"fixes": [
+"Fixed downloads landing in a hidden app-private folder \u2014 completed files are now published to the public Downloads/Anipull folder (visible in Gallery/Files), old completed files move there on first launch, and the Settings path label now shows the real location",
+"Fixed a stale cache replaying the wrong quality \u2014 download links cached before the quality checks existed (no quality tag) are now dropped and never cached again, so a 360p link can no longer keep winning for 24 hours after the fix",
+"Fixed the download-then-delete quality loop \u2014 unknown-quality DDL links are now probed for their real resolution (a small ranged MP4 header read) before any bytes download, so a 360p file can no longer win a 1080p request; a known 1080p HLS leg now beats an unknown-quality DDL, and JustAnime's DDL leg can no longer shadow its own HLS legs",
+"Fixed the pre-resolve crash when navigating away mid-warm \u2014 pre-resolves now run on an application-lifetime scope instead of a composable scope",
+"Fixed the Download Logs summary showing \"unknown\" title/server/link \u2014 it now parses the real enqueue and resolve lines",
+"Fixed duplicate resolves \u2014 pre-resolve and confirm no longer run two concurrent resolves for the same episode (shared in-flight map, one resolve per episode+quality+audio)",
+"Fixed episode lists failing on one server \u2014 its API now rejects page sizes over 20 (HTTP 422), so episode fetching now pages at 20"
+]
+}
