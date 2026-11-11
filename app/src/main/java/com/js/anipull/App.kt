@@ -3760,7 +3760,18 @@ private sealed class ResolveOutcome {
     object NeedsClearance : ResolveOutcome()
 }
 
-private suspend fun resolveAndEnqueue(
+// 2.0-dev2.3: the resolve half of resolveAndEnqueue, split out so
+// the download sheet can PRE-RESOLVE when it opens (see
+// EpisodeListState.preResolveRow): the pre-resolve warms
+// ResolveCache and the confirm just reuses it. Returns the resolved
+// link plus whether a human Cloudflare check is still pending for
+// server 3 (the caller decides what that means for a Failed link).
+private data class ResolveAttempt(
+    val resolved: ResolvedDownload,
+    val needsClearance: Boolean,
+)
+
+private suspend fun resolveOnly(
     context: android.content.Context,
     title: ApiTitle,
     episode: EpisodeInfo,
@@ -3769,22 +3780,29 @@ private suspend fun resolveAndEnqueue(
     anilistId: Long? = null,
     fromMediaIndex: Boolean = false,
     listServer: Int? = null, // server that served the fallback list, tried first
-    wifiOverride: Boolean = false, // true = an explicit per-episode confirm consented to any network
     onAttempt: ((Int) -> Unit)? = null, // fires with each server number as it is tried
-): ResolveOutcome {
-    // A clearance can expire between the list load and the tap, so
-    // re-ensure it here (stored-and-valid returns instantly, no
-    // WebView). 2.0-dev1.5: Cronet needs the app context registered
-    // before the first server-3 call (MainActivity does this at
-    // launch; this is the belt-and-braces copy for the download path).
+): ResolveAttempt {
+    // 2.0-dev1.5: Cronet needs the app context registered before
+    // the first server-3 call (MainActivity does this at launch;
+    // this is the belt-and-braces copy for the download path).
     CronetHttp.setContext(context)
     val preferred = serverOverride ?: preferredServerNumber(context)
+    // 2.0-dev2.3: resolve cache — a fresh-enough link (per-source
+    // TTL: Pahe 90 s, never an expired Pahe link) skips the whole
+    // chain AND the clearance ensure, so a repeat tap is instant.
+    // A miss behaves exactly like no cache at all.
+    ResolveCache.lookup(context, title.id, episode.number, episode.audio, quality, preferred, listServer)?.let {
+        return ResolveAttempt(it, false)
+    }
+    // A clearance can expire between the list load and the tap, so
+    // re-ensure it here (stored-and-valid returns instantly, no
+    // WebView).
     val numbers = candidateServerNumbers(context, preferred).let { ordered ->
         if (listServer != null) listOf(listServer) + ordered.filter { it != listServer } else ordered
     }
     val clearance = paheClearanceIfNeeded(context, 3 in numbers)
     val candidates = numbers.mapNotNull { ServerRegistry.build(it, clearance.cookie, clearance.userAgent) }
-    if (candidates.isEmpty()) return ResolveOutcome.Error("No server available — tap Retry.")
+    if (candidates.isEmpty()) return ResolveAttempt(ResolvedDownload(ResolvedLink.Failed("No server available — tap Retry."), null), clearance.needsUserAction)
     // 2.0-dev1.7: resolveWithFailover returns ResolvedDownload —
     // the link PLUS the winning server (null when all failed).
     // onAttempt is passed through so the UI can show live progress
@@ -3814,12 +3832,34 @@ private suspend fun resolveAndEnqueue(
     } catch (e: Exception) {
         ResolvedDownload(ResolvedLink.Failed(friendlyDownloadError(e)), null)
     }
+    // Cache the win (successes only, per-source TTL) so a repeat
+    // tap — or the confirm after a pre-resolved sheet — is instant.
+    if (resolved.link !is ResolvedLink.Failed && resolved.serverNumber != null) {
+        ResolveCache.store(context, title.id, episode.number, episode.audio, quality, resolved)
+    }
+    return ResolveAttempt(resolved, clearance.needsUserAction)
+}
+
+private suspend fun resolveAndEnqueue(
+    context: android.content.Context,
+    title: ApiTitle,
+    episode: EpisodeInfo,
+    quality: String,
+    serverOverride: Int? = null, // null = Settings default; 0 = Auto
+    anilistId: Long? = null,
+    fromMediaIndex: Boolean = false,
+    listServer: Int? = null, // server that served the fallback list, tried first
+    wifiOverride: Boolean = false, // true = an explicit per-episode confirm consented to any network
+    onAttempt: ((Int) -> Unit)? = null, // fires with each server number as it is tried
+): ResolveOutcome {
+    val attempt = resolveOnly(context, title, episode, quality, serverOverride, anilistId, fromMediaIndex, listServer, onAttempt)
+    val resolved = attempt.resolved
     return when (val link = resolved.link) {
         is ResolvedLink.Failed -> {
             // The whole chain failed and a human check is still
             // pending for server 3 — solving it may unlock that
             // server, so surface the dialog instead of a dead end.
-            if (clearance.needsUserAction) ResolveOutcome.NeedsClearance
+            if (attempt.needsClearance) ResolveOutcome.NeedsClearance
             else ResolveOutcome.Error(link.message)
         }
         else -> {
@@ -4166,6 +4206,29 @@ private class EpisodeListState(
                 ResolveOutcome.Enqueued -> showToast(context, "Downloading Episode ${row.number}")
                 is ResolveOutcome.Error -> showToast(context, outcome.message)
                 ResolveOutcome.NeedsClearance -> Unit
+            }
+        }
+    }
+
+    // 2.0-dev2.3: PRE-RESOLVE (MiruDL pattern — the link is ready
+    // before the tap). When the confirm sheet opens, resolve with
+    // the sheet's initial selection (Settings defaults) in the
+    // background; resolveOnly stores the win in ResolveCache, so
+    // the confirm reuses it and the download starts instantly.
+    // Silent by design: a failure here changes nothing — confirm
+    // just resolves normally. A changed selection in the sheet
+    // misses the cache and resolves via the parallel race instead.
+    // No UI state is touched and no clearance dialog is surfaced
+    // from here; if a human check is needed, confirm surfaces it.
+    fun preResolveRow(row: EpisodeRow) {
+        scope.launch {
+            runCatching {
+                resolveOnly(
+                    context, title, row.info.copy(audio = pullAudio),
+                    quality, serverOverride = initialServer,
+                    anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
+                    listServer = if (row.fromMediaIndex) null else fallbackServer,
+                )
             }
         }
     }
@@ -4675,6 +4738,11 @@ private fun EpisodeListDialogs(state: EpisodeListState) {
     }
     // 2.0-dev1.7: the per-episode confirm sheet.
     state.confirmRow?.let { row ->
+        // 2.0-dev2.3: pre-resolve when the sheet opens, so the link
+        // is already cached by the time the user taps Download.
+        androidx.compose.runtime.LaunchedEffect(row) {
+            state.preResolveRow(row)
+        }
         EpisodeDownloadSheet(
             row = row, title = state.title,
             initialQuality = state.quality,

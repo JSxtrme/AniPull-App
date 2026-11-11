@@ -1,8 +1,13 @@
 package com.js.anipull
 
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 // 2.0-dev1.6 ENGINE — episode sources (multi-source).
 // A source turns an AniLab title into an episode list and resolves one
@@ -126,13 +131,30 @@ object EpisodeSources {
     fun anv(): EpisodeSource = AnvEpisodeSource()
 }
 
-// Try candidates in order; first non-Failed wins. If all fail, the
-// last Failed is returned (or a generic message when nothing ran),
-// with serverNumber null. onAttempt fires with each server number
-// as it is tried, so the UI can show live progress ("Trying
-// Server N…"). The Pahe candidate is passed in already constructed
-// with its clearance — the engine NEVER solves Cloudflare.
+// Try candidates in priority order; first non-Failed wins. If all
+// fail, the last Failed is returned (or a generic message when
+// nothing ran), with serverNumber null. onAttempt fires with each
+// server number as it is tried, so the UI can show live progress
+// ("Trying Server N…"). The Pahe candidate is passed in already
+// constructed with its clearance — the engine NEVER solves
+// Cloudflare.
+//
+// 2.0-dev2.3: RACE, don't chain (MiruDL pattern — no sequential
+// failover tax). Candidates run in batches of 3 in parallel and the
+// first success wins; a batch with no winner falls through to the
+// next batch. A slow server no longer blocks the servers behind it.
+// Racers are launched as children of the CALLER's job (via the
+// current coroutine context) and are NOT joined after a win —
+// joining them would stall the win by up to a socket timeout when
+// a loser is blocked in non-cancellable I/O. Losers are cancelled
+// best-effort; they are bounded (per-attempt timeout + socket
+// timeouts) and die with the caller's job. Each racer is capped
+// at 15 s: a hung resolve fails over in seconds, not after ~40 s
+// of retries (fail fast on resolve — segment retries are untouched).
 object MultiSourceResolver {
+    private const val RESOLVE_RACE_BATCH = 3
+    private const val RESOLVE_ATTEMPT_TIMEOUT_MS = 15_000L
+
     suspend fun resolveWithFailover(
         candidates: List<EpisodeSource>,
         title: ApiTitle,
@@ -150,36 +172,83 @@ object MultiSourceResolver {
             "RESOLVE",
             "start: ep $number ${audio.lowercase()} $quality, candidates=${candidates.map { it.serverNumber }}",
         )
+        if (candidates.isEmpty()) {
+            DownloadLogs.log("RESOLVE", "no candidates — nothing to try")
+            return ResolvedDownload(ResolvedLink.Failed("No server available — tap Retry."), null)
+        }
         var last: ResolvedLink = ResolvedLink.Failed("All servers failed — tap Retry.")
-        for (src in candidates) {
-            onAttempt?.invoke(src.serverNumber)
-            val startedMs = System.currentTimeMillis()
-            try {
-                val r = src.resolveEpisode(title, anilistId, number, audio, quality)
-                val tookMs = System.currentTimeMillis() - startedMs
-                when (r) {
-                    is ResolvedLink.DirectMp4 -> {
-                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — DDL mp4 (${DownloadLogs.sanitizeUrl(r.url)})")
-                        return ResolvedDownload(r, src.serverNumber)
-                    }
-                    is ResolvedLink.Hls -> {
-                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — HLS master (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})")
-                        return ResolvedDownload(r, src.serverNumber)
-                    }
-                    is ResolvedLink.Failed -> {
-                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: FAILED in ${tookMs}ms — ${r.message}")
-                        last = r
-                    }
-                }
-            } catch (e: Exception) {
-                val tookMs = System.currentTimeMillis() - startedMs
-                DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: EXCEPTION in ${tookMs}ms — ${e.javaClass.simpleName}: ${e.message ?: ""}")
-                last = ResolvedLink.Failed(friendlyDownloadError(e))
-            }
+        for (group in candidates.chunked(RESOLVE_RACE_BATCH)) {
+            val (winner, groupLast) = raceGroup(group, title, anilistId, number, audio, quality, onAttempt)
+            last = groupLast
+            if (winner != null) return winner
         }
         val lastMsg = (last as? ResolvedLink.Failed)?.message ?: "All servers failed — tap Retry."
         DownloadLogs.log("RESOLVE", "all servers failed — last: $lastMsg")
         return ResolvedDownload(last, null)
+    }
+
+    // One batch of the race. Returns the winning download (or null)
+    // plus the last failure seen, so the caller can report it when
+    // every batch fails. Every racer logs its own result + latency.
+    private suspend fun raceGroup(
+        group: List<EpisodeSource>,
+        title: ApiTitle,
+        anilistId: Long?,
+        number: Int,
+        audio: String,
+        quality: String,
+        onAttempt: ((Int) -> Unit)?,
+    ): Pair<ResolvedDownload?, ResolvedLink> {
+        val scope = CoroutineScope(currentCoroutineContext())
+        val deferreds = group.map { src ->
+            scope.async {
+                onAttempt?.invoke(src.serverNumber)
+                val startedMs = System.currentTimeMillis()
+                try {
+                    val r = withTimeoutOrNull(RESOLVE_ATTEMPT_TIMEOUT_MS) {
+                        src.resolveEpisode(title, anilistId, number, audio, quality)
+                    } ?: ResolvedLink.Failed("Server ${src.serverNumber} timed out.")
+                    val tookMs = System.currentTimeMillis() - startedMs
+                    when (r) {
+                        is ResolvedLink.DirectMp4 -> {
+                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — DDL mp4 (${DownloadLogs.sanitizeUrl(r.url)})")
+                        }
+                        is ResolvedLink.Hls -> {
+                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — HLS master (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})")
+                        }
+                        is ResolvedLink.Failed -> {
+                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: FAILED in ${tookMs}ms — ${r.message}")
+                        }
+                    }
+                    src to r
+                } catch (e: Exception) {
+                    val tookMs = System.currentTimeMillis() - startedMs
+                    DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: EXCEPTION in ${tookMs}ms — ${e.javaClass.simpleName}: ${e.message ?: ""}")
+                    src to ResolvedLink.Failed(friendlyDownloadError(e))
+                }
+            }
+        }
+        var last: ResolvedLink = ResolvedLink.Failed("All servers failed — tap Retry.")
+        var winner: ResolvedDownload? = null
+        val pending = deferreds.toMutableList()
+        while (pending.isNotEmpty() && winner == null) {
+            select<Unit> {
+                pending.forEach { d ->
+                    d.onAwait { (src, r) ->
+                        pending.remove(d)
+                        when (r) {
+                            is ResolvedLink.DirectMp4 -> winner = ResolvedDownload(r, src.serverNumber)
+                            is ResolvedLink.Hls -> winner = ResolvedDownload(r, src.serverNumber)
+                            is ResolvedLink.Failed -> last = r
+                        }
+                    }
+                }
+            }
+        }
+        // Best-effort cancel of the losers; their blocking I/O
+        // finishes on its own threads and the results are discarded.
+        pending.forEach { it.cancel() }
+        return winner to last
     }
 
     suspend fun loadEpisodesWithFailover(
