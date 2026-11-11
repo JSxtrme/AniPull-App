@@ -327,6 +327,12 @@ object MultiSourceResolver {
         // 2.0-dev2.8: smallest-file mode — see the object header.
         // A pure parameter: EpisodeSource never reads prefs itself.
         preferSmaller: Boolean = false,
+        // 2.0-dev2.10: direct-download mode — among exact-tier
+        // links, a direct MP4 wins over an HLS master. Also a pure
+        // parameter. It NEVER overrides the quality rules: only
+        // exact-tier (offered >= requested) links compete, so a
+        // 360p DDL can never beat a 1080p HLS.
+        preferDirect: Boolean = false,
     ): ResolvedDownload {
         // 2.0-dev1.9 TEMPORARY download diagnostics: every resolve
         // attempt is logged (server number, result/error, latency)
@@ -335,7 +341,8 @@ object MultiSourceResolver {
         DownloadLogs.log(
             "RESOLVE",
             "start: ep $number ${audio.lowercase()} $quality, candidates=${candidates.map { it.serverNumber }}" +
-                (if (preferSmaller) ", prefer-smaller" else ""),
+                (if (preferSmaller) ", prefer-smaller" else "") +
+                (if (preferDirect) ", prefer-direct" else ""),
         )
         if (candidates.isEmpty()) {
             DownloadLogs.log("RESOLVE", "no candidates — nothing to try")
@@ -379,7 +386,7 @@ object MultiSourceResolver {
         // across ALL batches, picked only after the last one.
         val exactCandidates = mutableListOf<ResolvedDownload>()
         for (group in candidates.chunked(RESOLVE_RACE_BATCH)) {
-            val result = raceGroup(group, title, anilistId, number, audio, quality, onAttempt, preferSmaller)
+            val result = raceGroup(group, title, anilistId, number, audio, quality, onAttempt, preferSmaller, preferDirect)
             last = result.last
             if (result.winner != null) return result.winner
             exactCandidates += result.exactCandidates
@@ -402,14 +409,29 @@ object MultiSourceResolver {
         // ahead of the downgrade / unknown / honest-fail fallbacks,
         // which are unchanged. Unknown-size exacts only win when
         // no exact candidate has a known size (first arrival then).
-        if (preferSmaller) {
-            pickSmallestExact(exactCandidates)?.let { best ->
+        // 2.0-dev2.10: direct-download mode joins the same pick.
+        // Precedence: exact tier first, then direct (a DirectMp4
+        // exact wins over an HLS exact), then smallest-file (when
+        // ON, smallest within the preferred pool), then fastest
+        // arrival. The pool only ever holds EXACT candidates
+        // (offered >= requested), so a sub-request DDL — e.g.
+        // JustAnime's 360p-only gigi file for a 1080p request —
+        // can never reach this pick, let alone beat a 1080p HLS.
+        if (preferSmaller || preferDirect) {
+            val pool = if (preferDirect) {
+                val ddls = exactCandidates.filter { it.link is ResolvedLink.DirectMp4 }
+                if (ddls.isNotEmpty()) ddls else exactCandidates
+            } else exactCandidates
+            val best = if (preferSmaller) pickSmallestExact(pool) else pool.firstOrNull()
+            best?.let {
                 DownloadLogs.log(
                     "RESOLVE",
-                    "smallest-file mode: winner Server ${best.serverNumber} — ${best.link.sizeLabel() ?: "size unknown"} at ${best.link.offeredHeight() ?: "?"}p for $quality; " +
-                        "exact candidates: ${exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" }}",
+                    (if (preferDirect && it.link is ResolvedLink.DirectMp4) "direct-download mode: winner Server ${it.serverNumber} (direct file) — " else "") +
+                        (if (preferSmaller) "smallest-file mode: winner Server ${it.serverNumber} — " else "winner Server ${it.serverNumber} — ") +
+                        "${it.link.sizeLabel() ?: "size unknown"} at ${it.link.offeredHeight() ?: "?"}p for $quality; " +
+                        "exact candidates: ${exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${if (it.link is ResolvedLink.DirectMp4) "direct" else "stream"}, ${it.link.sizeLabel() ?: "size unknown"})" }}",
                 )
-                return best
+                return it
             }
         }
         // 2.0-dev2.9: unprovable beats downgrade (see above) but
@@ -670,6 +692,8 @@ object MultiSourceResolver {
         quality: String,
         onAttempt: ((Int) -> Unit)?,
         preferSmaller: Boolean = false,
+        // 2.0-dev2.10: direct-download mode — see resolveWithFailover.
+        preferDirect: Boolean = false,
     ): RaceResult {
         val requestedHeight = qualityHeight(quality)
         val floor = qualityFloorFor(requestedHeight)
@@ -780,7 +804,20 @@ object MultiSourceResolver {
                                         if (unknownFallback == null) unknownFallback = download
                                     }
                                 } else if (offered >= requestedHeight) {
-                                    if (preferSmaller) {
+                                    // 2.0-dev2.10: direct-download mode —
+                                    // a direct-file (DirectMp4) exact
+                                    // arrival crowns IMMEDIATELY when
+                                    // only preferDirect is ON: it is
+                                    // the fastest direct exact, and no
+                                    // size comparison waits on it.
+                                    // An HLS exact parks instead — a
+                                    // slower direct exact must still
+                                    // get its chance. When
+                                    // preferSmaller is ALSO on, the
+                                    // direct exact parks too (smallest
+                                    // among direct exacts wins).
+                                    val directExactCrownsNow = preferDirect && !preferSmaller && r is ResolvedLink.DirectMp4
+                                    if ((preferSmaller || preferDirect) && !directExactCrownsNow) {
                                         // 2.0-dev2.8: smallest-file
                                         // mode — an exact arrival is
                                         // PARKED, not crowned. The
@@ -793,10 +830,11 @@ object MultiSourceResolver {
                                         // when no exact candidate has
                                         // a known size.
                                         val sizeText = r.sizeLabel() ?: "size unknown"
-                                        outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — exact, parked ($sizeText)"
+                                        val parkReason = if (preferSmaller) "parked for size compare" else "parked — waiting for a direct file"
+                                        outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — exact, $parkReason ($sizeText)"
                                         DownloadLogs.log(
                                             "RESOLVE",
-                                            "Server ${src.serverNumber}: exact ${offered}p for $quality in ${tookMs}ms — parked for size compare ($sizeText), still racing",
+                                            "Server ${src.serverNumber}: exact ${offered}p for $quality in ${tookMs}ms — $parkReason ($sizeText), still racing",
                                         )
                                         exactCandidates += download
                                     } else {
@@ -857,18 +895,20 @@ object MultiSourceResolver {
             }
         }
         if (winner == null) {
-            if (preferSmaller && exactCandidates.isNotEmpty()) {
+            if ((preferSmaller || preferDirect) && exactCandidates.isNotEmpty()) {
                 // 2.0-dev2.8: this batch parked exact candidates
                 // instead of crowning one — one line naming the
                 // batch's smallest, so the phone log shows the
                 // comparison happening instead of going quiet
                 // between batches. The caller picks the global
-                // smallest across ALL batches.
-                val batchBest = pickSmallestExact(exactCandidates)
+                // smallest across ALL batches. 2.0-dev2.10: same
+                // parking happens in direct-download mode (an HLS
+                // exact waiting for a direct one).
+                val batchBest = if (preferSmaller) pickSmallestExact(exactCandidates) else exactCandidates.firstOrNull()
                 DownloadLogs.log(
                     "RESOLVE",
-                    "batch ${group.map { it.serverNumber }} ended with ${exactCandidates.size} exact candidate(s) for $quality (smallest-file mode) — " +
-                        exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" } +
+                    "batch ${group.map { it.serverNumber }} ended with ${exactCandidates.size} exact candidate(s) for $quality (prefer-smaller / prefer-direct mode) — " +
+                        exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${if (it.link is ResolvedLink.DirectMp4) "direct" else "stream"}, ${it.link.sizeLabel() ?: "size unknown"})" } +
                         "; batch smallest: ${batchBest?.let { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" } ?: "none"}; " +
                         "best downgrade: ${downgrade?.let { "Server ${it.serverNumber} (${it.link.offeredHeight() ?: "?"}p)" } ?: "none"}; " +
                         "unprovable parked: ${unprovableFallback?.serverNumber?.let { "Server $it" } ?: "none"}; " +

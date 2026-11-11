@@ -1411,9 +1411,13 @@ object DownloadEngine {
         )
         val audio = if (job.audio.equals("Dub", ignoreCase = true)) "eng" else "jpn"
         val preferSmaller = prefs(ctx).getBoolean("prefer_smaller_files", false)
+        // 2.0-dev2.10: the stall-failover race honours the
+        // direct-download mode too — a stalled HLS link fails
+        // over to a direct exact first when the toggle is ON.
+        val preferDirect = prefs(ctx).getBoolean("prefer_direct_downloads", false)
         DownloadLogs.logJob(job.id, "RESOLVE", "stall failover: racing servers ${numbers.joinToString()} (excluding stalled Server $stalledServer) for E${job.episodeNumber} ${job.quality} ${job.audio}")
         return try {
-            MultiSourceResolver.resolveWithFailover(candidates, title, job.anilistId, job.episodeNumber, audio, job.quality, preferSmaller = preferSmaller)
+            MultiSourceResolver.resolveWithFailover(candidates, title, job.anilistId, job.episodeNumber, audio, job.quality, preferSmaller = preferSmaller, preferDirect = preferDirect)
         } catch (e: Exception) {
             DownloadLogs.logJob(job.id, "RESOLVE", "stall failover race threw ${e.javaClass.simpleName}: ${e.message ?: ""}")
             null
