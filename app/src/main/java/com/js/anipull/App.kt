@@ -103,9 +103,13 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.snapshotFlow
@@ -2731,11 +2735,37 @@ fun AnipullAppInner() {
         // renders above Home AND Detail. Bottom-center, above the
         // floating dock on tab screens (88dp) and just above the nav
         // bar on detail (24dp, no dock there).
+        // 2.0-dev2.7 scope addition: snackbars are swipe-to-dismiss
+        // (left or right). The default M3 SnackbarHost rendering has
+        // no swipe handling, so the snackbar lambda wraps the default
+        // Snackbar in a SwipeToDismissBox: a settled swipe calls
+        // data.dismiss(), which removes it from the queue for good
+        // (no reappear) and never touches the download itself — the
+        // "View" action tap still works, drags are the only thing
+        // the box consumes. Placement unchanged (88dp above the dock
+        // on tab screens, 24dp on detail) — the host sits in the
+        // root Box above Home/Detail, so nothing above it steals
+        // the horizontal drag.
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier.align(Alignment.BottomCenter)
                 .navigationBarsPadding()
                 .padding(bottom = if (screen == null) 88.dp else 24.dp, start = 16.dp, end = 16.dp),
+            snackbar = { data ->
+                val dismissState = rememberSwipeToDismissBoxState(
+                    confirmValueChange = { value ->
+                        if (value != SwipeToDismissBoxValue.Settled) {
+                            data.dismiss()
+                            true
+                        } else false
+                    },
+                )
+                SwipeToDismissBox(
+                    state = dismissState,
+                    backgroundContent = {},
+                    content = { Snackbar(snackbarData = data) },
+                )
+            },
         )
     }
     // 4.8.15: pre-measure DELETED. SharedTransition uses real layout
