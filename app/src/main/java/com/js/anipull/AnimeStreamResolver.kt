@@ -46,10 +46,63 @@ internal class AnimeStreamEpisodeSource : BaseEpisodeSource(
 ) {
     companion object {
         private const val API = "https://anime.uniquestream.net/api/v1"
+
+        // 2.0-dev2.9: SERIES CACHE. resolveEpisode used to re-fetch
+        // search + seasons + episode pages on EVERY resolve — the
+        // same calls loadEpisodes had just made seconds earlier
+        // (~5-6 calls, ~2.4 s of pacing alone). Series/season/
+        // episode-list data is public catalog data, keyed by
+        // normalized title + wanted season + catalog episode count,
+        // shared across source instances (the race builds fresh
+        // instances per call, so an instance field would never hit)
+        // with a 10 min TTL matching Nino 2's library TTL. Only
+        // non-empty episode lists are cached; a failed lookup is
+        // never cached, so a retry re-fetches. Bounded (8 entries,
+        // oldest evicted) and synchronized — the race can resolve
+        // the same title on several threads at once.
+        private const val SERIES_CACHE_TTL_MS = 10 * 60_000L
+        private const val SERIES_CACHE_MAX_ENTRIES = 8
+        private data class CachedSeries(
+            val hit: SeriesHit,
+            val season: Season,
+            val episodes: List<SeasonEpisode>,
+            val atMs: Long,
+        )
+        private val seriesCache = LinkedHashMap<String, CachedSeries>()
+        private val seriesCacheLock = Any()
+
+        private fun seriesCacheGet(key: String): CachedSeries? {
+            synchronized(seriesCacheLock) {
+                val entry = seriesCache[key] ?: return null
+                if (System.currentTimeMillis() - entry.atMs > SERIES_CACHE_TTL_MS) {
+                    seriesCache.remove(key)
+                    return null
+                }
+                return entry
+            }
+        }
+
+        private fun seriesCachePut(key: String, value: CachedSeries) {
+            synchronized(seriesCacheLock) {
+                if (seriesCache.size >= SERIES_CACHE_MAX_ENTRIES) {
+                    seriesCache.entries.firstOrNull()?.key?.let { seriesCache.remove(it) }
+                }
+                seriesCache[key] = value
+            }
+        }
     }
 
+    // 2.0-dev2.9: paced PER ENDPOINT at 100 ms, not the shared
+    // 400 ms — a resolve re-fetched search + series + season +
+    // episode pages on every call, and the old shared timestamp
+    // made ~7 sequential calls cost ~2.4 s in pacing alone.
+    // Distinct endpoints never wait on each other; the season
+    // episode pages share one key and still stagger 100 ms.
+    private fun apiPaceKey(path: String): String =
+        path.split("/").filter { it.isNotBlank() }.firstOrNull()?.substringBefore("?") ?: "api"
+
     private suspend fun apiGet(path: String, timeoutMs: Int = 12_000): HttpResponse {
-        pace()
+        paceFor(apiPaceKey(path), 100L)
         return httpGet("$API$path", timeoutMs = timeoutMs, followRedirects = true)
     }
 
@@ -175,11 +228,26 @@ internal class AnimeStreamEpisodeSource : BaseEpisodeSource(
         return out.sortedBy { it.number }
     }
 
+    // 2.0-dev2.9: cache key — the same fields pickSeries /
+    // pickSeason decide on (normalized title, wanted season,
+    // catalog episode count), so two titles that could pick
+    // differently never share an entry.
+    private fun seriesCacheKey(title: ApiTitle): String =
+        normalize(title.title) + "|" + wantedSeasonNumber(title) + "|" + (title.episodes?.toString() ?: "?")
+
     private suspend fun resolveSeries(title: ApiTitle): Triple<SeriesHit, Season, List<SeasonEpisode>>? {
+        val key = seriesCacheKey(title)
+        seriesCacheGet(key)?.let { return Triple(it.hit, it.season, it.episodes) }
         val hit = pickSeries(search(title), title) ?: return null
         val seasons = fetchSeasons(hit.contentId)
         val season = pickSeason(seasons, title) ?: return null
         val episodes = fetchSeasonEpisodes(season.contentId)
+        // Only a non-empty list is cached: a failed/empty lookup
+        // is never cached, so a retry re-fetches instead of
+        // replaying the failure for 10 minutes.
+        if (episodes.isNotEmpty()) {
+            seriesCachePut(key, CachedSeries(hit, season, episodes, System.currentTimeMillis()))
+        }
         return Triple(hit, season, episodes)
     }
 
@@ -233,7 +301,7 @@ internal class AnimeStreamEpisodeSource : BaseEpisodeSource(
 
     private suspend fun unwrapKey(playlistUrl: String, mediaId: String): KeyUnwrap {
         val resp = try {
-            pace()
+            paceFor("playlist", 100L)
             httpGet(playlistUrl, timeoutMs = 15_000, followRedirects = true)
         } catch (_: Exception) {
             return KeyUnwrap(null, null, playlistUnreachable = true)
@@ -246,7 +314,7 @@ internal class AnimeStreamEpisodeSource : BaseEpisodeSource(
             ?: return KeyUnwrap(null, null, playlistUnreachable = false)
         val keyUrl = resolveUrl(playlistUrl, keyUri)
         val keyResp = try {
-            pace()
+            paceFor("key", 100L)
             httpGet(
                 keyUrl,
                 headers = mapOf("x-am-media-id" to mediaId),
@@ -303,6 +371,13 @@ internal class AnimeStreamEpisodeSource : BaseEpisodeSource(
         return out
     }
 
+    // 2.0-dev2.9: media -> playlist -> key is a DEPENDENT chain
+    // (the playlist URL comes from the media response, the key URL
+    // from the playlist), so it stays sequential by nature — the
+    // speed win here is the series cache above, which drops the
+    // ~5 search/season/episode calls from every resolve, plus the
+    // 100 ms per-endpoint pacing. resolveDownload (session path)
+    // already skips resolveSeries entirely.
     private suspend fun resolveMedia(episodeContentId: String, audio: String): ResolvedLink {
         val locale = if (audioCode(audio) == "eng") "en-US" else "ja-JP"
         val resp = apiGet("/episode/$episodeContentId/media/hls/$locale")

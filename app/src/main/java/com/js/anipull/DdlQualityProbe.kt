@@ -36,6 +36,20 @@ import java.util.concurrent.ConcurrentHashMap
 // The caches are per-URL / per-(master, quality, audio): a size
 // is NEVER borrowed from another server's link — 1080p is only
 // the dimensions, every source encodes at its own bitrate.
+//
+// 2.0-dev2.9 — ONE-MASTER-ALL-VARIANTS. estimateHlsSizeBytes
+// used to fetch one media playlist per quality tap (master text
+// was cached, the per-variant media fetch was not shared): the
+// sheet's 4 quality taps cost 4 media fetches. Now one media
+// fetch fixes the total duration and every other quality's size
+// is derived as its own variant bitrate x that duration and
+// cached under its own key — a later tap answers from cache.
+// Only estimates are derived; an exact size still needs that
+// variant's own media playlist. Plus an implausible-bandwidth
+// guard: a variant stating under 100 kbps (JustAnime revo's
+// BANDWIDTH=5184 for 1080p) is never multiplied into a frozen
+// total — the estimate falls back to a partial-byterange mean
+// or null instead of ~0.9 MB for a ~1400 s episode.
 
 object DdlQualityProbe {
 
@@ -53,6 +67,11 @@ object DdlQualityProbe {
 
     private const val HEAD_BYTES = 64 * 1024 // one Range chunk
     private const val MAX_PLAYLIST_BYTES = 512 * 1024
+
+    // 2.0-dev2.9 — implausible-bandwidth floor (see the object
+    // header). A video variant stating under 100 kbps is not a
+    // real video bitrate, so it is never multiplied into a size.
+    private const val MIN_PLAUSIBLE_VIDEO_BANDWIDTH_BPS = 100_000L
 
     // 2.0-dev2.8 — in-memory size caches (see the object header).
     // TTL ~10 min: playlists are small text that can change, and
@@ -122,6 +141,10 @@ object DdlQualityProbe {
     // segments. `headers` is the link's own Referer/Origin. Returns
     // null when no honest number can be computed — never throws,
     // never invents a size.
+    // 2.0-dev2.9: as a side effect this also derives + caches the
+    // sibling qualities' sizes from the same master + duration
+    // (see deriveSiblingSizes), and refuses implausible
+    // bandwidths (see MIN_PLAUSIBLE_VIDEO_BANDWIDTH_BPS).
     suspend fun estimateHlsSizeBytes(
         masterUrl: String,
         headers: Map<String, String> = emptyMap(),
@@ -400,37 +423,166 @@ object DdlQualityProbe {
         }
     }
 
-    // Bitrate of the variant whose URI is `pickedUrl`. The master
-    // parser drops bandwidth, so it is re-read from the #EXT-X-
-    // STREAM-INF line directly above that variant's URI.
-    // 2.0-dev2.8: AVERAGE-BANDWIDTH is preferred over BANDWIDTH.
-    // BANDWIDTH is the PEAK bitrate and overestimates badly — a
-    // calm 1080p variant states BANDWIDTH 6,715,884 against an
-    // AVERAGE-BANDWIDTH of 3,124,000 (~1.15 GB vs ~540 MB for the
-    // same stream). The average is the honest basis for a size
-    // estimate (typical accuracy ~5–15% — code comment only, the
-    // UI never claims accuracy, it only prefixes "~").
+    // One variant row of a master playlist: height from
+    // RESOLUTION, bitrate, and audio group for the Sub/Dub pick.
+    // Parsed once per master fetch and reused for every quality,
+    // instead of re-reading the master per tap.
+    // 2.0-dev2.8 (carried over): AVERAGE-BANDWIDTH is preferred
+    // over BANDWIDTH. BANDWIDTH is the PEAK bitrate and
+    // overestimates badly — a calm 1080p variant states BANDWIDTH
+    // 6,715,884 against an AVERAGE-BANDWIDTH of 3,124,000
+    // (~1.15 GB vs ~540 MB for the same stream). The average is
+    // the honest basis for a size estimate (typical accuracy
+    // ~5–15% — code comment only, the UI never claims accuracy,
+    // it only prefixes "~").
     // Audio: the variant bitrate ALREADY includes the audio track
     // — EXT-X-MEDIA carries no BANDWIDTH of its own — so NO
     // separate audio-bitrate addition is ever made here.
-    private fun bandwidthForVariant(masterText: String, masterUrl: String, pickedUrl: String): Long? {
+    private data class MasterVariant(val url: String, val height: Int, val bandwidth: Long, val audioGroup: String?)
+
+    private fun parseMasterVariants(masterText: String, masterUrl: String): List<MasterVariant> {
         val lines = masterText.lineSequence().map { it.trim() }.toList()
+        val out = mutableListOf<MasterVariant>()
         var i = 0
         while (i < lines.size) {
             val line = lines[i]
             if (line.startsWith("#EXT-X-STREAM-INF")) {
+                val attrs = line.substringAfter(":")
                 val uriLine = lines.getOrNull(i + 1)?.takeIf { it.isNotEmpty() && !it.startsWith("#") }
-                if (uriLine != null && resolveUrl(masterUrl, uriLine) == pickedUrl) {
-                    val attrs = line.substringAfter(":")
-                    return Regex("""AVERAGE-BANDWIDTH=(\d+)""").find(attrs)
+                if (uriLine != null) {
+                    val height = Regex("""RESOLUTION=\d+x(\d+)""").find(attrs)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 0
+                    val bandwidth = Regex("""AVERAGE-BANDWIDTH=(\d+)""").find(attrs)
                         ?.groupValues?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0 }
                         ?: Regex("""BANDWIDTH=(\d+)""").find(attrs)
-                            ?.groupValues?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0 }
+                            ?.groupValues?.getOrNull(1)?.toLongOrNull()?.takeIf { it > 0 } ?: 0L
+                    val audioGroup = Regex("""AUDIO="([^"]+)"""").find(attrs)?.groupValues?.getOrNull(1)
+                    out += MasterVariant(resolveUrl(masterUrl, uriLine), height, bandwidth, audioGroup)
                 }
             }
             i++
         }
-        return null
+        return out
+    }
+
+    // Mirrors HlsDownloader.parseAudioGroups / audioMatches
+    // (private there, and this file must not depend on the
+    // engine): GROUP-ID -> languages for TYPE=AUDIO #EXT-X-MEDIA
+    // lines. Sub -> ja/jpn, Dub -> en/eng; case-insensitive
+    // prefix match.
+    private fun parseAudioGroups(masterText: String): Map<String, List<String>> {
+        val groups = mutableMapOf<String, MutableList<String>>()
+        for (raw in masterText.lineSequence()) {
+            val line = raw.trim()
+            if (!line.startsWith("#EXT-X-MEDIA")) continue
+            val attrs = line.substringAfter(":")
+            val type = Regex("""TYPE=([^,]+)""").find(attrs)?.groupValues?.getOrNull(1)?.trim()
+            if (!type.equals("AUDIO", ignoreCase = true)) continue
+            val group = Regex("""GROUP-ID="([^"]+)"""").find(attrs)?.groupValues?.getOrNull(1) ?: continue
+            val lang = Regex("""LANGUAGE="([^"]+)"""").find(attrs)?.groupValues?.getOrNull(1)?.takeIf { it.isNotBlank() } ?: continue
+            groups.getOrPut(group) { mutableListOf() } += lang
+        }
+        return groups
+    }
+
+    private fun audioGroupMatches(language: String, audio: String): Boolean {
+        val lang = language.lowercase()
+        val wanted = if (audioCode(audio) == "eng") listOf("en", "eng", "english") else listOf("ja", "jpn", "japanese")
+        return wanted.any { lang == it || lang.startsWith(it) }
+    }
+
+    // Mirrors HlsDownloader.parseMasterPlaylist's pick exactly
+    // (audio-group preference, then tallest at/below the wanted
+    // height, else the shortest) so the size is computed for the
+    // SAME variant the download would pick — a different pick
+    // here would show another variant's size.
+    private fun pickVariant(
+        variants: List<MasterVariant>,
+        audioGroups: Map<String, List<String>>,
+        requestedQuality: String,
+        audio: String,
+    ): MasterVariant? {
+        if (variants.isEmpty()) return null
+        val wanted = Regex("""(\d+)""").find(requestedQuality)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1080
+        val withHeight = variants.filter { it.height > 0 }
+        val pool0 = if (withHeight.isNotEmpty()) withHeight else variants
+        val audioPool = pool0.filter { v ->
+            v.audioGroup?.let { g -> audioGroups[g]?.any { audioGroupMatches(it, audio) } == true } ?: false
+        }
+        val pool = if (audioPool.isNotEmpty()) audioPool else pool0
+        return pool.filter { it.height in 1..wanted || it.height == 0 }
+            .maxByOrNull { it.height * 1_000_000L + it.bandwidth }
+            ?: pool.minByOrNull { it.height * 1_000_000L + it.bandwidth }
+            ?: variants.last()
+    }
+
+    // Totals of one media playlist: summed #EXTINF durations,
+    // segment count, and the #EXT-X-BYTERANGE lengths carried
+    // (one per segment when the playlist is exact).
+    private data class MediaStats(val durationSum: Double, val segmentCount: Int, val byteRanges: List<Long>)
+
+    private fun parseMediaStats(mediaText: String): MediaStats {
+        var durationSum = 0.0
+        var segmentCount = 0
+        val byteRanges = mutableListOf<Long>()
+        var pendingRange: Long? = null
+        for (raw in mediaText.lineSequence()) {
+            val line = raw.trim()
+            when {
+                line.startsWith("#EXTINF:") -> {
+                    line.substringAfter(":").substringBefore(",").toDoubleOrNull()
+                        ?.let { durationSum += it }
+                }
+                line.startsWith("#EXT-X-BYTERANGE:") -> {
+                    pendingRange = line.substringAfter(":").substringBefore("@").toLongOrNull()
+                }
+                line.isNotEmpty() && !line.startsWith("#") -> {
+                    segmentCount++
+                    pendingRange?.let { byteRanges += it }
+                    pendingRange = null
+                }
+            }
+        }
+        return MediaStats(durationSum, segmentCount, byteRanges)
+    }
+
+    // 2.0-dev2.9 — one-master-all-variants: the master fetch
+    // lists every variant's bitrate, and this media fetch fixed
+    // the total duration (same episode, different encode — the
+    // durations match across variants). Derive every other
+    // quality's size as its own bitrate x that duration and cache
+    // it under its own (master, quality, audio) key, so the
+    // sheet's next tap for a sibling quality answers from cache
+    // with no re-fetch. Only estimates are derived — an exact
+    // size still needs that variant's own media playlist. A
+    // sibling picking the same file as the requested pick is
+    // skipped (its size is the requested one, computed exactly
+    // when possible), and variants with implausible bandwidths
+    // are skipped, never cached — failures are never cached, so
+    // a later direct estimate can still try.
+    // shortcut: sibling sizes assume all variants share this
+    // variant's total duration; if a source ever serves different
+    // cuts per quality, sibling estimates drift by the duration
+    // difference — fetch that variant's media playlist then.
+    private fun deriveSiblingSizes(
+        masterUrl: String,
+        variants: List<MasterVariant>,
+        audioGroups: Map<String, List<String>>,
+        audio: String,
+        durationSum: Double,
+        requestedQuality: String,
+        pickedUrl: String?,
+    ) {
+        if (variants.isEmpty() || durationSum <= 0) return
+        for (quality in listOf("360", "480", "720", "1080")) {
+            if (quality == requestedQuality.removeSuffix("p")) continue
+            val key = "$masterUrl|$quality|$audio"
+            if (cachedGet(hlsSizeCache, key) != null) continue
+            val variant = pickVariant(variants, audioGroups, quality, audio) ?: continue
+            if (variant.url == pickedUrl) continue
+            if (variant.bandwidth < MIN_PLAUSIBLE_VIDEO_BANDWIDTH_BPS) continue
+            val bytes = (variant.bandwidth * durationSum / 8.0).toLong()
+            if (bytes > 0) cachedPut(hlsSizeCache, key, HlsSizeEstimate(bytes, isEstimate = true))
+        }
     }
 
     private fun estimateBlocking(
@@ -441,39 +593,44 @@ object DdlQualityProbe {
     ): HlsSizeEstimate? {
         return try {
             val masterText = fetchTextCapped(masterUrl, headers, masterPlaylistCache) ?: return null
-            val picked = HlsDownloader.parseMasterPlaylist(masterText, masterUrl, requestedQuality, audio)
-            val mediaText = if (picked.url == masterUrl) masterText
+            // 2.0-dev2.9: parse the variants ONCE from this single
+            // master fetch — the pick below and every sibling
+            // derivation read the same list, no re-parse per tap.
+            val variants = parseMasterVariants(masterText, masterUrl)
+            val audioGroups = parseAudioGroups(masterText)
+            val picked = pickVariant(variants, audioGroups, requestedQuality, audio)
+            val mediaText = if (picked == null || picked.url == masterUrl) masterText
             else fetchTextCapped(picked.url, headers, mediaPlaylistCache) ?: return null
-            var durationSum = 0.0
-            var segmentCount = 0
-            val byteRanges = mutableListOf<Long>()
-            var pendingRange: Long? = null
-            for (raw in mediaText.lineSequence()) {
-                val line = raw.trim()
-                when {
-                    line.startsWith("#EXTINF:") -> {
-                        line.substringAfter(":").substringBefore(",").toDoubleOrNull()
-                            ?.let { durationSum += it }
-                    }
-                    line.startsWith("#EXT-X-BYTERANGE:") -> {
-                        pendingRange = line.substringAfter(":").substringBefore("@").toLongOrNull()
-                    }
-                    line.isNotEmpty() && !line.startsWith("#") -> {
-                        segmentCount++
-                        pendingRange?.let { byteRanges += it }
-                        pendingRange = null
-                    }
+            val stats = parseMediaStats(mediaText)
+            // Exact path: every segment carries a byte-range length.
+            if (stats.segmentCount > 0 && stats.byteRanges.size == stats.segmentCount) {
+                val sum = stats.byteRanges.sum()
+                if (sum > 0) {
+                    deriveSiblingSizes(masterUrl, variants, audioGroups, audio, stats.durationSum, requestedQuality, picked?.url)
+                    return HlsSizeEstimate(sum, isEstimate = false)
                 }
             }
-            // Exact path: every segment carries a byte-range length.
-            if (segmentCount > 0 && byteRanges.size == segmentCount) {
-                val sum = byteRanges.sum()
-                if (sum > 0) return HlsSizeEstimate(sum, isEstimate = false)
-            }
             // Estimate path: picked variant bitrate x total duration.
-            val bandwidth = bandwidthForVariant(masterText, masterUrl, picked.url)
-            if (bandwidth != null && bandwidth > 0 && durationSum > 0) {
-                val bytes = (bandwidth * durationSum / 8.0).toLong()
+            // 2.0-dev2.9: the bitrate must clear the plausibility
+            // floor — an implausible value (revo's 5184 bps for
+            // 1080p) falls through to the byterange fallback below
+            // instead of freezing a nonsense total.
+            val bandwidth = picked?.bandwidth
+            if (bandwidth != null && bandwidth >= MIN_PLAUSIBLE_VIDEO_BANDWIDTH_BPS && stats.durationSum > 0) {
+                val bytes = (bandwidth * stats.durationSum / 8.0).toLong()
+                if (bytes > 0) {
+                    deriveSiblingSizes(masterUrl, variants, audioGroups, audio, stats.durationSum, requestedQuality, picked.url)
+                    return HlsSizeEstimate(bytes, isEstimate = true)
+                }
+            }
+            deriveSiblingSizes(masterUrl, variants, audioGroups, audio, stats.durationSum, requestedQuality, picked?.url)
+            // Last resort: the mean of the byte-range lengths the
+            // playlist DOES carry x segment count — still an
+            // estimate — or null when nothing honest can be
+            // computed. Never a bandwidth number below the floor.
+            if (stats.segmentCount > 0 && stats.byteRanges.isNotEmpty()) {
+                val mean = stats.byteRanges.sum() / stats.byteRanges.size.toDouble()
+                val bytes = (mean * stats.segmentCount).toLong()
                 if (bytes > 0) return HlsSizeEstimate(bytes, isEstimate = true)
             }
             null

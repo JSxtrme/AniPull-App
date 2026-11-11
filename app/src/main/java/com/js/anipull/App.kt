@@ -3754,7 +3754,16 @@ private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Uni
                     // that reintroduces the frozen-0% defect.
                     // Nothing downloaded yet is still "Connecting…".
                     JobState.DOWNLOADING -> when {
-                        job.downloadedBytes <= 0L -> "Connecting…"
+                        // 2.0-dev2.9: phase-aware status — the engine
+                        // threads HlsPhase through job.phaseLabel, so
+                        // the pre-segment phases ("Fetching
+                        // playlist…", "Downloading init…") and the
+                        // remux/publish tail ("Remuxing…",
+                        // "Publishing…") render instead of one flat
+                        // "Connecting…". Phase is transient (never
+                        // persisted); null falls back to the old text.
+                        job.downloadedBytes <= 0L -> job.phaseLabel ?: "Connecting…"
+                        job.progress >= 100 && job.phaseLabel != null -> job.phaseLabel
                         job.progress < 0 -> "${formatBytes(job.downloadedBytes)} · ${"%.1f".format(job.speedMBps)} MB/s"
                         job.totalBytes > 0L -> "${job.progress}% · ${formatBytes(job.downloadedBytes)} / ${if (job.totalEstimated) "~" else ""}${formatBytes(job.totalBytes)} · ${"%.1f".format(job.speedMBps)} MB/s"
                         else -> "${job.progress}% · ${"%.1f".format(job.speedMBps)} MB/s"
@@ -4348,7 +4357,10 @@ private fun EpisodeDownloadSheet(
     // landed. A fetch that yields nothing leaves Unknown (no
     // size line). The effect re-runs on every chip tap; a
     // previously computed combo answers from ResolveCache +
-    // the probe/size caches with no re-fetch.
+    // the probe/size caches with no re-fetch. 2.0-dev2.9: sheet-open
+    // warms every chip combo (see warmAllSheetCombos), so step
+    // (iii) usually just awaits an in-flight warm — and only
+    // starts one when none exists (await-first, below).
     LaunchedEffect(quality, audio, server) {
         val cachedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null, preferSmallerFiles(context))?.link
         if (cachedLink != null) {
@@ -4359,7 +4371,14 @@ private fun EpisodeDownloadSheet(
             return@LaunchedEffect
         }
         sheetSize = SheetSizeState.Checking
-        onWarmSize?.invoke(quality, audio, server)
+        // 2.0-dev2.9: await-first — a warm for this combo is
+        // usually already in flight (sheet-open warm-all, or a
+        // list warm); starting another resolve here used to
+        // double the race this effect was about to wait for.
+        // Only start one when nothing is warming this combo.
+        if (!isResolveInFlight(title.id, row.number, audio, quality, server, preferSmallerFiles(context))) {
+            onWarmSize?.invoke(quality, audio, server)
+        }
         awaitInFlightResolve(title.id, row.number, audio, quality, server, preferSmallerFiles(context))
         val landedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null, preferSmallerFiles(context))?.link
         if (landedLink != null) {
@@ -4565,6 +4584,24 @@ private val preResolveScope = kotlinx.coroutines.CoroutineScope(
 // warming the same row at the same instant.
 private val resolveInFlight = java.util.concurrent.ConcurrentHashMap<String, kotlinx.coroutines.Deferred<ResolveAttempt?>>()
 
+// 2.0-dev2.9 — cap on concurrent background WARMS (list + sheet
+// share one pool). Warming a whole sheet is 8 resolves and a
+// list load is 6 rows; uncapped that is a stampede of
+// multi-server races. 4 at a time: a warm that cannot get a
+// permit waits in resolveInFlight (a chip tap just awaits it),
+// never starts a second race. Pulls / confirm resolve directly
+// and never take a permit, so a confirm is never queued behind
+// a warm.
+private val warmResolvePermits = kotlinx.coroutines.sync.Semaphore(4)
+
+// 2.0-dev2.9 — sheet warms tracked per episode ("title|number"),
+// so dismissing the sheet can cancel the ones still queued or
+// racing instead of letting them burn permits after the user
+// left. List warms (preResolveRow) are NOT tracked here — they
+// stay useful after the sheet closes. Entries are removed on
+// completion; cancelSheetWarms cancels what is left.
+private val sheetWarms = java.util.concurrent.ConcurrentHashMap<String, MutableSet<kotlinx.coroutines.Deferred<ResolveAttempt?>>>()
+
 // 2.0-dev2.6 (E): await a shared in-flight resolve for these
 // choices instead of starting a second one. Returns once the
 // in-flight resolve has landed in ResolveCache (or failed —
@@ -4575,6 +4612,14 @@ private suspend fun awaitInFlightResolve(titleId: Long, number: Int, audio: Stri
         runCatching { deferred.await() }
     }
 }
+
+// 2.0-dev2.9: is a resolve for these choices already warming?
+// The sheet checks this BEFORE starting a warm (await-first):
+// the old code started a new full race and only then awaited
+// the coalesced one, so a chip tap doubled the race it was
+// about to wait for.
+private fun isResolveInFlight(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false): Boolean =
+    resolveInFlight.containsKey(resolveCoalesceKey(titleId, number, audio, quality, serverOverride, preferSmaller))
 
 // 2.0-dev2.5 Defect 5 tax 3 — the coalesce key for a resolve:
 // the ResolveCache key (title | episode | audio | quality) PLUS
@@ -4797,6 +4842,36 @@ private class EpisodeListState(
     // fire-and-forget Job — runPull awaits a matching in-flight
     // one (coalesce) instead of doubling the resolve, and a second
     // pre-resolve for the same choices is never started.
+    // 2.0-dev2.9: ONE warm-starter for preResolveRow /
+    // warmSizeFor / warmAllSheetCombos — same LAZY async on the
+    // application-lifetime preResolveScope, same putIfAbsent
+    // coalescing, same invokeOnCompletion removal. The resolve
+    // runs behind warmResolvePermits (max 4 concurrent warms).
+    // trackSheetKey non-null registers the deferred for
+    // cancelSheetWarms (sheet warms only — list warms stay).
+    private fun startWarmResolve(key: String, trackSheetKey: String?, block: suspend () -> ResolveAttempt?) {
+        val deferred = preResolveScope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
+            var acquired = false
+            try {
+                warmResolvePermits.acquire()
+                acquired = true
+                runCatching { block() }.getOrNull()
+            } finally {
+                // Only release a permit that was actually taken:
+                // acquire() throws on cancellation before taking
+                // one, and releasing then would inflate the pool.
+                if (acquired) warmResolvePermits.release()
+            }
+        }
+        if (resolveInFlight.putIfAbsent(key, deferred) != null) return
+        trackSheetKey?.let { sheetWarms.getOrPut(it) { java.util.concurrent.ConcurrentHashMap.newKeySet<kotlinx.coroutines.Deferred<ResolveAttempt?>>() } += deferred }
+        deferred.invokeOnCompletion {
+            resolveInFlight.remove(key, deferred)
+            trackSheetKey?.let { sheetWarms[it]?.remove(deferred) }
+        }
+        deferred.start()
+    }
+
     fun preResolveRow(row: EpisodeRow) {
         // 2.0-dev2.6 (C+E): runs on the application-lifetime
         // preResolveScope, NOT the state's rememberCoroutineScope
@@ -4806,22 +4881,19 @@ private class EpisodeListState(
         // warming the same row at once keep exactly one resolve
         // (the loser's block never starts), and the entry is
         // removed only when THIS deferred completes.
-        val key = resolveCoalesceKey(title.id, row.number, pullAudio, quality, initialServer, preferSmallerFiles(context))
-        val deferred = preResolveScope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
-            runCatching {
-                resolveOnly(
-                    context, title, row.info.copy(audio = pullAudio),
-                    quality, serverOverride = initialServer,
-                    anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
-                    listServer = if (row.fromMediaIndex) null else fallbackServer,
-                )
-            }.getOrNull()
+        // 2.0-dev2.9: via startWarmResolve (shared warm-starter,
+        // 4-permit cap); not tracked for sheet-dismiss cancel.
+        startWarmResolve(
+            resolveCoalesceKey(title.id, row.number, pullAudio, quality, initialServer, preferSmallerFiles(context)),
+            trackSheetKey = null,
+        ) {
+            resolveOnly(
+                context, title, row.info.copy(audio = pullAudio),
+                quality, serverOverride = initialServer,
+                anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
+                listServer = if (row.fromMediaIndex) null else fallbackServer,
+            )
         }
-        if (resolveInFlight.putIfAbsent(key, deferred) != null) return
-        deferred.invokeOnCompletion {
-            resolveInFlight.remove(key, deferred)
-        }
-        deferred.start()
     }
 
     // 2.0-dev2.8: SIZE warm for the sheet's CURRENT chips.
@@ -4838,33 +4910,67 @@ private class EpisodeListState(
     // defaults. Silent like preResolveRow: a failure changes
     // nothing, the sheet just shows no size.
     fun warmSizeFor(row: EpisodeRow, quality: String, audio: String, server: Int) {
-        val key = resolveCoalesceKey(title.id, row.number, audio, quality, server, preferSmallerFiles(context))
-        val deferred = preResolveScope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
-            runCatching {
-                resolveOnly(
-                    context, title, row.info.copy(audio = audioCode(audio)),
-                    quality, serverOverride = server,
-                    anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
-                    listServer = if (row.fromMediaIndex) null else fallbackServer,
-                )
-            }.getOrNull()
+        // 2.0-dev2.9: via startWarmResolve (shared warm-starter,
+        // 4-permit cap); tracked per episode so dismissing the
+        // sheet can cancel it. A warm for this combo already in
+        // flight is a no-op (putIfAbsent) — the sheet's
+        // await-first check makes that the common path.
+        startWarmResolve(
+            resolveCoalesceKey(title.id, row.number, audio, quality, server, preferSmallerFiles(context)),
+            trackSheetKey = "${title.id}|${row.number}",
+        ) {
+            resolveOnly(
+                context, title, row.info.copy(audio = audioCode(audio)),
+                quality, serverOverride = server,
+                anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
+                listServer = if (row.fromMediaIndex) null else fallbackServer,
+            )
         }
-        if (resolveInFlight.putIfAbsent(key, deferred) != null) return
-        deferred.invokeOnCompletion {
-            resolveInFlight.remove(key, deferred)
+    }
+
+    // 2.0-dev2.9: warm ALL sheet combos on open — 4 qualities x
+    // Sub/Dub at the sheet's server — so a chip tap hits
+    // ResolveCache (or an in-flight warm it just awaits) instead
+    // of starting a fresh multi-second race. Ordered
+    // most-likely-first: the opening combo, then the same audio's
+    // other qualities, then the other audio — warms run 4 at a
+    // time in start order, so the likeliest next taps land first.
+    // Silent like preResolveRow: a failure changes nothing, the
+    // sheet just shows no size for that combo.
+    fun warmAllSheetCombos(row: EpisodeRow) {
+        val qualities = listOf("360", "480", "720", "1080")
+        val otherAudio = if (initialAudio == "Sub") "Dub" else "Sub"
+        val ordered = buildList {
+            add(quality to initialAudio)
+            qualities.filter { it != quality }.forEach { add(it to initialAudio) }
+            add(quality to otherAudio)
+            qualities.filter { it != quality }.forEach { add(it to otherAudio) }
         }
-        deferred.start()
+        ordered.forEach { (q, a) -> warmSizeFor(row, q, a, initialServer) }
+    }
+
+    // 2.0-dev2.9: cancel this episode's still-pending sheet warms
+    // (queued behind the permit cap or mid-race) when the sheet is
+    // dismissed — they were only warming sizes for a sheet that is
+    // gone. Completed warms are no-ops here. A confirm never goes
+    // through this path (onConfirm pulls directly), and a
+    // cancelled warm's cache entry simply never lands, so the next
+    // open warms fresh.
+    fun cancelSheetWarms(row: EpisodeRow) {
+        sheetWarms.remove("${title.id}|${row.number}")?.toList()?.forEach { it.cancel() }
     }
 
     // 2.0-dev2.5 Defect 5 tax 3d — pre-resolve EARLIER: when the
     // list loads (called from the holder's onLoaded effect, not
     // sheet-open), warm the first few visible rows with the current
     // defaults, so the likeliest taps are already cached. Bounded
-    // to 3 rows; a cached row returns instantly from resolveOnly,
-    // so re-warms on reload are near-free. A changed sheet chip
-    // still misses the cache and resolves fresh.
+    // to 6 rows (2.0-dev2.9: was 3 — warms now share the 4-permit
+    // cap, so the extra rows queue instead of stampeding); a cached
+    // row returns instantly from resolveOnly, so re-warms on reload
+    // are near-free. A changed sheet chip still misses the cache
+    // and resolves fresh.
     fun preResolveRows(rows: List<EpisodeRow>) {
-        rows.take(3).forEach { preResolveRow(it) }
+        rows.take(6).forEach { preResolveRow(it) }
     }
 
     // 2.0-dev1.7: multi-select batch — every selected episode with
@@ -5262,7 +5368,7 @@ private fun rememberEpisodeListState(
         // 2.0-dev2.5 Defect 5 tax 3d: the list just loaded — warm
         // the first visible rows now, while the user is still
         // browsing, not when the confirm sheet opens.
-        state.preResolveRows(visibleRows?.take(3) ?: emptyList())
+        state.preResolveRows(visibleRows?.take(6) ?: emptyList())
         // Bare rows carry the AniList id too, so the season loop
         // resolves them by number like media-index rows. The kept
         // media-index id (index matched, file missing) counts the
@@ -5407,13 +5513,18 @@ private fun EpisodeListDialogs(state: EpisodeListState) {
         // is already cached by the time the user taps Download.
         androidx.compose.runtime.LaunchedEffect(row) {
             state.preResolveRow(row)
+            // 2.0-dev2.9: warm every chip combo (4 qualities x
+            // Sub/Dub) now, so a chip tap hits the cache instead
+            // of starting a fresh multi-second race. The opening
+            // combo above coalesces with its twin inside.
+            state.warmAllSheetCombos(row)
         }
         EpisodeDownloadSheet(
             row = row, title = state.title,
             initialQuality = state.quality,
             initialAudio = state.initialAudio,
             initialServer = state.initialServer,
-            onDismiss = { state.onConfirmDismiss() },
+            onDismiss = { state.cancelSheetWarms(row); state.onConfirmDismiss() },
             onConfirm = { q, a, s -> state.onConfirm(q, a, s) },
             onWarmSize = { q, a, s -> state.warmSizeFor(row, q, a, s) },
         )

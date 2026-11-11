@@ -146,7 +146,8 @@ object DownloadNotifications {
         val indeterminate = job.progress < 0
         val detail = when {
             paused -> "Paused · ${job.progress.coerceAtLeast(0)}%"
-            indeterminate -> if (job.downloadedBytes > 0) "${formatMb(job.downloadedBytes)} · ${"%.1f".format(job.speedMBps)} MB/s" else "Connecting…"
+            indeterminate -> if (job.downloadedBytes > 0) "${formatMb(job.downloadedBytes)} · ${"%.1f".format(job.speedMBps)} MB/s" else (job.phaseLabel ?: "Connecting…")
+            job.progress >= 100 && job.phaseLabel != null -> job.phaseLabel
             else -> "${"%.1f".format(job.speedMBps)} MB/s · ${job.progress}%"
         }
         val contentText = job.episodeTitle?.let { "$it · $detail" } ?: detail

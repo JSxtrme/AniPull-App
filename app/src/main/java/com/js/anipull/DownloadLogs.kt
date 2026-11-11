@@ -256,10 +256,15 @@ object DownloadLogs {
     // - ENGINE "[job X] enqueue: <title> E<n> <quality> <Sub|Dub>,
     //   server=N, link=<kind>" gives job id, title, episode,
     //   quality/audio, winning server number, link kind.
-    // - RESOLVE "start: ep <n> <jpn|eng> <quality>" + the matching
-    //   "Server N (<name>): OK … — HLS master (<url>)" gives the
-    //   sub-server name and the playlist host. A direct-resolve job
-    //   has no RESOLVE lines, so its sub-server stays "unknown".
+    // - The enqueue/runJob server number gives the sub-server
+    //   name via serverName() (2.0-dev2.9 (D)) — never parsed
+    //   from a RESOLVE OK line, so a stale warm won by another
+    //   server can no longer mislabel the job.
+    // - RESOLVE "start: ep <n> <jpn|eng> <quality>" + the OK line
+    //   whose server matches the enqueue server gives the playlist
+    //   host and the resolved link URL. A direct-resolve job has
+    //   no RESOLVE lines, so those stay "unknown"/blank — but its
+    //   sub-server name still comes from its server number.
     // - HLS "start: master=<url> … referer=<v|none> origin=<v|none>"
     //   gives the playlist host (again) and the headers sent on
     //   segment fetches. Lines from before dev2.2 have no referer/
@@ -318,6 +323,29 @@ object DownloadLogs {
     private val mediaPlaylistOldRegex = Regex("""media playlist: (\d+) segments""")
     private val ddlGetRegex = Regex("""GET (https?://\S+) -> HTTP (\d+)""")
     private val httpCodeRegex = Regex("""HTTP (\d{3})""")
+
+    // 2.0-dev2.9 (D): server number -> internal sub-server name,
+    // the ONLY place a summary gets a name — derived from the
+    // enqueue/runJob server number, never parsed from a log line.
+    // Mirror of ServerRegistry.build() 1..9 and each resolver's
+    // sourceName (AniZoneResolver 1, JustAnimeResolver 2,
+    // PaheResolver 3, AniPmResolver 4, Nino2Resolver 5,
+    // AniWavesResolver 6, AnikotoResolver 7, AnimeStreamResolver 8,
+    // AnvResolver 9): if a source is renamed or renumbered there,
+    // update this map in the same change. Unknown number (0 = no
+    // enqueue/runJob line) stays "unknown", never a guessed name.
+    private fun serverName(number: Int): String = when (number) {
+        1 -> "AniZone"
+        2 -> "JustAnime"
+        3 -> "AnimePahe"
+        4 -> "AniPm"
+        5 -> "Nino2"
+        6 -> "AniWaves"
+        7 -> "Anikoto"
+        8 -> "AnimeStream"
+        9 -> "Anv"
+        else -> "unknown"
+    }
 
     private fun hostOf(url: String): String? = try {
         java.net.URL(url).host?.takeIf { it.isNotBlank() }
@@ -387,8 +415,12 @@ object DownloadLogs {
         val isDdl = linkKind.contains("DDL", ignoreCase = true) || linkKind.contains("mp4", ignoreCase = true)
 
         // --- RESOLVE block: the start line matching this job's
-        // episode/audio/quality, then its OK line (name + URL).
-        var subServer = "unknown"
+        // episode/audio/quality, then its OK line (URL + host).
+        // 2.0-dev2.9 (D): the sub-server name comes from the
+        // enqueue server number via serverName() above — never
+        // from an OK line — so a stale warm won by another
+        // server can no longer mislabel this job.
+        val subServer = serverName(server)
         var playlistHost = "unknown"
         var linkUrl = ""
         if (episode > 0) {
@@ -407,10 +439,17 @@ object DownloadLogs {
                 // 2.0-dev2.6 (D): the race logs an OK line for
                 // EVERY server that returned a link (a sub-floor
                 // win is parked, not the winner), so the FIRST ok
-                // is not necessarily this job's winner. Prefer
+                // is not necessarily this job's winner. Take ONLY
                 // the OK line whose server matches the enqueue
                 // server — that is the link the job actually
-                // downloaded — and fall back to the first OK.
+                // downloaded. 2.0-dev2.9 (D): NEVER fall back to
+                // the first OK — the matched block may be a stale
+                // warm (confirm hit ResolveCache, no fresh resolve
+                // ran), so a mismatched OK would borrow another
+                // server's URL/host. No match leaves linkUrl /
+                // playlistHost unknown here; the job's own HLS
+                // start / DDL GET lines below still supply the
+                // host when they exist.
                 val okLines = ArrayList<kotlin.text.MatchResult>()
                 for (i in resolveStartIdx + 1 until searchEnd) {
                     val e = entries[i]
@@ -419,9 +458,7 @@ object DownloadLogs {
                     resolveOkRegex.find(e.message)?.let { okLines += it }
                 }
                 val ok = okLines.firstOrNull { it.groupValues[1].toIntOrNull() == server && server != 0 }
-                    ?: okLines.firstOrNull()
                 ok?.let { m ->
-                    subServer = m.groupValues[2].ifBlank { "unknown" }
                     linkUrl = sanitizeUrl(m.groupValues[4])
                     playlistHost = hostOf(m.groupValues[4]) ?: "unknown"
                 }

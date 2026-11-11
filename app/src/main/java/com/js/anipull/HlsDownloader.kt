@@ -30,6 +30,60 @@ import javax.crypto.spec.SecretKeySpec
 
 typealias HlsProgressCallback = (downloadedBytes: Long, totalBytesEstimate: Long, speedMBps: Double) -> Unit
 
+// 2.0-dev2.9 — the live HttpURLConnection(s) of one HLS download,
+// so the engine can disconnect() them out of a blocked read the
+// moment the user cancels (the DDL pattern from DownloadEngine's
+// activeDdlConnections, now for HLS too). The engine owns the
+// per-job implementation; HlsDownloader only ever sees this
+// interface, never a job id. register/unregister bracket each
+// EngineHttp fetch; disconnectAll() is the cancel path.
+interface HlsConnectionHandle {
+    fun register(conn: java.net.HttpURLConnection)
+    fun unregister(conn: java.net.HttpURLConnection)
+    fun disconnectAll()
+}
+
+// 2.0-dev2.9 — thrown when the PRE-SEGMENT phase (master /
+// variant / init / key fetch, or the first segment) exceeds its
+// hard deadline, or when segment failures pass the fail-fast
+// threshold before any segment lands. The engine catches this
+// separately from generic failures: it means "this server is
+// stalled, try the next one", not "the download failed". Never
+// thrown once segments are flowing — a late-segment failure
+// stays a plain IOException and resumes from the segment index.
+class HlsStallException(message: String) : java.io.IOException(message)
+
+// 2.0-dev2.9 — the phase a download is in, so the row and the
+// notification can say "Fetching playlist…" / "Downloading
+// init…" / "Segment 34/267" instead of one undifferentiated
+// "Connecting…". The engine stores the label + detail on the job
+// (DownloadJob.phaseLabel); App.kt renders it. Labels are
+// user-facing strings by design — no source names in them.
+enum class HlsPhase(val label: String) {
+    FETCHING_PLAYLIST("Fetching playlist…"),
+    DOWNLOADING_INIT("Downloading init…"),
+    FETCHING_KEY("Fetching key…"),
+    DOWNLOADING_SEGMENTS("Downloading segments…"),
+    REMUXING("Remuxing…"),
+    PUBLISHING("Publishing…"),
+}
+
+// 2.0-dev2.9 — hard deadlines for HLS fetches. Why these numbers:
+// the diagnosed stall held a fetch open 144 s with zero bytes;
+// a healthy playlist/init/key fetch answers in well under 10 s
+// on any of the nine servers (the resolve race caps attempts at
+// 15 s and masters are <1 MB — the Death Note master was 902 B).
+// 10 s to first byte catches a dead/dribbling host fast; 30 s
+// total bounds a slow-but-alive playlist/init/key fetch; 20 s
+// total bounds a single segment (segments are ~2-10 s of video,
+// a few MB at most). Socket connect/read timeouts stay 15 s per
+// read() call as a floor under the wall-clock budgets.
+internal const val HLS_PLAYLIST_FIRST_BYTE_MS = 10_000
+internal const val HLS_PLAYLIST_TOTAL_MS = 30_000
+internal const val HLS_KEY_TOTAL_MS = 20_000
+internal const val HLS_SEGMENT_FIRST_BYTE_MS = 10_000
+internal const val HLS_SEGMENT_TOTAL_MS = 20_000
+
 object HlsDownloader {
 
     data class Variant(val uri: String, val height: Int, val bandwidth: Long, val audioGroup: String? = null)
@@ -264,6 +318,12 @@ object HlsDownloader {
         ivOverrideB64: String? = null,
         referer: String? = null,
         origin: String? = null,
+        // 2.0-dev2.9: live-connection handle (engine disconnects
+        // these on cancel) and phase callback (engine shows the
+        // phase on the row/notification). Both optional so older
+        // callers keep compiling.
+        connectionHandle: HlsConnectionHandle? = null,
+        onPhase: ((HlsPhase, String?) -> Unit)? = null,
     ): HlsDownloadResult = withContext(Dispatchers.IO) {
         val overrideKey: ByteArray? = keyOverrideB64?.let {
             runCatching { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }.getOrNull()
@@ -299,9 +359,46 @@ object HlsDownloader {
         // only — never query params / signatures.
         val hlsStartedMs = System.currentTimeMillis()
         DownloadLogs.log("HLS", "start: master=${DownloadLogs.sanitizeUrl(masterUrl)} quality=$quality audio=$audio referer=${referer ?: "none"} origin=${origin ?: "none"}")
-        // 2.0-dev2.5 DEFECT 5: connecting phase — no silent 0%.
+        // 2.0-dev2.9: fail-fast abort flag. When the segment
+        // failure threshold trips, this is set before throwing, so
+        // sibling workers' in-flight fetches see it on their next
+        // chunk check and die within one read instead of waiting
+        // out their own deadlines — and the engine's cancel path
+        // is not the only way a fetch can end early.
+        val aborted = java.util.concurrent.atomic.AtomicBoolean(false)
+        // Every fetch's cancel check: the USER cancel only.
+        // The fail-fast abort deliberately does NOT ride this
+        // lambda: readBounded turns it into CancellationException,
+        // which the engine would (rightly) read as a user cancel
+        // and mark the job CANCELLED. A fail-fast abort instead
+        // disconnects the live connections (SocketException, a
+        // plain per-segment failure) and throws HlsStallException
+        // / IOException from the worker that tripped it.
+        val fetchCancelled: () -> Boolean = { isCancelled() }
+        // 2.0-dev2.9 DEFECT 5: connecting phase — no silent 0%.
         onProgress(0, -1, 0.0)
-        val masterText = EngineHttp.requestWithRetry(masterUrl, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true).let {
+        // 2.0-dev2.9: log BEFORE each fetch (and emit the phase),
+        // so the next log names the stall point instead of the
+        // last success — the 2.8 log went silent after the media
+        // playlist line because the init log only fired on return.
+        onPhase?.invoke(HlsPhase.FETCHING_PLAYLIST, null)
+        DownloadLogs.log("HLS", "fetching master playlist…")
+        val masterText = try {
+            EngineHttp.requestWithRetry(
+                masterUrl, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true,
+                // 2.0-dev2.9: pre-segment fetches get ONE attempt
+                // with a hard total deadline — a stall here must
+                // fail over to the next server, not retry the same
+                // stalled host three times (~2 min of Connecting…).
+                maxAttempts = 1,
+                totalDeadlineMs = HLS_PLAYLIST_TOTAL_MS,
+                firstByteDeadlineMs = HLS_PLAYLIST_FIRST_BYTE_MS,
+                isCancelled = fetchCancelled,
+                connectionHandle = connectionHandle,
+            )
+        } catch (e: java.net.SocketTimeoutException) {
+            throw HlsStallException("Server stalled fetching the playlist (${e.message ?: "timed out"}) — trying the next server.")
+        }.let {
             DownloadLogs.log("HLS", "master playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
             if (it.code != 200) throw java.io.IOException("Playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
             it.text
@@ -329,7 +426,21 @@ object HlsDownloader {
         val mediaText = if (mediaUrl == masterUrl) masterText else run {
             // 2.0-dev2.5 DEFECT 5: variant-fetch phase, still connecting.
             onProgress(0, -1, 0.0)
-            EngineHttp.requestWithRetry(mediaUrl, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true).let {
+            // 2.0-dev2.9: pre-fetch log + phase (see master fetch).
+            onPhase?.invoke(HlsPhase.FETCHING_PLAYLIST, null)
+            DownloadLogs.log("HLS", "fetching variant playlist…")
+            try {
+                EngineHttp.requestWithRetry(
+                    mediaUrl, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true,
+                    maxAttempts = 1,
+                    totalDeadlineMs = HLS_PLAYLIST_TOTAL_MS,
+                    firstByteDeadlineMs = HLS_PLAYLIST_FIRST_BYTE_MS,
+                    isCancelled = fetchCancelled,
+                    connectionHandle = connectionHandle,
+                )
+            } catch (e: java.net.SocketTimeoutException) {
+                throw HlsStallException("Server stalled fetching the variant playlist (${e.message ?: "timed out"}) — trying the next server.")
+            }.let {
                 DownloadLogs.log("HLS", "variant playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
                 if (it.code != 200) throw java.io.IOException("Variant playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
                 it.text
@@ -360,7 +471,23 @@ object HlsDownloader {
             // 2.0-dev2.5 DEFECT 5: still connecting — keep the
             // phase callback going through init + key fetches.
             onProgress(0, -1, 0.0)
-            val initResp = EngineHttp.requestWithRetry(playlist.initSegmentUri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true)
+            // 2.0-dev2.9: pre-fetch log + phase — the 2.8 stall
+            // died exactly here with no line naming it (the old
+            // init log fired only AFTER the fetch returned).
+            onPhase?.invoke(HlsPhase.DOWNLOADING_INIT, null)
+            DownloadLogs.log("HLS", "fetching init segment…")
+            val initResp = try {
+                EngineHttp.requestWithRetry(
+                    playlist.initSegmentUri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true,
+                    maxAttempts = 1,
+                    totalDeadlineMs = HLS_PLAYLIST_TOTAL_MS,
+                    firstByteDeadlineMs = HLS_PLAYLIST_FIRST_BYTE_MS,
+                    isCancelled = fetchCancelled,
+                    connectionHandle = connectionHandle,
+                )
+            } catch (e: java.net.SocketTimeoutException) {
+                throw HlsStallException("Server stalled fetching the init segment (${e.message ?: "timed out"}) — trying the next server.")
+            }
             DownloadLogs.log("HLS", "init segment: HTTP ${initResp.code}, ${initResp.bytes.size} bytes")
             if (initResp.code != 200) throw java.io.IOException("Init segment fetch failed (HTTP ${initResp.code}) — retry the download.")
             initFile.writeBytes(initResp.bytes)
@@ -372,11 +499,32 @@ object HlsDownloader {
         // Keys: fetched once per unique URI, cached. A key override
         // replaces fetching entirely (rotating per-URI keys still
         // work: the override is used for every key URI).
+        // 2.0-dev2.9: segments completed in THIS run. A key/segment
+        // stall counts as a server stall (HlsStallException, the
+        // engine fails over) only while nothing has completed yet
+        // — once segments are flowing, a stall is a per-segment
+        // failure and resumes from the segment index instead.
+        val completedInRun = java.util.concurrent.atomic.AtomicInteger(0)
         val keyCache = mutableMapOf<String, ByteArray>()
         suspend fun keyFor(uri: String): ByteArray {
             overrideKey?.let { return it }
             synchronized(keyCache) { keyCache[uri] }?.let { return it }
-            return EngineHttp.requestWithRetry(uri, headers = fetchHeaders, timeoutMs = 10_000, followRedirects = true).let {
+            // 2.0-dev2.9: pre-fetch log + phase + hard deadline.
+            onPhase?.invoke(HlsPhase.FETCHING_KEY, null)
+            DownloadLogs.log("HLS", "fetching key…")
+            return try {
+                EngineHttp.requestWithRetry(
+                    uri, headers = fetchHeaders, timeoutMs = 10_000, followRedirects = true,
+                    maxAttempts = 1,
+                    totalDeadlineMs = HLS_KEY_TOTAL_MS,
+                    firstByteDeadlineMs = HLS_PLAYLIST_FIRST_BYTE_MS,
+                    isCancelled = fetchCancelled,
+                    connectionHandle = connectionHandle,
+                )
+            } catch (e: java.net.SocketTimeoutException) {
+                if (completedInRun.get() == 0) throw HlsStallException("Server stalled fetching the stream key (${e.message ?: "timed out"}) — trying the next server.")
+                throw java.io.IOException("Could not fetch the stream key (timed out).")
+            }.let {
                 DownloadLogs.log("HLS", "key fetch: ${DownloadLogs.sanitizeUrl(uri)} -> HTTP ${it.code}, ${it.bytes.size} bytes")
                 if (it.code != 200 || it.bytes.size != 16) throw java.io.IOException("Could not fetch the stream key (HTTP ${it.code}).")
                 it.bytes
@@ -406,6 +554,13 @@ object HlsDownloader {
         // blocking segment fetches (EngineHttp has no interrupt
         // handle — see the report), never inside one. The one log
         // line here proves which phase a phone cancel died in.
+        // 2.0-dev2.9: fixed — every segment fetch now carries the
+        // hard total deadline AND the live-connection handle, so a
+        // cancel disconnects the connection out of its read at
+        // once, and a stalled first segment fails over instead of
+        // hanging (see HlsStallException below).
+        onPhase?.invoke(HlsPhase.DOWNLOADING_SEGMENTS, "Segment ${done.size}/$total")
+        DownloadLogs.log("HLS", "starting segment downloads: $total segments (${done.size} already done), $segmentWorkers workers, first segment host=$firstSegmentHost")
         try {
             coroutineScope {
             val semaphore = Semaphore(segmentWorkers.coerceIn(1, 16))
@@ -416,7 +571,18 @@ object HlsDownloader {
                         val segFile = File(tempDir, "seg_%05d.ts".format(seg.index))
                         if (seg.index in done && segFile.exists() && segFile.length() > 0) return@async
                         try {
-                            val raw = EngineHttp.requestWithRetry(seg.uri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true).let {
+                            val raw = EngineHttp.requestWithRetry(
+                                seg.uri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true,
+                                // 2.0-dev2.9: one retry, hard 20 s
+                                // total per attempt — a segment that
+                                // cannot land in 40 s is a dead host,
+                                // not a slow one.
+                                maxAttempts = 2,
+                                totalDeadlineMs = HLS_SEGMENT_TOTAL_MS,
+                                firstByteDeadlineMs = HLS_SEGMENT_FIRST_BYTE_MS,
+                                isCancelled = fetchCancelled,
+                                connectionHandle = connectionHandle,
+                            ).let {
                                 if (it.code != 200) throw java.io.IOException("Segment ${seg.index} HTTP ${it.code}")
                                 it.bytes
                             }
@@ -459,16 +625,66 @@ object HlsDownloader {
                                     // cancelled — a draining run must
                                     // not touch the new incarnation's
                                     // numbers after a re-queue.
-                                    if (!isCancelled()) onProgress(downloadedBytes, estimate, speed.coerceAtLeast(0.0))
+                                    if (!isCancelled()) {
+                                        onProgress(downloadedBytes, estimate, speed.coerceAtLeast(0.0))
+                                        // 2.0-dev2.9: segment count
+                                        // rides the same 500 ms
+                                        // throttle, so the row can
+                                        // show "Segment 34/267".
+                                        onPhase?.invoke(HlsPhase.DOWNLOADING_SEGMENTS, "Segment ${done.size}/$total")
+                                    }
                                 }
                             }
                             markDone(seg.index)
+                            completedInRun.incrementAndGet()
                         } catch (e: CancellationException) {
                             throw e
+                        } catch (e: HlsStallException) {
+                            // A key fetch that stalled before any
+                            // segment landed: trip the abort and let
+                            // the engine fail over to the next
+                            // server. Siblings die on the disconnect.
+                            aborted.set(true)
+                            connectionHandle?.disconnectAll()
+                            throw e
                         } catch (e: Exception) {
+                            // A fail-fast abort already in flight:
+                            // this worker only died on the
+                            // disconnect — swallow it, the worker
+                            // that tripped the abort reports it.
+                            if (aborted.get()) return@async
+                            // 2.0-dev2.9: a timeout before ANY
+                            // segment completed in this run is the
+                            // diagnosed stall (first segment never
+                            // landed) — fail over, don't collect it
+                            // as one failure among hundreds.
+                            if (e is java.net.SocketTimeoutException && completedInRun.get() == 0) {
+                                aborted.set(true)
+                                connectionHandle?.disconnectAll()
+                                throw HlsStallException("Server stalled on the first segment (${e.message ?: "timed out"}) — trying the next server.")
+                            }
                             val msg = "segment ${seg.index}: ${friendlyDownloadError(e)}"
                             DownloadLogs.log("HLS", "FAILED $msg")
-                            synchronized(failed) { failed += msg }
+                            val failedCount = synchronized(failed) { failed += msg; failed.size }
+                            // 2.0-dev2.9 FAIL-FAST: don't wait out
+                            // all $total segments when the host is
+                            // dead — 8 failures with zero completions
+                            // means every worker failed once, and a
+                            // quarter of the playlist failing means
+                            // the host is flapping. Either way the
+                            // remaining segments stay unmarked, so a
+                            // retry resumes exactly where this run
+                            // stopped. Zero completions fails over
+                            // to the next server; later failures take
+                            // the normal resume path.
+                            val failFastAt = if (completedInRun.get() == 0) 8 else maxOf(8, total / 4)
+                            if (failedCount >= failFastAt) {
+                                aborted.set(true)
+                                connectionHandle?.disconnectAll()
+                                DownloadLogs.log("HLS", "fail-fast: $failedCount segment(s) failed, ${completedInRun.get()} completed in this run — aborting instead of waiting out $total segments")
+                                if (completedInRun.get() == 0) throw HlsStallException("Server stalled — $failedCount segments failed before the first one landed. Trying the next server.")
+                                throw java.io.IOException("$failedCount of $total segments failed — download aborted early, retry to resume. First: ${failed.first()}")
+                            }
                         }
                     }
                 }
@@ -490,7 +706,11 @@ object HlsDownloader {
         onProgress(downloadedBytes, downloadedBytes, 0.0)
         DownloadLogs.log("HLS", "all $total segments done in ${System.currentTimeMillis() - hlsStartedMs}ms, ${downloadedBytes / 1024} KB — remuxing")
 
-        remux(tempDir, playlist.segments.size, initFile, outputFile, isCancelled)
+        // 2.0-dev2.9: remux progress — the phase callback now
+        // reports concat/mux progress instead of the UI sitting
+        // silent at 100%/Connecting through the whole remux.
+        onPhase?.invoke(HlsPhase.REMUXING, "0/$total segments")
+        remux(tempDir, playlist.segments.size, initFile, outputFile, isCancelled, onPhase)
         DownloadLogs.log("HLS", "remux done: ${outputFile.length() / 1024} KB -> ${outputFile.name}")
         // Segments are now inside the mp4; clean up.
         try {
@@ -508,7 +728,13 @@ object HlsDownloader {
     // segment while concatenating and every 1024 samples while
     // muxing, so a remux-phase cancel lands within one segment
     // copy / one sample batch. Throws CancellationException.
-    private fun remux(tempDir: File, segmentCount: Int, initFile: File, outputFile: File, isCancelled: () -> Boolean = { false }) {
+    // 2.0-dev2.9: remux progress — onPhase fires every 16
+    // segments during the concat and every 8192 samples during
+    // the mux (coarse on purpose: each fire is a job update +
+    // notification post, so per-segment/per-sample would spam).
+    // Remux itself stays single-threaded: MediaMuxer is serial,
+    // and the concat order is the segment order.
+    private fun remux(tempDir: File, segmentCount: Int, initFile: File, outputFile: File, isCancelled: () -> Boolean = { false }, onPhase: ((HlsPhase, String?) -> Unit)? = null) {
         val combined = File(tempDir, "combined.ts")
         combined.outputStream().use { out ->
             if (initFile.exists()) initFile.inputStream().use { it.copyTo(out) }
@@ -520,6 +746,7 @@ object HlsDownloader {
                 val seg = File(tempDir, "seg_%05d.ts".format(i))
                 if (!seg.exists()) throw java.io.IOException("Missing segment $i at remux — retry the download.")
                 seg.inputStream().use { it.copyTo(out) }
+                if (i % 16 == 0 || i == segmentCount - 1) onPhase?.invoke(HlsPhase.REMUXING, "$i/$segmentCount segments")
             }
         }
         outputFile.parentFile?.mkdirs()
@@ -550,6 +777,8 @@ object HlsDownloader {
                     DownloadLogs.log("HLS", "remux cancelled during mux ($samples samples written)")
                     throw CancellationException("HLS remux cancelled")
                 }
+                // 2.0-dev2.9: coarse mux progress (see remux header).
+                if (samples % 8192 == 0) onPhase?.invoke(HlsPhase.REMUXING, "muxing…")
                 val size = extractor.readSampleData(buffer, 0)
                 if (size < 0) break
                 val trackIndex = extractor.sampleTrackIndex

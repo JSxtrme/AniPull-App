@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -97,6 +98,15 @@ data class DownloadJob(
     // must label an estimated total with "~" and never present it
     // as exact. Defaults false so old persisted jobs parse.
     val totalEstimated: Boolean = false,
+    // 2.0-dev2.9 PHASE: what the job is doing right now
+    // ("Fetching playlist…", "Segment 34/267", "Remuxing…
+    // 128/267 segments", "Server 8 stalled — trying next
+    // server…"). In-memory ONLY — deliberately NOT persisted in
+    // jobToJson: a restored job re-derives its phase when it next
+    // runs, and a stale phase must never survive a restart.
+    // App.kt renders this for DOWNLOADING jobs instead of the
+    // undifferentiated "Connecting…". Null = no phase reported yet.
+    val phaseLabel: String? = null,
 )
 
 enum class JobState { QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELLED }
@@ -145,6 +155,52 @@ object DownloadEngine {
     // cancel() can disconnect() it and unblock a read() stuck in
     // its 15s readTimeout instead of waiting for the timeout.
     private val activeDdlConnections = mutableMapOf<String, HttpURLConnection>()
+    // 2.0-dev2.9: the same, for HLS — every live HLS
+    // HttpURLConnection per job (playlist / init / key / segment
+    // fetches, registered by EngineHttp via the handle below).
+    // The 2.8 Connecting hang was an HLS fetch nothing could
+    // interrupt: cancel() only knew about DDL connections. An
+    // entry is removed when its fetch returns; the map is also
+    // cleared when the job's run leaves (see runJob's finally).
+    private val activeHlsConnections = mutableMapOf<String, MutableSet<HttpURLConnection>>()
+
+    // 2.0-dev2.9: the per-job HlsConnectionHandle handed to
+    // HlsDownloader.download — EngineHttp registers each live HLS
+    // connection here and unregisters it on return, so cancel()
+    // can disconnect all of them at once.
+    private fun hlsConnectionHandle(jobId: String): HlsConnectionHandle = object : HlsConnectionHandle {
+        override fun register(conn: HttpURLConnection) {
+            synchronized(lock) { activeHlsConnections.getOrPut(jobId) { mutableSetOf() } += conn }
+        }
+
+        override fun unregister(conn: HttpURLConnection) {
+            synchronized(lock) { activeHlsConnections[jobId]?.remove(conn) }
+        }
+
+        override fun disconnectAll() {
+            val conns = synchronized(lock) { activeHlsConnections[jobId]?.toList() } ?: emptyList()
+            conns.forEach { conn ->
+                try {
+                    conn.disconnect()
+                } catch (_: Exception) {
+                }
+            }
+        }
+    }
+
+    // Returns how many live connections were disconnected (0
+    // when the job has no HLS fetch in flight — a DDL job, or a
+    // job between fetches — so the caller can skip the log line).
+    private fun disconnectHlsConnections(jobId: String): Int {
+        val conns = synchronized(lock) { activeHlsConnections[jobId]?.toList() } ?: emptyList()
+        conns.forEach { conn ->
+            try {
+                conn.disconnect()
+            } catch (_: Exception) {
+            }
+        }
+        return conns.size
+    }
 
     // --- Settings ------------------------------------------------------
 
@@ -546,7 +602,7 @@ object DownloadEngine {
                 // 2.0-dev2.5: also reset a stale INDETERMINATE
                 // progress — the re-queued job shows 0% until its
                 // first real progress report lands.
-                job.copy(state = JobState.QUEUED, error = null, speedMBps = 0.0, wifiOverride = true, progress = 0)
+                job.copy(state = JobState.QUEUED, error = null, speedMBps = 0.0, wifiOverride = true, progress = 0, phaseLabel = null)
             } else job
         }, persistNow = true)
         pump()
@@ -591,6 +647,15 @@ object DownloadEngine {
             } catch (_: Exception) {
             }
             DownloadLogs.logJob(id, "ENGINE", "cancel: DDL connection disconnected to unblock read")
+        }
+        // 2.0-dev2.9: same for HLS — disconnect every live HLS
+        // connection (playlist / init / key / segment) so a cancel
+        // tapped during a blocked fetch lands at once instead of
+        // draining up to the fetch's deadline (the 41 s drain in
+        // the 2.8 phone log). A job with no HLS fetch in flight
+        // disconnects nothing and logs nothing.
+        if (disconnectHlsConnections(id) > 0) {
+            DownloadLogs.logJob(id, "ENGINE", "cancel: HLS connections disconnected to unblock reads")
         }
         // Register immediately, in every phase. A DOWNLOADING
         // job's runJob is still draining (see above) but can no
@@ -776,7 +841,12 @@ object DownloadEngine {
         val ctx = appContext ?: return
         try {
             val job = _jobs.value.firstOrNull { it.id == id } ?: return
-            val link = links[id] ?: run {
+            // 2.0-dev2.9: `var`, not `val` — a pre-segment stall
+            // fails over to a freshly re-resolved link (possibly
+            // from another server, possibly DDL instead of HLS),
+            // and the rest of runJob (probe / publish / subs)
+            // must see the link that actually downloaded.
+            var link = links[id] ?: run {
                 DownloadLogs.logJob(id, "ENGINE", "FAILED: resolved link is gone (not in memory, not restored from storage)")
                 updateJob(id, { it.copy(state = JobState.FAILED, error = "Download link is gone — tap to retry.") }, persistNow = true)
                 return
@@ -848,7 +918,21 @@ object DownloadEngine {
             }
             // 2.0-dev2.7 DEFECT 1: freeze the total ONCE, before
             // the first progress report (see freezeTotalAtStart).
-            freezeTotalAtStart(id, link, job, control)
+            // 2.0-dev2.9: bounded at 20 s — the HLS size probe
+            // fetches the master playlist through DdlQualityProbe
+            // (not my file), and its socket timeouts have the same
+            // dribble hole the init fetch had. A probe that cannot
+            // answer in 20 s is abandoned (the total then freezes
+            // from the first segment report, as before); the
+            // orphaned probe can still land a late freezeTotal,
+            // which is a no-op once any total is frozen.
+            val frozeTotal = kotlinx.coroutines.withTimeoutOrNull(20_000L) {
+                freezeTotalAtStart(id, link, job, control)
+                true
+            }
+            if (frozeTotal == null) {
+                DownloadLogs.logJob(id, "ENGINE", "total freeze timed out after 20s (size probe stalled) — continuing unfrozen, first progress report will freeze the total")
+            }
             // 2.0-dev2.5 DEFECT 5: post-resolve silence. The first
             // progress callback used to arrive only with the first
             // segment / first DDL chunk — until then the UI sat at
@@ -866,11 +950,39 @@ object DownloadEngine {
             val dest = resolveDestination(ctx, job, dir, fileName)
             DownloadLogs.logJob(id, "ENGINE", "downloading: dest=${if (safTreeUri(ctx) != null) "SAF tree (staged locally)" else "file"} dir=${dir.absolutePath} file=$fileName")
             val speedLimit = speedLimitMbps(ctx)
-            val segmentWorkers = (parallelLimit(ctx) * 2).coerceIn(2, 10)
+            // 2.0-dev2.9: segment workers are 8 by default now
+            // (was 4 at the parallel=2 default: parallelLimit x 2).
+            // Segments were already parallel with order preserved
+            // via seg files + the segments.done index; 8 workers
+            // is the new floor, and a higher parallel setting
+            // still raises it (up to 12). The HlsDownloader
+            // semaphore caps at 16; the job-concurrency limit in
+            // pump() is untouched — this is per-download workers,
+            // not parallel episodes.
+            val segmentWorkers = (parallelLimit(ctx) * 2).coerceIn(8, 12)
             var hlsSubs: List<SubtitleTrack> = emptyList()
             var hlsActualHeight: Int? = null
             try {
-                when (link) {
+                // 2.0-dev2.9 STALL FAILOVER: the download dispatch
+                // runs inside this loop, not once. When the HLS
+                // pre-segment phase stalls, HlsDownloader throws
+                // HlsStallException; the catch below re-resolves
+                // (fresh race excluding the stalled server) and
+                // retries with the new link IN THIS JOB — the job
+                // never fails for a stall while another server can
+                // serve it. Exactly ONE failover per job: a second
+                // stall takes the normal failure path. A stall
+                // failover never touches the auto-retry budget for
+                // a different failure, and it never re-queues the
+                // same stalled link.
+                var stallFailoverUsed = false
+                while (true) {
+                try {
+                // `link` is a var (failover swaps it), and a var
+                // can't smart-cast in the when below — snapshot it
+                // per attempt so the branches keep their casts.
+                val attemptLink = link
+                when (attemptLink) {
                     is ResolvedLink.DirectMp4 -> {
                         // 2.0-dev2.6 (coordinator patch): last-chance probe — an
                         // unknown-quality DDL that reaches the engine gets ONE
@@ -880,8 +992,8 @@ object DownloadEngine {
                         // of downloading then deleting. A failed probe (null) proceeds
                         // with the download as before; the post-download check stays
                         // the backstop.
-                        if (link.actualQuality == null) {
-                            val probe = DdlQualityProbe.probeDdlQuality(link.url, mapOf("Referer" to link.referer))
+                        if (attemptLink.actualQuality == null) {
+                            val probe = DdlQualityProbe.probeDdlQuality(attemptLink.url, mapOf("Referer" to attemptLink.referer))
                             val probed = probe?.height
                             if (probed != null && probed < qualityFloorFor(qualityHeight(job.quality))) {
                                 DownloadLogs.logJob(id, "ENGINE", "QUALITY MISMATCH (pre-download probe): DDL is ${probed}p, requested ${job.quality} (floor ${qualityFloorFor(qualityHeight(job.quality))}p) — failing, not downloading")
@@ -894,8 +1006,8 @@ object DownloadEngine {
                         // the job here, before the first byte.
                         if (control.cancelled) throw CancellationException("cancelled")
                         downloadMp4(
-                        url = link.url,
-                        referer = link.referer,
+                        url = attemptLink.url,
+                        referer = attemptLink.referer,
                         workFile = dest.workFile,
                         jobId = id,
                         control = control,
@@ -905,7 +1017,7 @@ object DownloadEngine {
                     }
                     is ResolvedLink.Hls -> {
                         val hlsResult = HlsDownloader.download(
-                            masterUrl = link.masterPlaylistUrl,
+                            masterUrl = attemptLink.masterPlaylistUrl,
                             outputFile = dest.workFile,
                             tempDir = dest.tempDir,
                             quality = job.quality,
@@ -915,15 +1027,85 @@ object DownloadEngine {
                             isPaused = { control.paused },
                             onProgress = { bytes, total, speed -> reportProgress(id, bytes, total, speed) },
                             audio = job.audio,
-                            keyOverrideB64 = link.keyOverrideB64,
-                            ivOverrideB64 = link.ivOverrideB64,
-                            referer = link.referer,
-                            origin = link.origin,
+                            keyOverrideB64 = attemptLink.keyOverrideB64,
+                            ivOverrideB64 = attemptLink.ivOverrideB64,
+                            referer = attemptLink.referer,
+                            origin = attemptLink.origin,
+                            // 2.0-dev2.9: live-connection handle so
+                            // cancel() disconnects HLS fetches at
+                            // once, and the phase callback so the
+                            // row/notification show the real phase.
+                            connectionHandle = hlsConnectionHandle(id),
+                            onPhase = { phase, detail -> reportHlsPhase(id, phase, detail) },
                         )
                         hlsSubs = hlsResult.subtitles
                         hlsActualHeight = hlsResult.actualHeight
                     }
-                    is ResolvedLink.Failed -> throw java.io.IOException(link.message)
+                    is ResolvedLink.Failed -> throw java.io.IOException(attemptLink.message)
+                }
+                break
+                } catch (e: HlsStallException) {
+                    // 2.0-dev2.9: pre-segment stall — fail the
+                    // ATTEMPT, not the job. A cancel that landed
+                    // during the stall is still a cancel, never a
+                    // failover (a failover would resurrect a job
+                    // the user just killed).
+                    if (control.cancelled) throw CancellationException("cancelled")
+                    if (stallFailoverUsed) throw e
+                    stallFailoverUsed = true
+                    val stalledServer = _jobs.value.firstOrNull { it.id == id }?.serverNumber ?: job.serverNumber
+                    DownloadLogs.logJob(id, "ENGINE", "STALL: ${e.message ?: "server stalled"} (server=$stalledServer) — re-resolving excluding Server $stalledServer")
+                    // Surface the switch in the UI now — the
+                    // re-resolve races for seconds, and the row
+                    // must say what is happening instead of
+                    // sitting on the old server's "Connecting…".
+                    reportPhase(id, "Server $stalledServer stalled — trying next server…")
+                    val fresh = reResolveAfterStall(ctx, job, stalledServer)
+                    if (fresh == null || fresh.link is ResolvedLink.Failed) {
+                        // No other server could serve it: fail
+                        // honestly. Burn the auto-retry so
+                        // failOrRetry does NOT re-queue the same
+                        // stalled link in 5 s — Retry re-resolves
+                        // fresh from the Downloads tab instead.
+                        attempts[id] = 1
+                        DownloadLogs.logJob(id, "ENGINE", "STALL failover: no other server could serve this episode — failing honestly (no same-link auto-retry)")
+                        throw java.io.IOException("Server $stalledServer stalled and no other server could serve this episode — tap Retry.")
+                    }
+                    if (fresh.downgraded) {
+                        DownloadLogs.logJob(id, "ENGINE", "STALL failover: winner is a downgrade (offered ${fresh.link.offeredHeight() ?: "?"}p for requested ${job.quality}) — served flagged, post-download check is the backstop")
+                    }
+                    // The stalled attempt's resume state belongs to
+                    // the OLD master: its segments/keys are not
+                    // valid for the new server's playlist, so the
+                    // temp dir and any partial mp4 go — reusing
+                    // them would remux foreign segments into the
+                    // new file. The frozen total stays frozen
+                    // (dev2.7 rule); progress bytes reset to 0
+                    // because the old bytes were discarded.
+                    try {
+                        dest.tempDir.deleteRecursively()
+                    } catch (_: Exception) {
+                    }
+                    try {
+                        if (dest.workFile.exists()) dest.workFile.delete()
+                    } catch (_: Exception) {
+                    }
+                    link = fresh.link
+                    links[id] = fresh.link
+                    hlsSubs = emptyList()
+                    hlsActualHeight = null
+                    val newServer = fresh.serverNumber ?: 0
+                    updateJob(id, {
+                        it.copy(
+                            serverNumber = newServer,
+                            downloadedBytes = 0, progress = 0, speedMBps = 0.0,
+                            actualQuality = fresh.link.offeredHeight()?.let { offered -> "${offered}p" },
+                        )
+                    }, persistNow = true)
+                    DownloadLogs.logJob(id, "ENGINE", "STALL failover: now downloading from Server $newServer (${if (fresh.link is ResolvedLink.Hls) "HLS master" else "DDL mp4"})")
+                    reportPhase(id, "Trying Server $newServer…")
+                    continue
+                }
                 }
                 if (control.cancelled) throw CancellationException("cancelled")
                 // 2.0-dev2.5 DEFECT 3 — verify what actually
@@ -966,7 +1148,30 @@ object DownloadEngine {
                 // here, before the publish starts.
                 if (control.cancelled) throw CancellationException("cancelled")
                 val finishedBytes = dest.workFile.length()
-                val finalPath = dest.finish(ctx, finalFileName)
+                // 2.0-dev2.9: publish phase — the UI sat silent
+                // at 100%/Connecting through the whole publish.
+                // The phase label lands before the copy starts;
+                // SAF copies additionally report percent through
+                // the callback below (MediaStore publish has no
+                // byte hook in DownloadStorage — not my file — so
+                // it shows the phase label only; see the report).
+                reportPhase(id, HlsPhase.PUBLISHING.label)
+                var lastPublishPct = -1
+                var lastPublishMs = 0L
+                val finalPath = dest.finish(ctx, finalFileName) { copied, total ->
+                    if (total <= 0) return@finish
+                    val pct = ((copied * 100) / total).toInt().coerceIn(0, 100)
+                    val now = System.currentTimeMillis()
+                    // Percent only, throttled: copying bytes
+                    // through reportProgress would move progress
+                    // BACKWARD (downloadedBytes already equals the
+                    // finished size), so the phase detail carries it.
+                    if (pct != lastPublishPct && (pct - lastPublishPct >= 5 || now - lastPublishMs >= 500 || pct == 100)) {
+                        lastPublishPct = pct
+                        lastPublishMs = now
+                        reportPhase(id, "${HlsPhase.PUBLISHING.label} $pct%")
+                    }
+                }
                 // 2.0-dev2.7 DEFECT 2: a cancel that landed DURING
                 // the publish (a whole-file MediaStore / SAF copy,
                 // not interruptible mid-copy) must not leave a
@@ -994,6 +1199,8 @@ object DownloadEngine {
                         totalBytes = finishedBytes,
                         speedMBps = 0.0, error = null, filePath = finalPath,
                         actualQuality = actualLabel,
+                        // 2.0-dev2.9: a finished job has no phase.
+                        phaseLabel = null,
                     )
                 }, persistNow = true)
                 // Subtitle sidecars (best-effort): union of the
@@ -1060,6 +1267,11 @@ object DownloadEngine {
                 }
             }
         } finally {
+            // 2.0-dev2.9: drop this job's HLS registry entry —
+            // every connection unregisters on return already, so
+            // this only clears the (possibly empty) per-job set
+            // and can never leak across jobs.
+            synchronized(lock) { activeHlsConnections.remove(id) }
             synchronized(lock) { running -= id }
             pump()
         }
@@ -1134,6 +1346,78 @@ object DownloadEngine {
         if (now - last < 500) return
         lastEmitMs[id] = now
         updateJob(id, { it.copy(progress = progress, downloadedBytes = bytes, totalBytes = if (effectiveTotal > 0) effectiveTotal else 0, speedMBps = speed) })
+    }
+
+    // 2.0-dev2.9 PHASE: store the job's current phase label
+    // (DownloadJob.phaseLabel, in-memory only). Unlike
+    // reportProgress this is NOT throttled — phases are rare
+    // (a handful per download: playlist / init / key / remux /
+    // publish / stall switch), except segment counts, which
+    // HlsDownloader already throttles to its 500 ms progress
+    // window, and remux, which it throttles to every 16 segments.
+    // Reports for a terminal job are dropped, same as progress:
+    // a draining run must not resurrect a CANCELLED row.
+    private fun reportPhase(id: String, label: String) {
+        val job = _jobs.value.firstOrNull { it.id == id } ?: return
+        if (job.state == JobState.CANCELLED || job.state == JobState.FAILED || job.state == JobState.COMPLETED) return
+        if (job.phaseLabel == label) return
+        updateJob(id, { it.copy(phaseLabel = label) })
+    }
+
+    // HlsDownloader phase callback, wired in runJob: the phase
+    // label plus its detail ("Segment 34/267",
+    // "128/267 segments") in one string for the row/notification.
+    // App.kt renders job.phaseLabel for DOWNLOADING jobs instead
+    // of the undifferentiated "Connecting…".
+    private fun reportHlsPhase(id: String, phase: HlsPhase, detail: String?) {
+        reportPhase(id, if (detail.isNullOrBlank()) phase.label else "${phase.label} $detail")
+    }
+
+    // 2.0-dev2.9 STALL FAILOVER: fresh race for this episode
+    // excluding the stalled server. Rebuilt from the job's own
+    // stored resolve context (titleId / anilistId /
+    // fromMediaIndex / listServer) — the same ApiTitle +
+    // EpisodeInfo reconstruction App.kt's retryDownloadJob uses,
+    // so no new stored state was needed. The race is the
+    // resolveEpisode path (by series + episode number, no
+    // sessions): the original resolve may have used a session,
+    // but a stalled host's session is worthless anyway, and the
+    // race's proving/tiering rules apply unchanged — a winner
+    // must still meet the requested quality or be flagged as a
+    // downgrade. Server 3 (Pahe) races only on a STORED
+    // clearance (a cheap prefs read); no WebView solve is ever
+    // started from the engine — if no clearance is stored, that
+    // candidate just fails and the other servers decide. The
+    // "prefer smaller files" mode is threaded in, like
+    // resolveOnly does. Returns null when nothing could be built
+    // or the race threw; a Failed link is returned as-is for the
+    // caller to treat as "no server could serve it".
+    private suspend fun reResolveAfterStall(ctx: Context, job: DownloadJob, stalledServer: Int): ResolvedDownload? {
+        val numbers = ServerRegistry.orderedNumbers(ctx).filter { it != stalledServer }
+        if (numbers.isEmpty()) {
+            DownloadLogs.logJob(job.id, "RESOLVE", "stall failover: no other servers to try (stalled Server $stalledServer was the only candidate)")
+            return null
+        }
+        val stored = CloudflareClearance.loadStored(ctx)
+        val candidates = numbers.mapNotNull { ServerRegistry.build(it, stored?.cookieValue, stored?.userAgent) }
+        if (candidates.isEmpty()) {
+            DownloadLogs.logJob(job.id, "RESOLVE", "stall failover: no candidates could be built")
+            return null
+        }
+        val title = ApiTitle(
+            id = job.titleId, title = job.animeTitle, poster = job.poster,
+            type = null, year = null, score = null, overview = null,
+            genres = null, status = null, episodes = null,
+        )
+        val audio = if (job.audio.equals("Dub", ignoreCase = true)) "eng" else "jpn"
+        val preferSmaller = prefs(ctx).getBoolean("prefer_smaller_files", false)
+        DownloadLogs.logJob(job.id, "RESOLVE", "stall failover: racing servers ${numbers.joinToString()} (excluding stalled Server $stalledServer) for E${job.episodeNumber} ${job.quality} ${job.audio}")
+        return try {
+            MultiSourceResolver.resolveWithFailover(candidates, title, job.anilistId, job.episodeNumber, audio, job.quality, preferSmaller = preferSmaller)
+        } catch (e: Exception) {
+            DownloadLogs.logJob(job.id, "RESOLVE", "stall failover race threw ${e.javaClass.simpleName}: ${e.message ?: ""}")
+            null
+        }
     }
 
     // 2.0-dev2.7 DEFECT 1: freeze the job's total ONCE, at job
@@ -1303,10 +1587,15 @@ object DownloadEngine {
         // moved to the legacy final location (FileProvider-covered)
         // instead of failing the job — Open still works, and
         // Settings > Storage counts it among older files.
-        fun finish(context: Context, fileName: String): String {
+        // 2.0-dev2.9: onPublishProgress reports SAF copy bytes
+        // (copied, total); the MediaStore path has no byte hook
+        // (DownloadStorage.publishVideoFile), so it never fires
+        // there — the caller shows the Publishing phase label
+        // instead.
+        fun finish(context: Context, fileName: String, onPublishProgress: ((copiedBytes: Long, totalBytes: Long) -> Unit)? = null): String {
             val tree = safTreeUri
             if (tree != null) {
-                val docUri = safCreateFile(context, tree, safDirName, fileName, workFile)
+                val docUri = safCreateFile(context, tree, safDirName, fileName, workFile, onProgress = onPublishProgress)
                 if (docUri == null) {
                     // 2.0-dev1.9 diagnostics: the SAF copy failed, so
                     // the staged file is kept as the result instead of
@@ -1521,7 +1810,7 @@ object DownloadEngine {
         return null
     }
 
-    private fun safCreateFile(context: Context, treeUri: Uri, dirName: String, fileName: String, source: File, mimeType: String = "video/mp4"): Uri? {
+    private fun safCreateFile(context: Context, treeUri: Uri, dirName: String, fileName: String, source: File, mimeType: String = "video/mp4", onProgress: ((copiedBytes: Long, totalBytes: Long) -> Unit)? = null): Uri? {
         return try {
             val resolver = context.contentResolver
             val rootId = DocumentsContract.getTreeDocumentId(treeUri)
@@ -1540,7 +1829,22 @@ object DownloadEngine {
             }
             val docUri = DocumentsContract.createDocument(resolver, dirDoc, mimeType, fileName) ?: return null
             resolver.openOutputStream(docUri)?.use { out ->
-                source.inputStream().use { it.copyTo(out) }
+                // 2.0-dev2.9: chunked copy (was it.copyTo(out))
+                // so the publish can report progress — same bytes,
+                // same destination, just visible.
+                val total = source.length()
+                var copied = 0L
+                val buf = ByteArray(64 * 1024)
+                source.inputStream().use { input ->
+                    while (true) {
+                        val n = input.read(buf)
+                        if (n < 0) break
+                        out.write(buf, 0, n)
+                        copied += n
+                        onProgress?.invoke(copied, total)
+                    }
+                }
+                onProgress?.invoke(total, total)
             } ?: return null
             source.delete()
             docUri

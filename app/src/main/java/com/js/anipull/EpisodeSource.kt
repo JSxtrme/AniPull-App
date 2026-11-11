@@ -1,7 +1,9 @@
 package com.js.anipull
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
@@ -100,6 +102,16 @@ sealed class ResolvedLink {
         val actualQuality: Int? = null,
         val estimatedSizeBytes: Long? = null,
         val sizeIsEstimate: Boolean = false,
+        // 2.0-dev2.9: true when the master playlist WAS fetched
+        // and parsed but carries no RESOLUTION (a single-variant /
+        // media playlist — Anikoto's MegaPlay `file` is one): the
+        // quality is UNPROVABLE, not merely unfetched. The race
+        // ranks this above a known downgrade but still below a
+        // proven-exact link; it never promotes the link to exact.
+        // False for every other link, including links whose master
+        // fetch failed (unprobed — those stay in the plain unknown
+        // tier below any known-quality link).
+        val masterHasNoVariants: Boolean = false,
     ) : ResolvedLink()
     data class Failed(val message: String) : ResolvedLink()
 }
@@ -254,7 +266,11 @@ object EpisodeSources {
 // served — the race fails honestly instead. Unknown-quality links
 // rank below any known floor-meeting link (they might meet the
 // request, but a certain 720p beats a gamble) and above the
-// below-floor fallback. If all fail, the last Failed is returned
+// below-floor fallback. 2.0-dev2.9: EXCEPT a link whose master was
+// fetched and parsed with no RESOLUTION (single-variant): it ranks
+// above a known downgrade but still below proven-exact — it may BE
+// the requested height, and the post-download check is the
+// backstop. If all fail, the last Failed is returned
 // (or a generic message when nothing ran), with serverNumber
 // null. onAttempt fires with each server number as it is tried,
 // so the UI can show live progress ("Trying Server N…"). The
@@ -262,9 +278,13 @@ object EpisodeSources {
 // clearance — the engine NEVER solves Cloudflare.
 //
 // 2.0-dev2.3: RACE, don't chain (MiruDL pattern — no sequential
-// failover tax). Candidates run in batches of 3 in parallel and the
-// first success wins; a batch with no winner falls through to the
-// next batch. A slow server no longer blocks the servers behind it.
+// failover tax). 2.0-dev2.9: ALL candidates race at once (batch of
+// 9, was 3) and the first proven-exact success wins — the old
+// batches of 3 made Server 8 wait up to ~30 s behind two full
+// batches before it even started. The exact-tier parking rules
+// (downgrade / unknown park, exact wins) are unchanged, so a slow
+// server no longer blocks the servers behind it and a fast
+// downgrade still can't beat a slow exact prover.
 // Racers are launched as children of the CALLER's job (via the
 // current coroutine context) and are NOT joined after a win —
 // joining them would stall the win by up to a socket timeout when
@@ -288,7 +308,12 @@ object EpisodeSources {
 // OFF (default) is byte-for-byte the old behaviour: first proven-
 // exact arrival crowns immediately, zero added latency.
 object MultiSourceResolver {
-    private const val RESOLVE_RACE_BATCH = 3
+    // 2.0-dev2.9: was 3 — batch [7,8,9] could not start until
+    // batches 1-2 fully ended, so Server 8 waited up to ~30 s
+    // behind two 15 s-capped batches. All 9 race at once now; the
+    // exact-tier parking rules inside raceGroup are unchanged, so
+    // this costs no correctness — only latency.
+    private const val RESOLVE_RACE_BATCH = 9
     private const val RESOLVE_ATTEMPT_TIMEOUT_MS = 15_000L
 
     suspend fun resolveWithFailover(
@@ -331,6 +356,17 @@ object MultiSourceResolver {
         // always beats it. Served, flagged downgraded=true, only
         // when the whole race ends with no exact winner.
         var bestDowngrade: ResolvedDownload? = null
+        // 2.0-dev2.9: best UNPROVABLE link seen across ALL batches
+        // — an HLS link whose master WAS fetched and parsed but
+        // carries no RESOLUTION (single-variant / media playlist),
+        // so its quality can't be proven either way. It ranks
+        // ABOVE a known downgrade (it may well be the requested
+        // height — a variant-less master is usually the server's
+        // only rendition) but BELOW any proven-exact winner, and
+        // the post-download check stays the backstop. Unprobed
+        // links (master fetch failed) are NOT in this tier — they
+        // stay in bestUnknown below.
+        var bestUnprovable: ResolvedDownload? = null
         // 2.0-dev2.6: best UNKNOWN-quality link seen across ALL
         // batches (probed once, still unprovable). It ranks ABOVE
         // the known sub-floor fallback — it might meet the floor —
@@ -357,6 +393,7 @@ object MultiSourceResolver {
                 val bestOffered = bestFallback?.link?.offeredHeight() ?: 0
                 if (bestFallback == null || offered > bestOffered) bestFallback = result.fallback
             }
+            if (result.unprovableFallback != null && bestUnprovable == null) bestUnprovable = result.unprovableFallback
             if (result.unknownFallback != null && bestUnknown == null) bestUnknown = result.unknownFallback
         }
         // 2.0-dev2.8: smallest-file mode — the race ran ALL batches
@@ -374,6 +411,20 @@ object MultiSourceResolver {
                 )
                 return best
             }
+        }
+        // 2.0-dev2.9: unprovable beats downgrade (see above) but
+        // never beats a proven-exact winner — the preferSmaller
+        // pick and the exact-winner early return above already
+        // ran first, so reaching here means no server proved the
+        // requested height.
+        if (bestUnprovable != null) {
+            DownloadLogs.log(
+                "RESOLVE",
+                "no server proved ${qualityHeight(quality)}p for $quality — " +
+                    "serving the unprovable single-variant master from Server ${bestUnprovable.serverNumber} " +
+                    "(master fetched, no RESOLUTION to prove against; post-download check is the backstop)",
+            )
+            return bestUnprovable
         }
         if (bestDowngrade != null) {
             val offered = bestDowngrade.link.offeredHeight()
@@ -422,12 +473,19 @@ object MultiSourceResolver {
     // requested quality still gets its chance. 2.0-dev2.6: an
     // UNKNOWN-quality win parks exactly the same way — a fast
     // unprovable DDL must never beat a slower provable HLS just
-    // by answering first.
+    // by answering first. 2.0-dev2.9: a link whose master WAS
+    // fetched but carries no RESOLUTION parks one tier higher —
+    // above a known downgrade, still below proven-exact (see
+    // bestUnprovable in resolveWithFailover). A link whose master
+    // fetch FAILED stays in the plain unknown tier below.
     private data class RaceResult(
         val winner: ResolvedDownload?,
         val downgrade: ResolvedDownload?,
         val fallback: ResolvedDownload?,
         val unknownFallback: ResolvedDownload?,
+        // 2.0-dev2.9: best unprovable (master fetched, no
+        // RESOLUTION) link parked in this batch, or null.
+        val unprovableFallback: ResolvedDownload? = null,
         val last: ResolvedLink,
         // 2.0-dev2.8: exact-tier arrivals parked in this batch for
         // the smallest-file comparison — empty when the mode is OFF
@@ -494,8 +552,16 @@ object MultiSourceResolver {
     // which is exactly how Server 5 "won" Death Note E1 1080p
     // without anything proving it was the best choice. One small
     // GET, in parallel inside the racer, the link's own Referer /
-    // Origin, 5 s cap, no retry; a master that IS a media playlist
-    // (no variants) proves nothing and stays unknown.
+    // Origin. 2.0-dev2.9: RETRIED with a longer budget — the old
+    // single-attempt 5 s fetch parked a good 1080p master as
+    // "offered ?" on a transient 520 (revo flaps) or a slow TLS
+    // handshake. requestWithRetry (3 attempts, 5 s each, outer
+    // 10 s cap + the fetch's own 10 s total deadline) + the
+    // unprobed/unprovable split: a master that IS a media playlist
+    // (no variants) still proves no height, but it is now FLAGGED
+    // (masterHasNoVariants) instead of lumped with fetch failures
+    // — the race ranks it above a known downgrade, still below
+    // proven-exact, and it is never promoted to exact.
     private suspend fun enrichLink(link: ResolvedLink): ResolvedLink {
         if (link is ResolvedLink.DirectMp4) {
             if (link.actualQuality != null) return link
@@ -511,8 +577,19 @@ object MultiSourceResolver {
         }
         if (link is ResolvedLink.Hls) {
             if (link.actualQuality != null) return link
-            val height = probeHlsMasterHeight(link) ?: return link
-            return link.copy(actualQuality = height)
+            return when (val probe = probeHlsMasterHeight(link)) {
+                is HlsProbeOutcome.Proven -> link.copy(actualQuality = probe.height)
+                // 2.0-dev2.9: the master WAS fetched and parsed but
+                // carries no RESOLUTION — unprovable, not unprobed.
+                // The link keeps actualQuality null (never promoted
+                // to exact) but carries the flag so the race can
+                // rank it above a known downgrade.
+                HlsProbeOutcome.Unprovable -> link.copy(masterHasNoVariants = true)
+                // Fetch failed / timed out / not a playlist: the
+                // probe proved nothing — the link stays plain
+                // unknown and the parking rule below decides it.
+                HlsProbeOutcome.Unprobed -> link
+            }
         }
         return link
     }
@@ -524,29 +601,58 @@ object MultiSourceResolver {
     // for a 1080p request with no downgrade flag.
     internal suspend fun proveLink(link: ResolvedLink): ResolvedLink = enrichLink(link)
 
-    private suspend fun probeHlsMasterHeight(link: ResolvedLink.Hls): Int? {
-        if (link.masterPlaylistUrl.isBlank()) return null
+    // 2.0-dev2.9: three outcomes, not two — the old Int? could not
+    // tell "the fetch failed" (stay unknown, below any known link)
+    // from "the master was fetched and has no RESOLUTION"
+    // (single-variant: quality is unprovable — rank it above a
+    // known downgrade, still below proven-exact). Never throws.
+    private sealed class HlsProbeOutcome {
+        data class Proven(val height: Int) : HlsProbeOutcome()
+        object Unprovable : HlsProbeOutcome()
+        object Unprobed : HlsProbeOutcome()
+    }
+
+    private suspend fun probeHlsMasterHeight(link: ResolvedLink.Hls): HlsProbeOutcome {
+        if (link.masterPlaylistUrl.isBlank()) return HlsProbeOutcome.Unprobed
+        // Capture the caller's Job BEFORE entering Dispatchers.IO:
+        // the blocking fetch below can then be cancelled from
+        // inside via EngineHttp's isCancelled hook when the race
+        // itself cancels this racer (exact winner found / 15 s
+        // cap). The outer 10 s cap below is bounded separately by
+        // the fetch's own total deadline, which does not need the
+        // Job — a timeout there throws inside the fetch itself.
+        val job = currentCoroutineContext()[Job]
         return try {
-            withTimeoutOrNull(5_000L) {
+            withTimeoutOrNull(10_000L) {
                 withContext(Dispatchers.IO) {
                     val headers = buildMap {
                         link.referer?.let { put("Referer", it) }
                         link.origin?.let { put("Origin", it) }
                     }
-                    val resp = EngineHttp.request(
+                    val resp = EngineHttp.requestWithRetry(
                         link.masterPlaylistUrl,
                         headers = headers,
                         timeoutMs = 5_000,
                         followRedirects = true,
+                        maxAttempts = 3,
+                        // 2.0-dev2.9: the fetch's own hard total
+                        // deadline (EngineHttp bounded read), so a
+                        // dribble-feed server is cut off inside the
+                        // fetch instead of holding a thread past
+                        // the outer cap above.
+                        totalDeadlineMs = 10_000,
+                        isCancelled = { job?.isCancelled == true },
                     )
-                    if (resp.code != 200 || !resp.text.contains("#EXTM3U")) null
+                    if (resp.code != 200 || !resp.text.contains("#EXTM3U")) HlsProbeOutcome.Unprobed
                     else Regex("""RESOLUTION=\d+x(\d+)""").findAll(resp.text)
                         .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
                         .maxOrNull()?.takeIf { it > 0 }
+                        ?.let { HlsProbeOutcome.Proven(it) }
+                        ?: HlsProbeOutcome.Unprovable
                 }
-            }
+            } ?: HlsProbeOutcome.Unprobed
         } catch (_: Exception) {
-            null
+            HlsProbeOutcome.Unprobed
         }
     }
 
@@ -617,6 +723,10 @@ object MultiSourceResolver {
         var downgrade: ResolvedDownload? = null
         var fallback: ResolvedDownload? = null
         var unknownFallback: ResolvedDownload? = null
+        // 2.0-dev2.9: best unprovable link parked in this batch —
+        // master fetched, no RESOLUTION (see the unknown branch
+        // below). First arrival; there is no height to compare.
+        var unprovableFallback: ResolvedDownload? = null
         // 2.0-dev2.8: exact-tier arrivals parked for the
         // smallest-file comparison (see pickSmallestExact).
         val exactCandidates = mutableListOf<ResolvedDownload>()
@@ -639,18 +749,36 @@ object MultiSourceResolver {
                                 val offered = r.offeredHeight()
                                 val download = ResolvedDownload(r, src.serverNumber)
                                 if (offered == null) {
-                                    // 2.0-dev2.6: still unprovable after
-                                    // the probe — park it. A known link
-                                    // meeting the floor beats it even if
-                                    // it arrives later in this batch; it
-                                    // wins only if the batch ends with no
-                                    // known winner at all.
-                                    outcomes += "Server ${src.serverNumber}: unknown quality in ${tookMs}ms — parked"
-                                    DownloadLogs.log(
-                                        "RESOLVE",
-                                        "Server ${src.serverNumber}: quality still unknown after probing — parked, a known-quality link wins first",
-                                    )
-                                    if (unknownFallback == null) unknownFallback = download
+                                    if (r is ResolvedLink.Hls && r.masterHasNoVariants) {
+                                        // 2.0-dev2.9: master WAS fetched
+                                        // and parsed — no RESOLUTION to
+                                        // prove against (single-variant /
+                                        // media playlist). Parked ABOVE a
+                                        // known downgrade but BELOW any
+                                        // proven-exact arrival: it wins
+                                        // only if the race ends with no
+                                        // exact winner at all.
+                                        outcomes += "Server ${src.serverNumber}: single-variant master in ${tookMs}ms — parked as unprovable"
+                                        DownloadLogs.log(
+                                            "RESOLVE",
+                                            "Server ${src.serverNumber}: master fetched, no RESOLUTION (single-variant) — parked as unprovable, above downgrade but below proven-exact",
+                                        )
+                                        if (unprovableFallback == null) unprovableFallback = download
+                                    } else {
+                                        // 2.0-dev2.6: still unknown after
+                                        // the probe (fetch failed — the
+                                        // probe never saw the master).
+                                        // Parked BELOW any known link
+                                        // meeting the floor; it wins only
+                                        // if the batch ends with no known
+                                        // winner at all.
+                                        outcomes += "Server ${src.serverNumber}: unknown quality in ${tookMs}ms — parked"
+                                        DownloadLogs.log(
+                                            "RESOLVE",
+                                            "Server ${src.serverNumber}: quality still unknown after probing — parked, a known-quality link wins first",
+                                        )
+                                        if (unknownFallback == null) unknownFallback = download
+                                    }
                                 } else if (offered >= requestedHeight) {
                                     if (preferSmaller) {
                                         // 2.0-dev2.8: smallest-file
@@ -743,6 +871,7 @@ object MultiSourceResolver {
                         exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" } +
                         "; batch smallest: ${batchBest?.let { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" } ?: "none"}; " +
                         "best downgrade: ${downgrade?.let { "Server ${it.serverNumber} (${it.link.offeredHeight() ?: "?"}p)" } ?: "none"}; " +
+                        "unprovable parked: ${unprovableFallback?.serverNumber?.let { "Server $it" } ?: "none"}; " +
                         "unknown parked: ${unknownFallback?.serverNumber?.let { "Server $it" } ?: "none"}",
                 )
             } else {
@@ -753,6 +882,7 @@ object MultiSourceResolver {
                     "RESOLVE",
                     "batch ${group.map { it.serverNumber }} ended with no exact winner for $quality — " +
                         "best downgrade: ${downgrade?.let { "Server ${it.serverNumber} (${it.link.offeredHeight() ?: "?"}p)" } ?: "none"}; " +
+                        "unprovable parked: ${unprovableFallback?.serverNumber?.let { "Server $it" } ?: "none"}; " +
                         "unknown parked: ${unknownFallback?.serverNumber?.let { "Server $it" } ?: "none"}",
                 )
             }
@@ -760,7 +890,7 @@ object MultiSourceResolver {
         // Best-effort cancel of the losers; their blocking I/O
         // finishes on its own threads and the results are discarded.
         pending.forEach { it.cancel() }
-        return RaceResult(winner, downgrade, fallback, unknownFallback, last, exactCandidates)
+        return RaceResult(winner, downgrade, fallback, unknownFallback, unprovableFallback, last, exactCandidates)
     }
 
     suspend fun loadEpisodesWithFailover(
@@ -859,21 +989,40 @@ internal fun languageCodeFromLabel(label: String?): String {
     }
 }
 
-// Shared base for the HTTP resolvers: 0.4s pacing between calls,
+// Shared base for the HTTP resolvers: pacing between calls,
 // blocking I/O confined to Dispatchers.IO, common title/audio utils.
 // No Cloudflare solving, no WebView, no CookieManager anywhere.
+// 2.0-dev2.9: pacing is PER ENDPOINT (paceFor), not one shared
+// timestamp — the old single lastCallMs serialised parallel legs:
+// each async child saw the previous child's timestamp and delayed
+// ~400 ms in turn, so "parallel" legs still ran ~400 ms apart.
+// The default pace() keeps the old 400 ms single-key behaviour
+// for the resolvers that still call it; JustAnime/AnimeStream pace
+// per endpoint at 100 ms (their rate limits allow it — JustAnime
+// 600 req/60 s — and a resolve makes ~7 calls total).
 internal abstract class BaseEpisodeSource(
     override val serverNumber: Int,
     override val serverDescription: String,
     override val sourceName: String,
 ) : EpisodeSource {
-    protected var lastCallMs = 0L
+    private val paceLock = Any()
+    private val paceLastCallMs = mutableMapOf<String, Long>()
 
-    protected suspend fun pace(ms: Long = 400L) {
-        val wait = ms - (System.currentTimeMillis() - lastCallMs)
+    // Minimum gap `ms` between calls sharing `key`. Different keys
+    // never wait on each other, so parallel legs paced on different
+    // endpoints run concurrently. The wait is computed under a lock
+    // and the timestamp is stamped after the delay, so two callers
+    // racing the same key still space out by ~ms.
+    protected suspend fun paceFor(key: String, ms: Long) {
+        val wait = synchronized(paceLock) {
+            val last = paceLastCallMs[key] ?: 0L
+            (ms - (System.currentTimeMillis() - last)).coerceAtLeast(0L)
+        }
         if (wait > 0) delay(wait)
-        lastCallMs = System.currentTimeMillis()
+        synchronized(paceLock) { paceLastCallMs[key] = System.currentTimeMillis() }
     }
+
+    protected suspend fun pace(ms: Long = 400L) = paceFor("default", ms)
 
     protected fun normalize(s: String): String = normalizeTitle(s)
 
@@ -939,6 +1088,28 @@ internal data class HttpResponse(
 internal object EngineHttp {
     // One request, no retries. followRedirects=false by default: the
     // Kwik form POST must NOT follow its 302 (the Location IS the mp4).
+    //
+    // 2.0-dev2.9 — BOUNDED READ (Connecting-hang fix): the old
+    // `stream.readBytes()` relied on readTimeout alone, which is
+    // per read() call, not a total deadline — a server dribbling
+    // >=1 byte every <readTimeout kept readBytes() alive
+    // indefinitely (Death Note E1, Server 8: 144 s stuck in the
+    // init fetch, no return, no error). The body is now read in
+    // 32 KB chunks with a wall-clock check between chunks:
+    //  - totalDeadlineMs (>0): hard total deadline for the whole
+    //    fetch — throws SocketTimeoutException when it fires.
+    //  - firstByteDeadlineMs (>0): no byte within this long of
+    //    starting the body read also throws SocketTimeoutException.
+    //  - isCancelled: checked between chunks — throws
+    //    CancellationException, so a cancel lands inside a fetch,
+    //    not only between fetches.
+    // All three default to off (0 / null), so every pre-2.9 caller
+    // (resolvers, MediaIndex, ServerHealth) behaves exactly as
+    // before: same bytes, same per-call socket timeouts.
+    // `connectionHandle`, when given, is told about the live
+    // HttpURLConnection so the caller can disconnect() it out of
+    // a blocked read (the DDL cancel pattern, now for HLS too);
+    // it is always unregistered in the finally below.
     fun request(
         url: String,
         method: String = "GET",
@@ -946,6 +1117,10 @@ internal object EngineHttp {
         body: ByteArray? = null,
         timeoutMs: Int = 10_000,
         followRedirects: Boolean = false,
+        totalDeadlineMs: Int = 0,
+        firstByteDeadlineMs: Int = 0,
+        isCancelled: (() -> Boolean)? = null,
+        connectionHandle: HlsConnectionHandle? = null,
     ): HttpResponse {
         val conn = (java.net.URL(url).openConnection() as java.net.HttpURLConnection).apply {
             requestMethod = method
@@ -959,20 +1134,69 @@ internal object EngineHttp {
                 setRequestProperty("Content-Length", body.size.toString())
             }
         }
+        connectionHandle?.register(conn)
         try {
             if (body != null) conn.outputStream.use { it.write(body) }
             val code = conn.responseCode
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
-            val bytes = stream?.use { it.readBytes() } ?: ByteArray(0)
+            val bytes = stream?.use { input ->
+                readBounded(input, totalDeadlineMs, firstByteDeadlineMs, isCancelled)
+            } ?: ByteArray(0)
             return HttpResponse(code, bytes, conn.headerFields.filterKeys { it != null })
         } finally {
+            connectionHandle?.unregister(conn)
             conn.disconnect()
         }
+    }
+
+    // Chunked body read with wall-clock deadlines. A single
+    // read() can still block up to readTimeout, but the loop can
+    // never run past the total deadline: every chunk return
+    // re-checks the clock, so a dribble-feed server is cut off at
+    // totalDeadlineMs instead of holding the fetch open forever.
+    private fun readBounded(
+        input: java.io.InputStream,
+        totalDeadlineMs: Int,
+        firstByteDeadlineMs: Int,
+        isCancelled: (() -> Boolean)?,
+    ): ByteArray {
+        val startedMs = System.currentTimeMillis()
+        val totalDeadline = if (totalDeadlineMs > 0) startedMs + totalDeadlineMs else Long.MAX_VALUE
+        val firstByteDeadline = if (firstByteDeadlineMs > 0) startedMs + firstByteDeadlineMs else Long.MAX_VALUE
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(32 * 1024)
+        var gotFirstByte = false
+        while (true) {
+            if (isCancelled?.invoke() == true) throw CancellationException("cancelled")
+            val now = System.currentTimeMillis()
+            if (!gotFirstByte && now > firstByteDeadline) {
+                throw java.net.SocketTimeoutException("No data received within ${firstByteDeadlineMs}ms (first-byte deadline)")
+            }
+            if (now > totalDeadline) {
+                throw java.net.SocketTimeoutException("Fetch exceeded its ${totalDeadlineMs}ms total deadline")
+            }
+            val n = input.read(buf)
+            if (n < 0) break
+            if (n > 0) {
+                gotFirstByte = true
+                out.write(buf, 0, n)
+            }
+        }
+        return out.toByteArray()
     }
 
     // Retries with backoff; honours Retry-After (seconds) on 429/503.
     // Returns the last response even on failure — the caller decides
     // what a non-200 means (a 403 is a signal, not an exception).
+    // 2.0-dev2.9: the deadline / cancel / connection params are
+    // threaded through to each attempt (per-attempt budgets, not a
+    // cross-retry budget — HLS pre-segment callers pass
+    // maxAttempts=1, so one attempt IS the whole budget there).
+    // A cancel is checked before every backoff sleep, so a
+    // retrying fetch still dies promptly on cancel instead of
+    // sleeping out its backoff first. New params are appended
+    // after maxAttempts so existing positional callers
+    // (CronetHttp) keep compiling unchanged.
     fun requestWithRetry(
         url: String,
         method: String = "GET",
@@ -981,20 +1205,28 @@ internal object EngineHttp {
         timeoutMs: Int = 10_000,
         followRedirects: Boolean = false,
         maxAttempts: Int = 3,
+        totalDeadlineMs: Int = 0,
+        firstByteDeadlineMs: Int = 0,
+        isCancelled: (() -> Boolean)? = null,
+        connectionHandle: HlsConnectionHandle? = null,
     ): HttpResponse {
         var last: HttpResponse? = null
         var attempt = 0
         while (attempt < maxAttempts) {
             attempt++
             try {
-                last = request(url, method, headers, body, timeoutMs, followRedirects)
+                last = request(url, method, headers, body, timeoutMs, followRedirects, totalDeadlineMs, firstByteDeadlineMs, isCancelled, connectionHandle)
                 if (last.code !in listOf(429, 503) && last.code < 500) return last
                 if (attempt == maxAttempts) return last
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 if (attempt == maxAttempts) throw e
+                if (isCancelled?.invoke() == true) throw CancellationException("cancelled")
                 Thread.sleep(1000L shl (attempt - 1))
                 continue
             }
+            if (isCancelled?.invoke() == true) throw CancellationException("cancelled")
             val retryAfter = last?.header("Retry-After")?.toLongOrNull()?.coerceIn(1, 60)
             val backoffMs = retryAfter?.times(1000) ?: (1000L shl (attempt - 1))
             Thread.sleep(backoffMs)

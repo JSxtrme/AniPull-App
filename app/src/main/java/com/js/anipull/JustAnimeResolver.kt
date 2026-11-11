@@ -1,5 +1,10 @@
 package com.js.anipull
 
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import org.json.JSONObject
 import java.net.URLEncoder
 
@@ -14,7 +19,9 @@ import java.net.URLEncoder
 // media-index list joins directly with no fuzzy title match.
 // Hard requirement: `Origin: https://justanime.to` on EVERY core-API
 // call, else 403 {"error":"Origin unknown is not allowed"}.
-// Rate limit 600 req / 60 s; 0.4 s pacing keeps well under it.
+// Rate limit 600 req / 60 s. 2.0-dev2.9: pacing is 100 ms per
+// endpoint (apiGet) — the old shared 400 ms serialised the
+// parallel legs; 100 ms is still far inside the limit.
 // Signed URLs carry a generous ~13-day expiry, but resolve lazily
 // at download start anyway. The revo *download* endpoint 404s from
 // the VM (unexplained) — it is NOT used; revo is HLS-only here.
@@ -37,8 +44,25 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
         "Referer" to "$ORIGIN/",
     )
 
+    // 2.0-dev2.9: paced PER ENDPOINT at 100 ms, not the shared
+    // 400 ms — the legs below run in parallel, and the old shared
+    // lastCallMs made each async leg wait ~400 ms behind the
+    // previous one (pacing alone was a ~2 s floor on a resolve).
+    // The API allows 600 req / 60 s (10/s); a resolve makes ~7
+    // calls, so 100 ms per endpoint is far inside the limit and
+    // a burst of parallel legs is still far under it.
+    private fun apiPaceKey(path: String): String {
+        val parts = path.split("/").filter { it.isNotBlank() }
+        // /watch/{id}/episode/{n}/<leg> -> one key per leg (gigi /
+        // revo / calm / momo / servers / download), so parallel
+        // legs never wait on each other. Everything else keys on
+        // its first segment (anime / search).
+        if (parts.size >= 2 && parts[0] == "watch") return "watch:" + parts.last().substringBefore("?")
+        return parts.firstOrNull()?.substringBefore("?") ?: "api"
+    }
+
     private suspend fun apiGet(path: String, timeoutMs: Int = 12_000): HttpResponse {
-        pace()
+        paceFor(apiPaceKey(path), 100L)
         return httpGet("$API$path", headers = apiHeaders, timeoutMs = timeoutMs, followRedirects = true)
     }
 
@@ -245,6 +269,140 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
             ?: pool.firstOrNull()
     }
 
+    // 2.0-dev2.9: one leg's failure must not kill its sibling legs
+    // (coroutineScope cancels ALL children when one child throws)
+    // and must never swallow cancellation (the race's 15 s cap
+    // cancels this resolve). Each leg runs through here: network
+    // failures become a null leg, CancellationException propagates.
+    private suspend fun <T> isolateLeg(block: suspend () -> T?): T? {
+        return try {
+            block()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // 2.0-dev2.9: the gigi DDL leg, extracted verbatim from
+    // resolveEpisode so it can run in parallel with the HLS legs.
+    // Returns the probed DDL link, or null when the leg has nothing
+    // (no download entry / non-200). The probe BEFORE the floor
+    // decision is unchanged: a probed height overrides the stated
+    // one, a failed probe keeps the stated quality (or unknown).
+    private suspend fun fetchGigiDdl(
+        id: Long,
+        number: Int,
+        wantDub: Boolean,
+        wanted: Int,
+        floor: Int,
+        quality: String,
+    ): ResolvedLink? {
+        val dlResp = apiGet("/watch/$id/episode/$number/download/gigi")
+        if (dlResp.code != 200) return null
+        val downloads = runCatching { JSONObject(dlResp.text).optJSONArray("downloads") }.getOrNull()
+            ?: return null
+        // (url, stated height or null when the API states none,
+        // API-stated filesize bytes or null). Unstated entries are
+        // kept and the probe decides them, so a good DDL is never
+        // hidden by a missing label.
+        val options = mutableListOf<Triple<String, Int?, Long?>>()
+        for (i in 0 until downloads.length()) {
+            val d = downloads.optJSONObject(i) ?: continue
+            if (d.optBoolean("isDub") != wantDub) continue
+            val url = d.optString("download").takeIf { it.isNotBlank() } ?: continue
+            val res = d.optInt("resolution", 0).takeIf { it > 0 }
+                ?: Regex("""(\d+)""").find(d.optString("resolution"))
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
+                ?: Regex("""(\d+)""").find(d.optString("quality"))
+                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
+            options += Triple(url, res, parseApiFilesizeBytes(d.optString("filesize")))
+        }
+        // Highest stated height at/below wanted; else the lowest
+        // stated height; else an unstated URL — the probe, not the
+        // listing, decides that one.
+        val pick = options.filter { (it.second ?: 0) in 1..wanted }.maxByOrNull { it.second ?: 0 }
+            ?: options.filter { it.second != null }.minByOrNull { it.second ?: 0 }
+            ?: options.firstOrNull()
+            ?: return null
+        val (bestUrl, statedRes, apiFilesizeBytes) = pick
+        val probe = DdlQualityProbe.probeDdlQuality(
+            bestUrl,
+            mapOf("Referer" to ORIGIN),
+            timeoutMs = 4_000,
+        )
+        val realHeight = probe?.height ?: statedRes
+        val ddl = ResolvedLink.DirectMp4(
+            bestUrl, ORIGIN,
+            actualQuality = realHeight,
+            estimatedSizeBytes = probe?.totalBytes ?: apiFilesizeBytes,
+            sizeIsEstimate = false,
+        )
+        if (realHeight == null || realHeight < floor) {
+            DownloadLogs.log(
+                "RESOLVE",
+                "JustAnime gigi: DDL probed ${probe?.height?.let { "${it}p" } ?: "unknown"} (stated ${statedRes?.let { "${it}p" } ?: "none"}) for $quality — below floor or unprovable, kept as a candidate",
+            )
+        }
+        return ddl
+    }
+
+    // 2.0-dev2.9: one HLS leg (revo / calm / momo), extracted
+    // verbatim from the old sequential loop. A leg whose stream
+    // response carries no `headers` is SKIPPED, never fetched
+    // headerless: the segment CDNs 403 every headerless segment
+    // fetch. Null quality is NOT a floor pass — the returned link
+    // is a candidate and the selection below (then the race) decides.
+    private suspend fun fetchHlsLeg(
+        id: Long,
+        number: Int,
+        server: String,
+        wantDub: Boolean,
+        audioKey: String,
+        quality: String,
+    ): ResolvedLink? {
+        val resp = apiGet("/watch/$id/episode/$number/$server")
+        if (resp.code != 200) return null
+        val root = runCatching { JSONObject(resp.text) }.getOrNull() ?: return null
+        val streamObj = root.optJSONObject(audioKey)
+            ?: root.optJSONObject(if (wantDub) "sub" else "dub")
+            ?: return null
+        val stream = parseServerStream(streamObj)
+        if (stream.referer == null && stream.origin == null) return null
+        val picked = pickSource(stream.sources, quality, wantM3u8 = true) ?: return null
+        DownloadLogs.log(
+            "RESOLVE",
+            "JustAnime $server: HLS, offered ${picked.quality?.let { "${it}p" } ?: "?"}, Referer=${stream.referer ?: "none"} Origin=${stream.origin ?: "none"}",
+        )
+        return ResolvedLink.Hls(
+            picked.url,
+            subtitles = stream.subtitles,
+            referer = stream.referer,
+            origin = stream.origin,
+            actualQuality = picked.quality?.takeIf { it > 0 },
+        )
+    }
+
+    // 2.0-dev2.9: gigi's direct MP4s (animegg.org times out from
+    // the VM, but a residential IP may reach them) — the old last
+    // resort, extracted verbatim. Unstated quality (null) is
+    // unknown, not 1080: the race probes it before it can win.
+    private suspend fun fetchGigiDirect(
+        id: Long,
+        number: Int,
+        wantDub: Boolean,
+        audioKey: String,
+        quality: String,
+    ): ResolvedLink? {
+        val resp = apiGet("/watch/$id/episode/$number/gigi")
+        if (resp.code != 200) return null
+        val root = runCatching { JSONObject(resp.text) }.getOrNull()
+        val streamObj = root?.optJSONObject(audioKey)
+        val stream = parseServerStream(streamObj)
+        val picked = pickSource(stream.sources, quality, wantM3u8 = false) ?: return null
+        return ResolvedLink.DirectMp4(picked.url, "https://www.animegg.org/", actualQuality = picked.quality?.takeIf { it > 0 })
+    }
+
     override suspend fun resolveEpisode(
         title: ApiTitle,
         anilistId: Long?,
@@ -287,151 +445,61 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
             // one) for a file that is really 360p, so the stated
             // number is never trusted on its own — the mp4 header
             // is read first (Range request, no full download).
+            // 2.0-dev2.9: the legs below run IN PARALLEL
+            // (coroutineScope + async) instead of sequentially —
+            // the old order (gigi DDL + 4 s probe, then revo, calm,
+            // momo, then gigi-direct, each paced 400 ms) cost
+            // 5.1–8.8 s per resolve on the phone. Selection keeps
+            // the old priority exactly: DDL meeting the floor >
+            // HLS leg meeting the floor (revo > calm > momo) >
+            // gigi-direct meeting the floor > best sub-floor
+            // candidate (highest offered). A leg that throws
+            // returns null through isolateLeg and never kills its
+            // siblings; the race still compares this server's one
+            // returned link against the other servers.
             val wanted = qualityHeight(quality)
             val floor = qualityFloorFor(wanted)
-            var bestCandidate: ResolvedLink? = null
-            var bestCandidateQuality = -1
-            fun consider(candidate: ResolvedLink) {
-                val q = candidate.offeredHeight() ?: 0
-                if (q > bestCandidateQuality) {
-                    bestCandidateQuality = q
-                    bestCandidate = candidate
-                }
-            }
 
-            // DDL first: gigi download via JustAnime's own proxy.
-            // The proxy URL embeds its Referer header; the download
-            // itself is a plain GET of that URL.
-            if (serverHas("gigi")) {
-                val dlResp = apiGet("/watch/$id/episode/$number/download/gigi")
-                if (dlResp.code == 200) {
-                    val downloads = runCatching { JSONObject(dlResp.text).optJSONArray("downloads") }.getOrNull()
-                    if (downloads != null) {
-                        // (url, stated height or null when the API
-                        // states none, API-stated filesize bytes or
-                        // null). Unstated entries used to be
-                        // SKIPPED outright — now they are kept and
-                        // the probe decides them, so a good DDL is
-                        // never hidden by a missing label.
-                        val options = mutableListOf<Triple<String, Int?, Long?>>()
-                        for (i in 0 until downloads.length()) {
-                            val d = downloads.optJSONObject(i) ?: continue
-                            if (d.optBoolean("isDub") != wantDub) continue
-                            val url = d.optString("download").takeIf { it.isNotBlank() } ?: continue
-                            val res = d.optInt("resolution", 0).takeIf { it > 0 }
-                                ?: Regex("""(\d+)""").find(d.optString("resolution"))
-                                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
-                                ?: Regex("""(\d+)""").find(d.optString("quality"))
-                                    ?.groupValues?.getOrNull(1)?.toIntOrNull()
-                            options += Triple(url, res, parseApiFilesizeBytes(d.optString("filesize")))
-                        }
-                        // Highest stated height at/below wanted;
-                        // else the lowest stated height; else an
-                        // unstated URL — the probe, not the listing,
-                        // decides that one.
-                        val pick = options.filter { (it.second ?: 0) in 1..wanted }.maxByOrNull { it.second ?: 0 }
-                            ?: options.filter { it.second != null }.minByOrNull { it.second ?: 0 }
-                            ?: options.firstOrNull()
-                        if (pick != null) {
-                            val (bestUrl, statedRes, apiFilesizeBytes) = pick
-                            // Probe BEFORE the floor decision: a
-                            // probed height overrides the stated one
-                            // (a lying 1080 label loses to a real
-                            // 360 header). Bounded 4 s; a failed
-                            // probe keeps the stated quality (or
-                            // unknown) and the race re-probes / the
-                            // post-download check stays the backstop.
-                            // The probe's exact total size rides
-                            // along for the sheet, free. When the
-                            // probe returns no total, the API's own
-                            // "filesize" label for THIS file is the
-                            // fallback (exact, not an estimate) —
-                            // the probe total always wins when it
-                            // exists.
-                            val probe = DdlQualityProbe.probeDdlQuality(
-                                bestUrl,
-                                mapOf("Referer" to ORIGIN),
-                                timeoutMs = 4_000,
-                            )
-                            val realHeight = probe?.height ?: statedRes
-                            val ddl = ResolvedLink.DirectMp4(
-                                bestUrl, ORIGIN,
-                                actualQuality = realHeight,
-                                estimatedSizeBytes = probe?.totalBytes ?: apiFilesizeBytes,
-                                sizeIsEstimate = false,
-                            )
-                            if (realHeight != null && realHeight >= floor) return ddl
-                            DownloadLogs.log(
-                                "RESOLVE",
-                                "JustAnime gigi: DDL probed ${probe?.height?.let { "${it}p" } ?: "unknown"} (stated ${statedRes?.let { "${it}p" } ?: "none"}) for $quality — below floor or unprovable, trying HLS legs",
-                            )
-                            consider(ddl)
-                        }
-                    }
+            // All legs race each other: the servers call above is
+            // the only sequential step (the legs depend on it).
+            // Per-endpoint 100 ms pacing (apiGet) means the
+            // parallel legs don't serialise on the pace delay.
+            val legs = coroutineScope {
+                val jobs = mutableListOf<Deferred<Pair<String, ResolvedLink?>>>()
+                if (serverHas("gigi")) {
+                    jobs += async { "gigi-ddl" to isolateLeg { fetchGigiDdl(id, number, wantDub, wanted, floor, quality) } }
                 }
+                for (server in listOf("revo", "calm", "momo")) {
+                    if (!serverHas(server)) continue
+                    jobs += async { server to isolateLeg { fetchHlsLeg(id, number, server, wantDub, audioKey, quality) } }
+                }
+                if (serverHas("gigi")) {
+                    jobs += async { "gigi-direct" to isolateLeg { fetchGigiDirect(id, number, wantDub, audioKey, quality) } }
+                }
+                jobs.awaitAll().toMap()
             }
-
-            // HLS legs, in order: revo (verified playlist + key),
-            // calm (verified, unencrypted), momo (VM-gated, last).
-            // A leg whose stream response carries no `headers` is
-            // SKIPPED, never fetched headerless: the segment CDNs
-            // 403 every headerless segment fetch, so trying it only
-            // burns the job. If every leg lacks headers, the loop
-            // falls through to the honest Failed below.
+            val linkFor = { leg: String -> legs[leg] }
+            // 1. DDL meeting the floor wins (DDL-first, as before).
+            linkFor("gigi-ddl")?.takeIf { (it.offeredHeight() ?: 0) >= floor }?.let { return it }
+            // 2. First HLS leg meeting the floor, revo > calm > momo.
             for (server in listOf("revo", "calm", "momo")) {
-                if (!serverHas(server)) continue
-                val resp = apiGet("/watch/$id/episode/$number/$server")
-                if (resp.code != 200) continue
-                val root = runCatching { JSONObject(resp.text) }.getOrNull() ?: continue
-                val streamObj = root.optJSONObject(audioKey)
-                    ?: root.optJSONObject(if (wantDub) "sub" else "dub")
-                    ?: continue
-                val stream = parseServerStream(streamObj)
-                if (stream.referer == null && stream.origin == null) continue
-                val picked = pickSource(stream.sources, quality, wantM3u8 = true) ?: continue
-                DownloadLogs.log(
-                    "RESOLVE",
-                    "JustAnime $server: HLS, offered ${picked.quality?.let { "${it}p" } ?: "?"}, Referer=${stream.referer ?: "none"} Origin=${stream.origin ?: "none"}",
-                )
-                val hls = ResolvedLink.Hls(
-                    picked.url,
-                    subtitles = stream.subtitles,
-                    referer = stream.referer,
-                    origin = stream.origin,
-                    actualQuality = picked.quality?.takeIf { it > 0 },
-                )
-                // Null quality is NOT a floor pass here: an unstated
-                // HLS leg is considered (race parks unknowns below
-                // known winners) but never returns early as a
-                // proven win — HlsDownloader re-parses the master
-                // and enforces the floor before any segment lands.
-                if (picked.quality != null && picked.quality >= floor) return hls
-                consider(hls)
+                linkFor(server)?.takeIf { (it.offeredHeight() ?: 0) >= floor }?.let { return it }
             }
-
-            // Last resort: gigi's direct MP4s (animegg.org times out
-            // from the VM, but a residential IP may reach them).
-            if (serverHas("gigi")) {
-                val resp = apiGet("/watch/$id/episode/$number/gigi")
-                if (resp.code == 200) {
-                    val root = runCatching { JSONObject(resp.text) }.getOrNull()
-                    val streamObj = root?.optJSONObject(audioKey)
-                    val stream = parseServerStream(streamObj)
-                    val picked = pickSource(stream.sources, quality, wantM3u8 = false)
-                    if (picked != null) {
-                        // Unstated quality (null) is unknown, not
-                        // 1080: the race probes it before it can win.
-                        val ddl = ResolvedLink.DirectMp4(picked.url, "https://www.animegg.org/", actualQuality = picked.quality?.takeIf { it > 0 })
-                        if (picked.quality != null && picked.quality >= floor) return ddl
-                        consider(ddl)
-                    }
-                }
-            }
-            // Nothing met the floor: return the best sub-floor
-            // candidate (highest offered quality) so the race can
-            // compare it against other servers instead of failing
-            // outright — the race accepts it only as a downgrade.
-            bestCandidate?.let { return it }
+            // 3. gigi-direct meeting the floor.
+            linkFor("gigi-direct")?.takeIf { (it.offeredHeight() ?: 0) >= floor }?.let { return it }
+            // 4. Nothing met the floor: the best sub-floor candidate
+            // (highest offered quality; first among ties, in leg
+            // priority order) so the race can compare it against
+            // other servers instead of failing outright — the race
+            // accepts it only as a downgrade.
+            listOfNotNull(
+                linkFor("gigi-ddl"),
+                linkFor("revo"),
+                linkFor("calm"),
+                linkFor("momo"),
+                linkFor("gigi-direct"),
+            ).maxByOrNull { it.offeredHeight() ?: 0 }
+                ?.let { return it }
             ResolvedLink.Failed("No working stream found on this server for this episode.")
         } catch (e: Exception) {
             ResolvedLink.Failed(friendlyDownloadError(e))
