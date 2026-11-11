@@ -79,10 +79,11 @@ import androidx.compose.ui.unit.sp
 //  5. DEDUP matches: shonenX dedups in one pass with a map keyed
 //     by episode number; Anipull's distinctBy { it.number } is the
 //     same idea and is kept.
-// Default range is All — shonenX parity (chunk 0). shonenX only
+// Default range is 1–100 (JS, 2.0-dev2.5 — reversed the dev1.9
+// default-All choice). shonenX defaults to All (chunk 0) and only
 // auto-jumps to a chunk when there is a watched/current episode;
 // Anipull is a downloader with no watched progress, so there is
-// nothing to auto-jump to.
+// nothing to auto-jump to — the default is the first chunk instead.
 
 // One entry in the episode range selector. min/max null = All.
 data class EpisodeRange(val label: String, val min: Int?, val max: Int?, val count: Int)

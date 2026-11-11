@@ -513,7 +513,14 @@ internal class PaheEpisodeSource(
             for (link in orderedLinks) {
                 val mp4 = tryDdl(link) ?: continue
                 val referer = link // download GET needs the pahe.win page as Referer.
-                return ResolvedLink.DirectMp4(mp4, referer)
+                // 2.0-dev2.5 DEFECT 3: tag the offered quality —
+                // the DDL is the chosen variant's file, so its
+                // resolution is what will land on disk. (DDL and
+                // HLS here share the same variant, so there is no
+                // cross-quality ordering issue inside Pahe; the
+                // race still judges this link against other
+                // servers by its offered height.)
+                return ResolvedLink.DirectMp4(mp4, referer, actualQuality = chosen?.resolution)
             }
             // HLS fallback: Kwik m3u8 via the chosen (or first) button.
             val kwikUrl = chosen?.kwikUrl ?: variants.firstOrNull()?.kwikUrl
@@ -522,7 +529,7 @@ internal class PaheEpisodeSource(
                 ?: return ResolvedLink.Failed("Could not reach the stream host — try again.")
             val m3u8 = extractM3u8(kwikHtml)
                 ?: return ResolvedLink.Failed("Could not extract a stream link — the source may have changed its player.")
-            ResolvedLink.Hls(m3u8)
+            ResolvedLink.Hls(m3u8, actualQuality = chosen?.resolution ?: variants.firstOrNull()?.resolution)
         } catch (e: Exception) {
             ResolvedLink.Failed(friendlyDownloadError(e))
         }

@@ -233,6 +233,28 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                 return s.optBoolean(audioKey, false)
             }
 
+            // 2.0-dev2.5 DEFECT 3: quality-aware legs. A sub-floor
+            // DDL must NOT win just by returning first — a 360p
+            // DDL used to beat a 1080p HLS leg. So collect
+            // candidates instead of returning: a DDL that meets
+            // the floor returns immediately (DDL-first is kept);
+            // otherwise HLS legs are tried for one that meets it;
+            // only when nothing meets the floor is the best
+            // (highest) sub-floor candidate returned, tagged with
+            // its actual quality so the race can still prefer a
+            // better server and the file is named honestly.
+            val wanted = qualityHeight(quality)
+            val floor = qualityFloorFor(wanted)
+            var bestCandidate: ResolvedLink? = null
+            var bestCandidateQuality = -1
+            fun consider(candidate: ResolvedLink) {
+                val q = candidate.offeredHeight() ?: 0
+                if (q > bestCandidateQuality) {
+                    bestCandidateQuality = q
+                    bestCandidate = candidate
+                }
+            }
+
             // DDL first: gigi download via JustAnime's own proxy.
             // The proxy URL embeds its Referer header; the download
             // itself is a plain GET of that URL.
@@ -241,7 +263,6 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                 if (dlResp.code == 200) {
                     val downloads = runCatching { JSONObject(dlResp.text).optJSONArray("downloads") }.getOrNull()
                     if (downloads != null) {
-                        val wanted = qualityHeight(quality)
                         var bestUrl: String? = null
                         var bestRes = -1
                         for (i in 0 until downloads.length()) {
@@ -267,9 +288,12 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                                     bestUrl = url
                                 }
                             }
+                            if (bestUrl != null) bestRes = lowest
                         }
-                        if (bestUrl != null) {
-                            return ResolvedLink.DirectMp4(bestUrl, ORIGIN)
+                        if (bestUrl != null && bestRes > 0) {
+                            val ddl = ResolvedLink.DirectMp4(bestUrl, ORIGIN, actualQuality = bestRes)
+                            if (bestRes >= floor) return ddl
+                            consider(ddl)
                         }
                     }
                 }
@@ -295,14 +319,17 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                 val picked = pickSource(stream.sources, quality, wantM3u8 = true) ?: continue
                 DownloadLogs.log(
                     "RESOLVE",
-                    "JustAnime $server: HLS, Referer=${stream.referer ?: "none"} Origin=${stream.origin ?: "none"}",
+                    "JustAnime $server: HLS, offered ${picked.quality}p, Referer=${stream.referer ?: "none"} Origin=${stream.origin ?: "none"}",
                 )
-                return ResolvedLink.Hls(
+                val hls = ResolvedLink.Hls(
                     picked.url,
                     subtitles = stream.subtitles,
                     referer = stream.referer,
                     origin = stream.origin,
+                    actualQuality = picked.quality.takeIf { it > 0 },
                 )
+                if (picked.quality >= floor) return hls
+                consider(hls)
             }
 
             // Last resort: gigi's direct MP4s (animegg.org times out
@@ -315,10 +342,17 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                     val stream = parseServerStream(streamObj)
                     val picked = pickSource(stream.sources, quality, wantM3u8 = false)
                     if (picked != null) {
-                        return ResolvedLink.DirectMp4(picked.url, "https://www.animegg.org/")
+                        val ddl = ResolvedLink.DirectMp4(picked.url, "https://www.animegg.org/", actualQuality = picked.quality.takeIf { it > 0 })
+                        if (picked.quality >= floor) return ddl
+                        consider(ddl)
                     }
                 }
             }
+            // Nothing met the floor: return the best sub-floor
+            // candidate (highest offered quality) so the race can
+            // compare it against other servers instead of failing
+            // outright — the race accepts it only as a downgrade.
+            bestCandidate?.let { return it }
             ResolvedLink.Failed("No working stream found on this server for this episode.")
         } catch (e: Exception) {
             ResolvedLink.Failed(friendlyDownloadError(e))

@@ -103,12 +103,22 @@ object HlsDownloader {
     // 2.0-dev1.6: `audio` prefers a variant whose AUDIO group
     // contains a track in the requested language (Sub -> Japanese,
     // Dub -> English); no match falls back to the old behaviour.
+    // 2.0-dev2.5 DEFECT 3: returns the picked variant's height
+    // too — the caller MUST know what was actually picked. A
+    // height of null means the master was itself a media playlist
+    // (or carried no RESOLUTION): unknown, not low. The old
+    // silent fallthrough (360p taken when only 360p exists) is
+    // still the pick, but it is no longer silent: download()
+    // throws QualityMismatchException when the pick is below the
+    // requested floor.
+    data class PickedVariant(val url: String, val height: Int?)
+
     internal fun parseMasterPlaylist(
         text: String,
         baseUrl: String,
         requestedQuality: String,
         audio: String = "Sub",
-    ): String {
+    ): PickedVariant {
         val wanted = Regex("""(\d+)""").find(requestedQuality)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1080
         val audioGroups = parseAudioGroups(text)
         val lines = text.lineSequence().map { it.trim() }.toList()
@@ -126,7 +136,7 @@ object HlsDownloader {
             }
             i++
         }
-        if (variants.isEmpty()) return baseUrl
+        if (variants.isEmpty()) return PickedVariant(baseUrl, null)
         val withHeight = variants.filter { it.height > 0 }
         val pool0 = if (withHeight.isNotEmpty()) withHeight else variants
         // Prefer variants whose audio group carries the requested
@@ -140,7 +150,7 @@ object HlsDownloader {
             .maxByOrNull { it.height * 1_000_000L + it.bandwidth }
             ?: pool.minByOrNull { it.height * 1_000_000L + it.bandwidth }
             ?: variants.last()
-        return picked.uri
+        return PickedVariant(picked.uri, picked.height.takeIf { it > 0 })
     }
 
     // Media playlist: segments in order, #EXT-X-KEY AES-128 state
@@ -215,16 +225,30 @@ object HlsDownloader {
     // onProgress is throttled to ~every 500ms.
     // Returns the subtitle tracks found in the master playlist's
     // #EXT-X-MEDIA SUBTITLES groups (empty when none) — the caller
-    // downloads them as sidecars. `audio` steers variant picking
-    // toward the requested language. `keyOverrideB64` /
-    // `ivOverrideB64` (base64 of 16 raw bytes) replace segment-key
-    // fetching entirely when set: the decoded key is used for ALL
-    // segment keys, and the decoded IV is used only when a playlist
-    // KEY tag has no explicit IV. `referer` is sent on playlist /
-    // segment / key fetches when the upstream requires it. `origin`
-    // is sent alongside it when the upstream requires an Origin too
-    // (JustAnime's calm leg needs both on segments). Every fetch in
-    // this path follows redirects (dev1.9 hypothesis left open).
+    // downloads them as sidecars — plus the picked variant's height
+    // (null when the master was itself a media playlist). `audio`
+    // steers variant picking toward the requested language.
+    // `keyOverrideB64` / `ivOverrideB64` (base64 of 16 raw bytes)
+    // replace segment-key fetching entirely when set: the decoded
+    // key is used for ALL segment keys, and the decoded IV is used
+    // only when a playlist KEY tag has no explicit IV. `referer`
+    // is sent on playlist / segment / key fetches when the upstream
+    // requires it. `origin` is sent alongside it when the upstream
+    // requires an Origin too (JustAnime's calm leg needs both on
+    // segments). Every fetch in this path follows redirects
+    // (dev1.9 hypothesis left open).
+    // 2.0-dev2.5 DEFECT 5: onProgress(0, -1, 0) is emitted at
+    // every silent phase (master fetch, variant fetch, init
+    // segment, keys, remux) so the UI shows "Connecting…" instead
+    // of a silent 0% before the first segment lands.
+    // 2.0-dev2.5 DEFECT 3: a picked variant below the requested
+    // quality's floor throws QualityMismatchException — the job
+    // fails honestly instead of completing a low-quality file.
+    data class HlsDownloadResult(
+        val subtitles: List<SubtitleTrack>,
+        val actualHeight: Int?,
+    )
+
     suspend fun download(
         masterUrl: String,
         outputFile: File,
@@ -240,7 +264,7 @@ object HlsDownloader {
         ivOverrideB64: String? = null,
         referer: String? = null,
         origin: String? = null,
-    ): List<SubtitleTrack> = withContext(Dispatchers.IO) {
+    ): HlsDownloadResult = withContext(Dispatchers.IO) {
         val overrideKey: ByteArray? = keyOverrideB64?.let {
             runCatching { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }.getOrNull()
                 ?.takeIf { bytes -> bytes.size == 16 }
@@ -275,18 +299,36 @@ object HlsDownloader {
         // only — never query params / signatures.
         val hlsStartedMs = System.currentTimeMillis()
         DownloadLogs.log("HLS", "start: master=${DownloadLogs.sanitizeUrl(masterUrl)} quality=$quality audio=$audio referer=${referer ?: "none"} origin=${origin ?: "none"}")
+        // 2.0-dev2.5 DEFECT 5: connecting phase — no silent 0%.
+        onProgress(0, -1, 0.0)
         val masterText = EngineHttp.requestWithRetry(masterUrl, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true).let {
             DownloadLogs.log("HLS", "master playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
             if (it.code != 200) throw java.io.IOException("Playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
             it.text
         }
         val subtitleTracks = parseExtXMedia(masterText, masterUrl).toMutableList()
-        val mediaUrl = parseMasterPlaylist(masterText, masterUrl, quality, audio)
-        DownloadLogs.log("HLS", "variant: ${DownloadLogs.sanitizeUrl(mediaUrl)}${if (mediaUrl == masterUrl) " (master is media playlist)" else ""}")
-        val mediaText = if (mediaUrl == masterUrl) masterText else EngineHttp.requestWithRetry(mediaUrl, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true).let {
-            DownloadLogs.log("HLS", "variant playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
-            if (it.code != 200) throw java.io.IOException("Variant playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
-            it.text
+        val pickedVariant = parseMasterPlaylist(masterText, masterUrl, quality, audio)
+        val mediaUrl = pickedVariant.url
+        val pickedHeight = pickedVariant.height
+        // 2.0-dev2.5 DEFECT 3: the picked variant's height is now
+        // known — a pick below the floor fails here, before a
+        // single segment is downloaded, instead of completing a
+        // mislabelled low-quality file. Unknown height (null) is
+        // not a failure: the post-download probe decides those.
+        val requestedHeight = qualityHeight(quality)
+        if (pickedHeight != null && pickedHeight < qualityFloorFor(requestedHeight)) {
+            DownloadLogs.log("HLS", "QUALITY MISMATCH: master offers only ${pickedHeight}p for $quality (floor ${qualityFloorFor(requestedHeight)}p)")
+            throw QualityMismatchException("Only ${pickedHeight}p is available for this episode — try a lower quality.")
+        }
+        DownloadLogs.log("HLS", "variant: ${DownloadLogs.sanitizeUrl(mediaUrl)}${if (mediaUrl == masterUrl) " (master is media playlist)" else ""} picked=${pickedHeight ?: "?"}p requested=$quality")
+        val mediaText = if (mediaUrl == masterUrl) masterText else run {
+            // 2.0-dev2.5 DEFECT 5: variant-fetch phase, still connecting.
+            onProgress(0, -1, 0.0)
+            EngineHttp.requestWithRetry(mediaUrl, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true).let {
+                DownloadLogs.log("HLS", "variant playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
+                if (it.code != 200) throw java.io.IOException("Variant playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
+                it.text
+            }
         }
         if (mediaUrl != masterUrl) {
             for (sub in parseExtXMedia(mediaText, mediaUrl)) {
@@ -307,6 +349,9 @@ object HlsDownloader {
         // Init segment (#EXT-X-MAP) first, if present.
         val initFile = File(tempDir, "init.ts")
         if (playlist.initSegmentUri != null && !initFile.exists()) {
+            // 2.0-dev2.5 DEFECT 5: still connecting — keep the
+            // phase callback going through init + key fetches.
+            onProgress(0, -1, 0.0)
             val initResp = EngineHttp.requestWithRetry(playlist.initSegmentUri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true)
             DownloadLogs.log("HLS", "init segment: HTTP ${initResp.code}, ${initResp.bytes.size} bytes")
             if (initResp.code != 200) throw java.io.IOException("Init segment fetch failed (HTTP ${initResp.code}) — retry the download.")
@@ -418,7 +463,7 @@ object HlsDownloader {
             tempDir.deleteRecursively()
         } catch (_: Exception) {
         }
-        subtitleTracks
+        HlsDownloadResult(subtitleTracks, pickedHeight)
     }
 
     // Concatenate init + decrypted segments into one TS, then remux

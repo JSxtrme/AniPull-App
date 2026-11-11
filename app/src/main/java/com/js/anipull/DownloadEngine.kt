@@ -2,6 +2,8 @@ package com.js.anipull
 
 import android.content.Context
 import android.content.Intent
+import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -74,9 +76,35 @@ data class DownloadJob(
     val anilistId: Long? = null,
     val fromMediaIndex: Boolean = false,
     val listServer: Int? = null,
+    // 2.0-dev2.5: the ACTUAL quality of the delivered file
+    // ("720p"), when known — from the resolving link's offered
+    // height, the HLS variant pick, or the post-download
+    // MediaExtractor probe. `quality` above stays the REQUESTED
+    // quality. Null = unknown (old jobs, or a resolver that never
+    // stated one). The file is named from this when set, never
+    // from the requested quality.
+    val actualQuality: String? = null,
 )
 
 enum class JobState { QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELLED }
+
+// 2.0-dev2.5 DEFECT 2: progress == -1 means INDETERMINATE —
+// bytes are flowing (or the job is in its connecting /
+// playlist-fetch phase) but the total size is unknown, so no %
+// exists. It must NEVER be rendered as "-1%" or as a determinate
+// "0%".
+// TODO(COORDINATOR): App.kt must render progress < 0 as
+// indeterminate in BOTH places that read job.progress today —
+// DownloadJobRow (~"Downloading -> ${job.progress}% · … MB/s"
+// and the progress bar, which already coerces to 0) and
+// jobStateText (episode row, "Downloading -> ${job.progress}%").
+// Suggested text: "X MB · Y MB/s" (job.downloadedBytes /
+// job.speedMBps) with no %, bar left at 0/indeterminate. The
+// notification already handles -1 (Notifications.kt
+// showJobProgress). No engine change is needed beyond this
+// sentinel; do NOT "fix" it by clamping progress back to 0 in
+// App.kt — that reintroduces the frozen-0% defect.
+internal const val PROGRESS_INDETERMINATE = -1
 
 object DownloadEngine {
     private const val PREFS_JOBS = "anipull_downloads"
@@ -172,6 +200,9 @@ object DownloadEngine {
         job.anilistId?.let { put("anilist_id", it) }
         if (job.fromMediaIndex) put("from_media_index", true)
         job.listServer?.let { put("list_server", it) }
+        // 2.0-dev2.5: actual delivered quality, so a completed
+        // job keeps its honest name across restarts.
+        job.actualQuality?.let { put("actual_quality", it) }
         links[job.id]?.let { link ->
             val linkSubs: List<SubtitleTrack> = when (link) {
                 is ResolvedLink.DirectMp4 -> link.subtitles
@@ -194,6 +225,7 @@ object DownloadEngine {
                     put("link_type", "mp4")
                     put("link_url", link.url)
                     put("link_referer", link.referer)
+                    link.actualQuality?.let { put("link_quality", it) }
                 }
                 is ResolvedLink.Hls -> {
                     put("link_type", "hls")
@@ -202,6 +234,7 @@ object DownloadEngine {
                     link.ivOverrideB64?.let { put("link_iv", it) }
                     link.referer?.let { put("link_referer", it) }
                     link.origin?.let { put("link_origin", it) }
+                    link.actualQuality?.let { put("link_quality", it) }
                 }
                 else -> {}
             }
@@ -226,8 +259,9 @@ object DownloadEngine {
     private fun jsonToJob(obj: JSONObject): DownloadJob? {
         return try {
             val id = obj.optString("id").takeIf { it.isNotBlank() } ?: return null
+            val linkQuality = obj.optInt("link_quality", 0).takeIf { it > 0 }
             when (obj.optString("link_type")) {
-                "mp4" -> links[id] = ResolvedLink.DirectMp4(obj.optString("link_url"), obj.optString("link_referer"), subsFromJson(obj))
+                "mp4" -> links[id] = ResolvedLink.DirectMp4(obj.optString("link_url"), obj.optString("link_referer"), subsFromJson(obj), actualQuality = linkQuality)
                 "hls" -> links[id] = ResolvedLink.Hls(
                     obj.optString("link_url"),
                     subsFromJson(obj),
@@ -235,6 +269,7 @@ object DownloadEngine {
                     obj.optString("link_iv").takeIf { it.isNotBlank() },
                     obj.optString("link_referer").takeIf { it.isNotBlank() },
                     obj.optString("link_origin").takeIf { it.isNotBlank() },
+                    actualQuality = linkQuality,
                 )
             }
             DownloadJob(
@@ -258,6 +293,7 @@ object DownloadEngine {
                 anilistId = obj.optLong("anilist_id", -1).takeIf { it > 0 },
                 fromMediaIndex = obj.optBoolean("from_media_index", false),
                 listServer = obj.optInt("list_server", -1).takeIf { it in 1..9 },
+                actualQuality = obj.optString("actual_quality").takeIf { it.isNotBlank() },
             )
         } catch (_: Exception) {
             null
@@ -300,7 +336,10 @@ object DownloadEngine {
             // A crash mid-download leaves DOWNLOADING behind; re-queue
             // it (DDL resumes via Range, HLS via its segment index —
             // an expired HLS link fails fast with "retry" instead).
-            if (it.state == JobState.DOWNLOADING) it.copy(state = JobState.QUEUED, speedMBps = 0.0) else it
+            // 2.0-dev2.5: a re-queued job also drops a stale
+            // INDETERMINATE progress back to 0 — a queued job has
+            // no bytes flowing yet, so -1 would be a lie.
+            if (it.state == JobState.DOWNLOADING) it.copy(state = JobState.QUEUED, speedMBps = 0.0, progress = 0) else it
         }
         _jobs.value = restored
         DownloadLogs.log("ENGINE", "init: restored ${restored.size} job(s), ${restored.count { it.state == JobState.QUEUED }} queued")
@@ -385,6 +424,12 @@ object DownloadEngine {
                 anilistId = anilistId,
                 fromMediaIndex = fromMediaIndex,
                 listServer = listServer,
+                // 2.0-dev2.5 DEFECT 3: record what the link actually
+                // offers at enqueue time (DDL) — the file is named
+                // from this, and the Downloads chip can read it.
+                // HLS links carry null here (master not yet parsed);
+                // runJob fills it in from the variant pick / probe.
+                actualQuality = link.offeredHeight()?.let { "${it}p" },
             )
             links[id] = link
             controls[id] = Control()
@@ -397,7 +442,9 @@ object DownloadEngine {
             is ResolvedLink.Hls -> "HLS master"
             else -> "failed-link"
         }
-        DownloadLogs.logJob(id, "ENGINE", "enqueue: ${title.title} E${episode.number} $quality $audio, server=$serverNumber, link=$linkKind, wifiOverride=$wifiOverride")
+        DownloadLogs.logJob(id, "ENGINE", "enqueue: ${title.title} E${episode.number} $quality $audio, server=$serverNumber, link=$linkKind, wifiOverride=$wifiOverride" + (link.offeredHeight()?.let { offered ->
+            if (offered < qualityHeight(quality)) " — DOWNGRADE: link offers only ${offered}p for requested $quality" else ""
+        } ?: ""))
         try {
             context.startForegroundService(Intent(context, DownloadService::class.java))
             DownloadLogs.logJob(id, "ENGINE", "foreground service start requested")
@@ -428,7 +475,10 @@ object DownloadEngine {
                 // it, a Wi-Fi-gated job re-queues, runJob pauses it
                 // again, and Resume can never work on mobile data.
                 // Persisted, so the consent survives a restart.
-                job.copy(state = JobState.QUEUED, error = null, speedMBps = 0.0, wifiOverride = true)
+                // 2.0-dev2.5: also reset a stale INDETERMINATE
+                // progress — the re-queued job shows 0% until its
+                // first real progress report lands.
+                job.copy(state = JobState.QUEUED, error = null, speedMBps = 0.0, wifiOverride = true, progress = 0)
             } else job
         }, persistNow = true)
         pump()
@@ -589,7 +639,18 @@ object DownloadEngine {
                 return
             }
             updateJob(id, { it.copy(state = JobState.DOWNLOADING, error = null) }, persistNow = true)
-            val fileName = fileNameFor(job.animeTitle, job.episodeNumber, job.quality, job.audio)
+            // 2.0-dev2.5 DEFECT 5: post-resolve silence. The first
+            // progress callback used to arrive only with the first
+            // segment / first DDL chunk — until then the UI sat at
+            // a silent 0%. Emit the connecting phase immediately:
+            // INDETERMINATE, no fake %.
+            reportProgress(id, 0, -1, 0.0)
+            // 2.0-dev2.5 DEFECT 3: name the file from the ACTUAL
+            // quality the link offers when it is known (DDL);
+            // HLS names from the requested quality until the
+            // variant pick lands, then runJob renames below.
+            val namingQuality = link.offeredHeight()?.let { "${it}p" } ?: job.quality
+            val fileName = fileNameFor(job.animeTitle, job.episodeNumber, namingQuality, job.audio)
             val dir = downloadDir(ctx, job.animeTitle)
             dir.mkdirs()
             val dest = resolveDestination(ctx, job, dir, fileName)
@@ -597,6 +658,7 @@ object DownloadEngine {
             val speedLimit = speedLimitMbps(ctx)
             val segmentWorkers = (parallelLimit(ctx) * 2).coerceIn(2, 10)
             var hlsSubs: List<SubtitleTrack> = emptyList()
+            var hlsActualHeight: Int? = null
             try {
                 when (link) {
                     is ResolvedLink.DirectMp4 -> downloadMp4(
@@ -608,36 +670,82 @@ object DownloadEngine {
                         speedLimitMBps = speedLimit,
                         onProgress = { bytes, total, speed -> reportProgress(id, bytes, total, speed) },
                     )
-                    is ResolvedLink.Hls -> hlsSubs = HlsDownloader.download(
-                        masterUrl = link.masterPlaylistUrl,
-                        outputFile = dest.workFile,
-                        tempDir = dest.tempDir,
-                        quality = job.quality,
-                        segmentWorkers = segmentWorkers,
-                        speedLimitMBps = speedLimit,
-                        isCancelled = { control.cancelled },
-                        isPaused = { control.paused },
-                        onProgress = { bytes, total, speed -> reportProgress(id, bytes, total, speed) },
-                        audio = job.audio,
-                        keyOverrideB64 = link.keyOverrideB64,
-                        ivOverrideB64 = link.ivOverrideB64,
-                        referer = link.referer,
-                        origin = link.origin,
-                    )
+                    is ResolvedLink.Hls -> {
+                        val hlsResult = HlsDownloader.download(
+                            masterUrl = link.masterPlaylistUrl,
+                            outputFile = dest.workFile,
+                            tempDir = dest.tempDir,
+                            quality = job.quality,
+                            segmentWorkers = segmentWorkers,
+                            speedLimitMBps = speedLimit,
+                            isCancelled = { control.cancelled },
+                            isPaused = { control.paused },
+                            onProgress = { bytes, total, speed -> reportProgress(id, bytes, total, speed) },
+                            audio = job.audio,
+                            keyOverrideB64 = link.keyOverrideB64,
+                            ivOverrideB64 = link.ivOverrideB64,
+                            referer = link.referer,
+                            origin = link.origin,
+                        )
+                        hlsSubs = hlsResult.subtitles
+                        hlsActualHeight = hlsResult.actualHeight
+                    }
                     is ResolvedLink.Failed -> throw java.io.IOException(link.message)
                 }
                 if (control.cancelled) throw CancellationException("cancelled")
+                // 2.0-dev2.5 DEFECT 3 — verify what actually
+                // arrived. MediaExtractor reads the delivered
+                // file's real height; that is ground truth, ahead
+                // of the offered/variant heights. A file below
+                // the requested floor (e.g. 360p delivered for a
+                // 1080p request, floor 720p) is NOT a completion:
+                // it fails honestly so Retry re-resolves. An
+                // unreadable file (no video track / extractor
+                // error) is NOT failed on — verification that
+                // can't run must not kill a good download.
+                val deliveredHeight = probeVideoHeight(dest.workFile)
+                val requestedHeight = qualityHeight(job.quality)
+                if (deliveredHeight != null && deliveredHeight < qualityFloorFor(requestedHeight)) {
+                    DownloadLogs.logJob(id, "ENGINE", "QUALITY MISMATCH: delivered ${deliveredHeight}p, requested ${job.quality} (floor ${qualityFloorFor(requestedHeight)}p) — failing, not completing")
+                    try {
+                        dest.workFile.delete()
+                    } catch (_: Exception) {
+                    }
+                    throw QualityMismatchException("Downloaded ${deliveredHeight}p, not ${job.quality} — tap Retry.")
+                }
+                val actualHeight = deliveredHeight ?: hlsActualHeight ?: link.offeredHeight()
+                val actualLabel = actualHeight?.let { "${it}p" } ?: job.quality
+                // 2.0-dev2.5 DEFECT 3 — name the file from the
+                // ACTUAL quality. In SAF mode the staged file is
+                // copied under the final name, so only the name
+                // passed to finish() changes. In file mode the
+                // work file IS the final file, so rename it.
+                var finalFileName = fileName
+                if (actualLabel != namingQuality) {
+                    val renamed = fileNameFor(job.animeTitle, job.episodeNumber, actualLabel, job.audio)
+                    if (safTreeUri(ctx) == null) {
+                        val target = File(dest.workFile.parentFile, renamed)
+                        if (dest.workFile.renameTo(target)) {
+                            dest.workFile = target
+                            DownloadLogs.logJob(id, "ENGINE", "renamed to actual quality: $fileName -> $renamed")
+                        } else {
+                            DownloadLogs.logJob(id, "ENGINE", "rename to actual quality FAILED ($fileName -> $renamed) — keeping requested name")
+                        }
+                    }
+                    finalFileName = renamed
+                }
                 // SAF mode: copy the finished file into the chosen tree.
                 // Size is read BEFORE finish(): a successful SAF copy
                 // deletes the staged file, so reading after would be 0.
                 val finishedBytes = dest.workFile.length()
-                val finalPath = dest.finish(ctx, fileName)
-                DownloadLogs.logJob(id, "ENGINE", "COMPLETED: ${finishedBytes / 1024} KB -> $finalPath")
+                val finalPath = dest.finish(ctx, finalFileName)
+                DownloadLogs.logJob(id, "ENGINE", "COMPLETED: ${finishedBytes / 1024} KB -> $finalPath (requested ${job.quality}, delivered $actualLabel)")
                 updateJob(id, {
                     it.copy(
                         state = JobState.COMPLETED, progress = 100,
                         downloadedBytes = it.totalBytes.coerceAtLeast(it.downloadedBytes),
                         speedMBps = 0.0, error = null, filePath = finalPath,
+                        actualQuality = actualLabel,
                     )
                 }, persistNow = true)
                 // Subtitle sidecars (best-effort): union of the
@@ -666,10 +774,18 @@ object DownloadEngine {
                             (link as? ResolvedLink.Hls)?.origin
                                 ?.takeIf { it.isNotBlank() }?.let { put("Origin", it) }
                         }
-                        writeSubtitleSidecars(ctx, job, fileName, finalPath, allSubs, subHeaders)
+                        writeSubtitleSidecars(ctx, job, finalFileName, finalPath, allSubs, subHeaders)
                     }
                 } catch (_: Exception) {
                 }
+            } catch (e: QualityMismatchException) {
+                // 2.0-dev2.5 DEFECT 3: no auto-retry — the same
+                // link would deliver the same low file again.
+                // Final FAILED with the honest message; the user's
+                // Retry re-resolves (possibly to another server).
+                DownloadLogs.logJob(id, "ENGINE", "FAILED (quality): ${e.message ?: ""}")
+                deletePartials(ctx, job)
+                updateJob(id, { it.copy(state = JobState.FAILED, error = e.message, speedMBps = 0.0) }, persistNow = true)
             } catch (e: CancellationException) {
                 DownloadLogs.logJob(id, "ENGINE", "CANCELLED by user")
                 deletePartials(ctx, job)
@@ -717,14 +833,28 @@ object DownloadEngine {
         }
     }
 
+    // 2.0-dev2.5 DEFECT 2 + 1b: progress reporting.
+    // - total <= 0 (chunked DDL with no Content-Length, or a
+    //   connecting/playlist phase) is INDETERMINATE
+    //   (PROGRESS_INDETERMINATE = -1): bytes + speed keep flowing,
+    //   but NO % is ever shown — the old code froze progress at
+    //   the previous value (0) while speed rose, then jumped to
+    //   100 at EOF. A determinate % is only ever computed from a
+    //   real total.
+    // - Throttle (flicker): at most ~1 post/sec while progress is
+    //   unchanged (speed-only movement), and at least 500ms
+    //   between posts even when progress moved — the notification
+    //   layer dedups identical content on top of this.
     private fun reportProgress(id: String, bytes: Long, total: Long, speed: Double) {
         val now = System.currentTimeMillis()
         val last = lastEmitMs[id] ?: 0L
         val job = _jobs.value.firstOrNull { it.id == id } ?: return
-        val progress = if (total > 0) ((bytes * 100) / total).toInt().coerceIn(0, 100) else job.progress
-        if (now - last < 500 && progress == job.progress) return
+        val progress = if (total <= 0) PROGRESS_INDETERMINATE
+        else ((bytes * 100) / total).toInt().coerceIn(0, 100)
+        if (now - last < 1000 && progress == job.progress) return
+        if (now - last < 500) return
         lastEmitMs[id] = now
-        updateJob(id, { it.copy(progress = progress, downloadedBytes = bytes, totalBytes = if (total > 0) total else it.totalBytes, speedMBps = speed) })
+        updateJob(id, { it.copy(progress = progress, downloadedBytes = bytes, totalBytes = if (total > 0) total else 0, speedMBps = speed) })
     }
 
     // --- DDL mp4 download (HTTP Range resume) ---------------------------
@@ -763,6 +893,12 @@ object DownloadEngine {
             val remaining = conn.contentLengthLong.takeIf { it > 0 } ?: -1L
             val total = if (remaining > 0) existing + remaining else -1L
             DownloadLogs.logJob(jobId, "DDL", "total=${if (total > 0) "${total / 1024} KB" else "unknown"}")
+            // 2.0-dev2.5 DEFECT 2: with no Content-Length the total
+            // stays -1 for the whole download — reportProgress now
+            // turns that into INDETERMINATE (bytes + speed, no %)
+            // instead of freezing at 0%. Emit once up front so
+            // the UI leaves "0%" the moment the connection opens.
+            onProgress(existing, -1, 0.0)
             val throttle = SpeedThrottler(speedLimitMBps * 1024L * 1024L)
             var downloaded = existing
             var windowStart = System.currentTimeMillis()
@@ -803,7 +939,10 @@ object DownloadEngine {
     // --- Destination (file mode vs SAF tree) -----------------------------
 
     private class Dest(
-        val workFile: File,
+        // 2.0-dev2.5: var, not val — runJob renames the work file
+        // to the ACTUAL quality name in file mode after the
+        // post-download verification.
+        var workFile: File,
         val tempDir: File,
         private val safTreeUri: Uri?,
         private val safDirName: String,
@@ -852,14 +991,50 @@ object DownloadEngine {
         if (context == null) return
         try {
             val dir = downloadDir(context, job.animeTitle)
-            val fileName = fileNameFor(job.animeTitle, job.episodeNumber, job.quality, job.audio)
-            File(dir, fileName).delete()
+            // 2.0-dev2.5: a job can own files under both its
+            // requested name and its actual-quality name — drop
+            // both, so a renamed partial never lingers.
+            val names = mutableSetOf(fileNameFor(job.animeTitle, job.episodeNumber, job.quality, job.audio))
+            job.actualQuality?.let { names += fileNameFor(job.animeTitle, job.episodeNumber, it, job.audio) }
+            names.forEach { File(dir, it).delete() }
             File(dir, ".tmp-${job.id}").deleteRecursively()
             File(
                 File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, ".staging"),
                 "${job.id}.part",
             ).delete()
         } catch (_: Exception) {
+        }
+    }
+
+    // 2.0-dev2.5 DEFECT 3 — post-download verification. Reads the
+    // delivered file's real video height with MediaExtractor (the
+    // same API remux() already uses to count tracks). Returns null
+    // when the height can't be read (no video track, corrupt or
+    // unreadable file) — callers treat null as "unverifiable" and
+    // must NOT fail the job on it.
+    private fun probeVideoHeight(file: File): Int? {
+        if (!file.exists() || file.length() == 0L) return null
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            for (i in 0 until extractor.trackCount) {
+                val format = extractor.getTrackFormat(i)
+                val mime = format.getString(MediaFormat.KEY_MIME) ?: continue
+                if (!mime.startsWith("video/")) continue
+                return if (format.containsKey(MediaFormat.KEY_HEIGHT)) {
+                    format.getInteger(MediaFormat.KEY_HEIGHT).takeIf { it > 0 }
+                } else {
+                    null
+                }
+            }
+            null
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                extractor.release()
+            } catch (_: Exception) {
+            }
         }
     }
 

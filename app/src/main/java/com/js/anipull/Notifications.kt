@@ -33,10 +33,28 @@ object DownloadNotifications {
     const val ACTION_RESUME = "com.js.anipull.RESUME"
     const val ACTION_CANCEL = "com.js.anipull.CANCEL"
 
-    // 2.0: per-job notifications + grouped summary.
+    // 2.0 per-job notifications + grouped summary.
     const val GROUP_KEY = "com.js.anipull.DOWNLOADS"
     const val SUMMARY_ID = 1003
     const val EXTRA_JOB_ID = "com.js.anipull.EXTRA_JOB_ID"
+
+    // 2.0-dev2.5 DEFECT 1/1b: per-job ids used to start at 2000,
+    // which INCLUDES the foreground-service id 2001 — a job whose
+    // id hashed to 1 clobbered the foreground notification. Jobs
+    // now start at 3000 (3000..35767), clear of 2001 and of the
+    // legacy 1001/1002/1003 ids. The +1 completion id can still
+    // in theory collide with another job's progress id; that
+    // pre-existing shape is unchanged.
+    // Dedup state for the flicker fix: one notification, updated
+    // in place under a stable id, re-posted ONLY when the
+    // displayed content actually changed and at most ~once a
+    // second (paused/completed bypass the throttle so state
+    // changes are never delayed). On Nothing OS a content-changed
+    // re-post re-animates, so "same text again" posts are dropped
+    // here, not just throttled.
+    private val lastJobNotify = mutableMapOf<String, Triple<Long, String, Boolean>>()
+
+    private fun formatMb(bytes: Long): String = "%.1f MB".format(bytes / (1024.0 * 1024.0))
 
     @Volatile var isPaused = false
     @Volatile var isCancelled = false
@@ -96,7 +114,7 @@ object DownloadNotifications {
 
     // --- 2.0 per-job notifications --------------------------------------
 
-    fun notificationIdFor(jobId: String): Int = 2000 + (jobId.hashCode() and 0x7FFF)
+    fun notificationIdFor(jobId: String): Int = 3000 + (jobId.hashCode() and 0x7FFF)
 
     private fun notificationsEnabled(context: Context): Boolean =
         context.getSharedPreferences("anipull_settings", Context.MODE_PRIVATE)
@@ -114,18 +132,41 @@ object DownloadNotifications {
         return PendingIntent.getBroadcast(context, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 
+    // 2.0-dev2.5 DEFECT 1/1b: one notification per job, stable id,
+    // re-posted only when the displayed content changes (progress
+    // integer, speed text, paused state) and at most ~once a
+    // second. progress < 0 is the engine's INDETERMINATE sentinel
+    // (total size unknown — bytes are flowing but no % exists):
+    // indeterminate bar, bytes + speed, never a fake "0%".
     fun showJobProgress(context: Context, job: DownloadJob) {
         if (!notificationsEnabled(context)) return
         createChannel(context)
         val paused = job.state == JobState.PAUSED
         val title = "${job.animeTitle} — E${job.episodeNumber}"
-        val detail = if (paused) "Paused · ${job.progress}%"
-        else "${"%.1f".format(job.speedMBps)} MB/s · ${job.progress}%"
+        val indeterminate = job.progress < 0
+        val detail = when {
+            paused -> "Paused · ${job.progress.coerceAtLeast(0)}%"
+            indeterminate -> if (job.downloadedBytes > 0) "${formatMb(job.downloadedBytes)} · ${"%.1f".format(job.speedMBps)} MB/s" else "Connecting…"
+            else -> "${"%.1f".format(job.speedMBps)} MB/s · ${job.progress}%"
+        }
+        val contentText = job.episodeTitle?.let { "$it · $detail" } ?: detail
+        // Dedup + throttle: same displayed content never re-posts;
+        // changed content waits ~1s between posts, except a pause/
+        // resume flip or 100%, which post immediately.
+        val contentKey = "$title|$contentText|$paused"
+        val now = System.currentTimeMillis()
+        val bypassThrottle = paused || job.progress >= 100
+        synchronized(lastJobNotify) {
+            val last = lastJobNotify[job.id]
+            if (last != null && last.second == contentKey) return
+            if (last != null && !bypassThrottle && last.third == paused && now - last.first < 1000) return
+            lastJobNotify[job.id] = Triple(now, contentKey, paused)
+        }
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_download)
             .setContentTitle(title)
-            .setContentText(job.episodeTitle?.let { "$it · $detail" } ?: detail)
-            .setProgress(100, job.progress, false)
+            .setContentText(contentText)
+            .setProgress(100, job.progress.coerceIn(0, 100), indeterminate)
             .setOngoing(!paused)
             .setOnlyAlertOnce(true)
             .setGroup(GROUP_KEY)
@@ -137,6 +178,7 @@ object DownloadNotifications {
     }
 
     fun showJobComplete(context: Context, job: DownloadJob) {
+        synchronized(lastJobNotify) { lastJobNotify.remove(job.id) }
         NotificationManagerCompat.from(context).cancel(notificationIdFor(job.id))
         if (!completionEnabled(context)) return
         createChannel(context)
@@ -151,20 +193,15 @@ object DownloadNotifications {
         NotificationManagerCompat.from(context).notify(notificationIdFor(job.id) + 1, builder.build())
     }
 
+    // 2.0-dev2.5 DEFECT 1: NO-OP now. The foreground-service
+    // notification (2001) IS the group's single summary (see
+    // buildServiceNotification) — a second summary under
+    // SUMMARY_ID would fight it for the bundle and could show as
+    // a second shade entry. The signature stays so DownloadEngine
+    // notifyJob needs no change; cancelSummary still clears any
+    // stale 1003 posted by older builds.
     fun showSummary(context: Context, active: List<DownloadJob>) {
-        if (!notificationsEnabled(context) || active.size <= 1) return
-        createChannel(context)
-        val downloading = active.count { it.state == JobState.DOWNLOADING }
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_download)
-            .setContentTitle("Downloading ${active.size} episodes")
-            .setContentText(if (downloading > 0) "$downloading downloading, ${active.size - downloading} paused" else "${active.size} paused")
-            .setOngoing(true)
-            .setOnlyAlertOnce(true)
-            .setGroup(GROUP_KEY)
-            .setGroupSummary(true)
-            .setContentIntent(openAppIntent(context))
-        NotificationManagerCompat.from(context).notify(SUMMARY_ID, builder.build())
+        // Intentionally empty: the service notification is the summary.
     }
 
     fun cancelSummary(context: Context) {
@@ -172,6 +209,7 @@ object DownloadNotifications {
     }
 
     fun cancelJob(context: Context, jobId: String) {
+        synchronized(lastJobNotify) { lastJobNotify.remove(jobId) }
         val manager = NotificationManagerCompat.from(context)
         manager.cancel(notificationIdFor(jobId))
         manager.cancel(notificationIdFor(jobId) + 1)
@@ -179,6 +217,12 @@ object DownloadNotifications {
 
     // Persistent foreground-service notification (NOT gated by
     // notif_enabled — the system requires the service to show one).
+    // 2.0-dev2.5 DEFECT 1: this is the GROUP SUMMARY for the
+    // download group, so the system bundles it with the per-job
+    // notifications into ONE shade entry instead of showing a
+    // second "Downloading … E1 · N%" notification alongside them.
+    // Its text is STATIC ("Anipull downloads", no title, no %) —
+    // per-job progress lives only in the per-job notification.
     fun buildServiceNotification(context: Context, text: String): Notification {
         createChannel(context)
         return NotificationCompat.Builder(context, CHANNEL_ID)
@@ -187,6 +231,8 @@ object DownloadNotifications {
             .setContentText(text)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
+            .setGroup(GROUP_KEY)
+            .setGroupSummary(true)
             .setContentIntent(openAppIntent(context))
             .build()
     }

@@ -136,6 +136,10 @@ object ResolveCache {
             put("kind", "mp4")
             put("url", link.url)
             put("referer", link.referer)
+            // 2.0-dev2.5: offered quality survives the cache, so a
+            // cached hit is judged by the race exactly like a
+            // fresh resolve.
+            link.actualQuality?.let { put("aq", it) }
             put("subs", subsToJson(link.subtitles))
         }
         is ResolvedLink.Hls -> JSONObject().apply {
@@ -145,6 +149,7 @@ object ResolveCache {
             link.ivOverrideB64?.let { put("iv", it) }
             link.referer?.let { put("referer", it) }
             link.origin?.let { put("origin", it) }
+            link.actualQuality?.let { put("aq", it) }
             put("subs", subsToJson(link.subtitles))
         }
         is ResolvedLink.Failed -> JSONObject().put("kind", "failed")
@@ -162,11 +167,13 @@ object ResolveCache {
         }
 
     private fun parseLink(e: JSONObject): ResolvedLink? = try {
+        val aq = e.optInt("aq", 0).takeIf { it > 0 }
         when (e.optString("kind")) {
             "mp4" -> ResolvedLink.DirectMp4(
                 url = e.getString("url"),
                 referer = e.optString("referer", ""),
                 subtitles = parseSubs(e.optJSONArray("subs")),
+                actualQuality = aq,
             )
             "hls" -> ResolvedLink.Hls(
                 masterPlaylistUrl = e.getString("master"),
@@ -175,6 +182,7 @@ object ResolveCache {
                 ivOverrideB64 = e.optString("iv", null).takeIf { !it.isNullOrEmpty() },
                 referer = e.optString("referer", null).takeIf { !it.isNullOrEmpty() },
                 origin = e.optString("origin", null).takeIf { !it.isNullOrEmpty() },
+                actualQuality = aq,
             )
             else -> null
         }

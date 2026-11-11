@@ -49,6 +49,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -102,6 +103,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.snapshotFlow
@@ -1939,6 +1943,14 @@ fun AnipullAppInner() {
     // hides Explore and un-gates the footer immediately.
     val showExplore = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("show_explore", true)
     val scope = rememberCoroutineScope()
+    // 2.0-dev2.5 Defect 6: ONE SnackbarHostState for the whole app
+    // (there was no SnackbarHost/SnackbarHostState anywhere — the
+    // download feedback was Toast, which Android makes
+    // non-clickable by design). The host itself sits in the wrapper
+    // Box around SharedTransitionLayout below, so it renders above
+    // Home AND Detail; showDownloadSnackbar (after goTab) is the
+    // only way to show one.
+    val snackbarHostState = remember { SnackbarHostState() }
     val appFocusManager = LocalFocusManager.current
     // 1.9-dev4.8.2: scrolling while search is open hides the
     // KEYBOARD ONLY — no clearFocus, no closeSearch, so the results
@@ -2044,6 +2056,16 @@ fun AnipullAppInner() {
         showLibrary = tab == Tab.Library
         // Home = all three off, which is the Home branch below.
         searchOpenBeforeDetail = false
+    }
+    // 2.0-dev2.5 Defect 6: download-start feedback with a View
+    // action. showSnackbar is suspend, so this launches it; a tap
+    // on View goes to the Downloads tab. Only one snackbar shows
+    // at a time (Material3 property of the shared host state), so
+    // a batch/season reports as a single snackbar too.
+    fun showDownloadSnackbar(message: String) {
+        scope.launch {
+            if (snackbarHostState.showSnackbar(message, actionLabel = "View") == SnackbarResult.ActionPerformed) goTab(Tab.Downloads)
+        }
     }
     val currentTab: Tab = when {
         showLibrary -> Tab.Library
@@ -2243,7 +2265,7 @@ fun AnipullAppInner() {
         })
     } else if (showLoading) {
         LoadingScreen()
-    } else SharedTransitionLayout {
+    } else Box(modifier = Modifier.fillMaxSize()) { SharedTransitionLayout {
         AnimatedContent(
             targetState = screen,
             transitionSpec = {
@@ -2271,7 +2293,7 @@ fun AnipullAppInner() {
     if (showSettings) {
         SettingsScreen(onBack = { goTab(Tab.Home) })
     } else if (showDownloads) {
-        DownloadsScreen(onBack = { goTab(Tab.Home) }, onBrowse = { goTab(Tab.Home) })
+        DownloadsScreen(onBack = { goTab(Tab.Home) }, onBrowse = { goTab(Tab.Home) }, onDownloadStarted = { showDownloadSnackbar(it) })
     } else if (showLibrary) {
         LibraryScreen(
             saved = savedTitles,
@@ -2693,18 +2715,31 @@ fun AnipullAppInner() {
                             isSaved = savedTitles.any { it.id == targetScreen.id },
                             onSaveToggle = { toggleSave(targetScreen) },
                             targetEpisode = detailTargetEpisode,
+                            onDownloadStarted = { showDownloadSnackbar(it) },
                         )
                     }
                 }
             }
         }
     }
+        // 2.0-dev2.5 Defect 6: the ONE SnackbarHost — a child of
+        // this wrapper Box (not of the home-tabs Box below), so it
+        // renders above Home AND Detail. Bottom-center, above the
+        // floating dock on tab screens (88dp) and just above the nav
+        // bar on detail (24dp, no dock there).
+        SnackbarHost(
+            hostState = snackbarHostState,
+            modifier = Modifier.align(Alignment.BottomCenter)
+                .navigationBarsPadding()
+                .padding(bottom = if (screen == null) 88.dp else 24.dp, start = 16.dp, end = 16.dp),
+        )
+    }
     // 4.8.15: pre-measure DELETED. SharedTransition uses real layout
     // in both pages, no dest rect capture, no hidden DetailScreen,
     // no pendingTitle — that whole mechanism was the snap source.
 
     sheetFor?.let { title ->
-        DownloadSheet(title = title, onDismiss = { sheetFor = null })
+        DownloadSheet(title = title, onDismiss = { sheetFor = null }, onDownloadStarted = { showDownloadSnackbar(it) })
     }
     // 1.9-dev5.0 QOL 1: hold popup. Exactly 3 actions, nothing else.
     holdFor?.let { title ->
@@ -3359,7 +3394,7 @@ private fun DownloadFilterPill(
 }
 
 @Composable
-fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
+fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit, onDownloadStarted: ((String) -> Unit)? = null) {
     // 2.0-dev1.0: real jobs from DownloadEngine. Active jobs show
     // live progress + pause/resume/cancel; completed jobs show size
     // + Open/Delete. 2.0-dev2.4: filter pills (All / Active /
@@ -3473,7 +3508,7 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
             ) {
                 if (activeSection.isNotEmpty()) {
                     item { Text("Active", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont) }
-                    items(activeSection, key = { it.id }) { job -> DownloadJobRow(job) }
+                    items(activeSection, key = { it.id }) { job -> DownloadJobRow(job, onDownloadStarted) }
                 }
                 if (cancelled.isNotEmpty()) {
                     item {
@@ -3497,7 +3532,7 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
                             )
                         }
                     }
-                    items(cancelled, key = { it.id }) { job -> DownloadJobRow(job) }
+                    items(cancelled, key = { it.id }) { job -> DownloadJobRow(job, onDownloadStarted) }
                 }
                 if (completed.isNotEmpty()) {
                     item {
@@ -3547,7 +3582,7 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
                         }
                     }
                     items(filteredJobs, key = { it.id }) { job ->
-                        if (job.state == JobState.COMPLETED) CompletedJobRow(job) else DownloadJobRow(job)
+                        if (job.state == JobState.COMPLETED) CompletedJobRow(job) else DownloadJobRow(job, onDownloadStarted)
                     }
                 }
                 item { Spacer(Modifier.height(16.dp)) }
@@ -3588,6 +3623,7 @@ private fun retryDownloadJob(
     context: android.content.Context,
     scope: kotlinx.coroutines.CoroutineScope,
     job: DownloadJob,
+    onDownloadStarted: ((String) -> Unit)? = null, // 2.0-dev2.5 Defect 6: snackbar host callback
 ) {
     if (job.titleId <= 0) {
         showToast(context, "Can't retry this one here — open the episode and pull it again.")
@@ -3605,6 +3641,10 @@ private fun retryDownloadJob(
         animeSession = job.anilistId?.toString() ?: job.titleId.toString(),
     )
     scope.launch {
+        // 2.0-dev2.5 Defect 5 feedback + Defect 6: instant snackbar
+        // BEFORE the fresh resolve — a retry re-resolves across the
+        // chain and can take seconds. No second snackbar on Enqueued.
+        onDownloadStarted?.invoke("Download queued — Episode ${job.episodeNumber}") ?: showToast(context, "Downloading Episode ${job.episodeNumber}")
         val outcome = resolveAndEnqueue(
             context, title, episode, job.quality,
             serverOverride = job.serverNumber.takeIf { it in 1..9 },
@@ -3614,7 +3654,7 @@ private fun retryDownloadJob(
             wifiOverride = true,
         )
         when (outcome) {
-            ResolveOutcome.Enqueued -> showToast(context, "Downloading Episode ${job.episodeNumber}")
+            is ResolveOutcome.Enqueued -> if (outcome.downgraded) showToast(context, downgradeMessage(outcome.actualQuality))
             is ResolveOutcome.Error -> showToast(context, outcome.message)
             ResolveOutcome.NeedsClearance -> showToast(context, "A human check is needed — open the episode and pull it again.")
         }
@@ -3622,7 +3662,7 @@ private fun retryDownloadJob(
 }
 
 @Composable
-private fun DownloadJobRow(job: DownloadJob) {
+private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Unit)? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val progress by animateFloatAsState(
@@ -3647,7 +3687,10 @@ private fun DownloadJobRow(job: DownloadJob) {
             Text("${job.animeTitle} — Episode ${job.episodeNumber}", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                JobChip("${job.quality}p")
+                // 2.0-dev2.5: the quality chip shows the ACTUAL
+                // quality the file is downloading at when the engine
+                // knows it (downgraded links), not the requested one.
+                JobChip(job.actualQuality ?: "${job.quality}p")
                 JobChip(job.audio)
             }
             Spacer(Modifier.height(8.dp))
@@ -3660,8 +3703,24 @@ private fun DownloadJobRow(job: DownloadJob) {
             // its error text too.
             Text(
                 (if (job.serverNumber in 1..9) "Server ${job.serverNumber} · " else "") + when (job.state) {
-                    JobState.DOWNLOADING -> "${job.progress}% · ${"%.1f".format(job.speedMBps)} MB/s"
-                    JobState.PAUSED -> "Paused · ${job.progress}%"
+                    // 2.0-dev2.5: indeterminate progress — the engine
+                    // reports PROGRESS_INDETERMINATE (-1) whenever
+                    // the total is unknown (chunked DDL with no
+                    // Content-Length, or still in the connecting /
+                    // HLS playlist phase): bytes + speed keep flowing
+                    // but NO % is ever shown. Never clamp to 0 here —
+                    // that reintroduces the frozen-0% defect.
+                    // Nothing downloaded yet is still "Connecting…".
+                    JobState.DOWNLOADING -> when {
+                        job.downloadedBytes <= 0L -> "Connecting…"
+                        job.progress < 0 -> "${formatBytes(job.downloadedBytes)} · ${"%.1f".format(job.speedMBps)} MB/s"
+                        else -> "${job.progress}% · ${"%.1f".format(job.speedMBps)} MB/s"
+                    }
+                    JobState.PAUSED -> when {
+                        job.progress < 0 && job.downloadedBytes > 0L -> "Paused · ${formatBytes(job.downloadedBytes)}"
+                        job.progress < 0 -> "Paused"
+                        else -> "Paused · ${job.progress}%"
+                    }
                     JobState.QUEUED -> "Queued…"
                     JobState.FAILED -> job.error ?: "Failed"
                     JobState.CANCELLED -> "Cancelled"
@@ -3674,7 +3733,7 @@ private fun DownloadJobRow(job: DownloadJob) {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 if (job.state == JobState.PAUSED) Text("Resume", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.resume(job.id) })
                 else if (job.state == JobState.DOWNLOADING || job.state == JobState.QUEUED) Text("Pause", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.pause(job.id) })
-                else if (job.state == JobState.FAILED || job.state == JobState.CANCELLED) Text("Retry", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { retryDownloadJob(context, scope, job) })
+                else if (job.state == JobState.FAILED || job.state == JobState.CANCELLED) Text("Retry", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { retryDownloadJob(context, scope, job, onDownloadStarted) })
                 // A cancelled job is already cancelled — no Cancel
                 // action for it. FAILED keeps Cancel (it becomes a
                 // CANCELLED job, which is itself retryable now).
@@ -3704,7 +3763,9 @@ private fun CompletedJobRow(job: DownloadJob) {
             Text("${job.animeTitle} — Episode ${job.episodeNumber}", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Spacer(Modifier.height(4.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                JobChip("${job.quality}p")
+                // 2.0-dev2.5: same actual-quality chip as the active
+                // row — a completed file is the quality it arrived at.
+                JobChip(job.actualQuality ?: "${job.quality}p")
                 JobChip(job.audio)
             }
             Spacer(Modifier.height(6.dp))
@@ -3864,12 +3925,29 @@ private suspend fun loadFallbackEpisodes(
 }
 
 private sealed class ResolveOutcome {
-    object Enqueued : ResolveOutcome()
+    // 2.0-dev2.5: Enqueued carries the downgrade signal — the
+    // winning link's offered height was below the requested
+    // quality's floor, so the best-available link was accepted
+    // (actualQuality = offered height in px, null = unknown).
+    // Callers surface it with downgradeMessage() below. A data
+    // class, not object, so `when` branches match it with `is`.
+    data class Enqueued(val downgraded: Boolean = false, val actualQuality: Int? = null) : ResolveOutcome()
     data class Error(val message: String) : ResolveOutcome()
     object NeedsClearance : ResolveOutcome()
 }
 
-// 2.0-dev2.3: the resolve half of resolveAndEnqueue, split out so
+// 2.0-dev2.5: the best-available link was below the requested
+// quality's floor — say so plainly, naming the height the server
+// actually offered when it is known.
+private fun downgradeMessage(actualQuality: Int?): String =
+    if (actualQuality != null) "Only ${actualQuality}p was available on this server"
+    else "Only a lower quality was available on this server"
+
+// 2.0-dev2.5 Defect 5 tax 2 — the serving server's direct resolve
+// is capped like a race attempt (see resolveViaCandidates).
+private const val RESOLVE_SERVING_FIRST_TIMEOUT_MS = 15_000L
+
+// 2.0-dev2.5: the resolve half of resolveAndEnqueue, split out so
 // the download sheet can PRE-RESOLVE when it opens (see
 // EpisodeListState.preResolveRow): the pre-resolve warms
 // ResolveCache and the confirm just reuses it. Returns the resolved
@@ -3879,6 +3957,59 @@ private data class ResolveAttempt(
     val resolved: ResolvedDownload,
     val needsClearance: Boolean,
 )
+
+// 2.0-dev2.5: one resolve attempt over a given candidate list —
+// the three paths resolveOnly used to inline (media-index race,
+// serving-server-first + race, plain race). Split out so
+// resolveOnly can run it twice: once over the servers that need no
+// clearance, and (only if they all fail) once over server 3 alone
+// with a freshly solved clearance. No behaviour change inside.
+private suspend fun resolveViaCandidates(
+    title: ApiTitle,
+    episode: EpisodeInfo,
+    quality: String,
+    anilistId: Long?,
+    fromMediaIndex: Boolean,
+    listServer: Int?,
+    candidates: List<EpisodeSource>,
+    onAttempt: ((Int) -> Unit)?,
+): ResolvedDownload {
+    return try {
+        if (fromMediaIndex) {
+            // Media-index rows carry no sessions — NEVER resolveDownload
+            // with empty sessions. Resolve by (series + episode number)
+            // with failover across the chain.
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
+        } else if (listServer != null) {
+            // The server that served this list resolves its own
+            // episode the old way first; anything else fails over
+            // to resolveEpisode across the whole chain (including
+            // the serving server, by episode number).
+            val serving = candidates.firstOrNull { it.serverNumber == listServer }
+            if (serving != null) onAttempt?.invoke(listServer)
+            // Defect 5 tax 2: this direct resolve used to run
+            // SEQUENTIALLY with NO timeout before any race — e.g.
+            // AniZone does search + episode page, JustAnime does
+            // id-resolve + servers + download endpoints, each with
+            // 400 ms pacing and requestWithRetry x3 per call — so
+            // fallback rows paid a whole extra resolve before the
+            // 15 s-capped race even started. Now capped at 15 s
+            // like a race attempt: a timeout falls through to the
+            // race instead of stalling it.
+            val first = serving?.let {
+                kotlinx.coroutines.withTimeoutOrNull(RESOLVE_SERVING_FIRST_TIMEOUT_MS) {
+                    try { it.resolveDownload(episode, quality) } catch (e: Exception) { ResolvedLink.Failed(friendlyDownloadError(e)) }
+                }
+            }
+            if (first != null && first !is ResolvedLink.Failed) ResolvedDownload(first, listServer)
+            else MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
+        } else {
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
+        }
+    } catch (e: Exception) {
+        ResolvedDownload(ResolvedLink.Failed(friendlyDownloadError(e)), null)
+    }
+}
 
 private suspend fun resolveOnly(
     context: android.content.Context,
@@ -3903,50 +4034,71 @@ private suspend fun resolveOnly(
     ResolveCache.lookup(context, title.id, episode.number, episode.audio, quality, preferred, listServer)?.let {
         return ResolveAttempt(it, false)
     }
-    // A clearance can expire between the list load and the tap, so
-    // re-ensure it here (stored-and-valid returns instantly, no
-    // WebView).
     val numbers = candidateServerNumbers(context, preferred).let { ordered ->
         if (listServer != null) listOf(listServer) + ordered.filter { it != listServer } else ordered
     }
-    val clearance = paheClearanceIfNeeded(context, 3 in numbers)
-    val candidates = numbers.mapNotNull { ServerRegistry.build(it, clearance.cookie, clearance.userAgent) }
-    if (candidates.isEmpty()) return ResolveAttempt(ResolvedDownload(ResolvedLink.Failed("No server available — tap Retry."), null), clearance.needsUserAction)
+    // 2.0-dev2.5 Defect 5 tax 1 — LAZY clearance, the same shape
+    // the episode-LIST path took in dev1.8 (loadFallbackEpisodes):
+    // solve only immediately before server 3 is attempted. The old
+    // code solved the Cloudflare check up front whenever server 3
+    // was among the candidates — up to 30 s in a hidden WebView,
+    // paid by every first resolve even though servers 1, 2, 4–9
+    // never need it. Now only the STORED clearance is peeked up
+    // front (loadStored is a cheap prefs read, never a solve):
+    // when it is valid, server 3 races with everyone else exactly
+    // as before. When it is missing/expired, server 3 is held out
+    // of the first race — the other servers race first, and the
+    // solve runs ONLY if they all fail and server 3 is the last
+    // hope. Trade-off, same as the list path accepted: when server
+    // 3 is the ONLY working server AND no clearance is stored, the
+    // failed first race precedes the solve instead of the solve
+    // preceding it.
+    val storedClearance: PaheClearance? = if (3 in numbers) {
+        CloudflareClearance.loadStored(context)?.let { PaheClearance(it.cookieValue, it.userAgent, false) }
+    } else null
+    val upFrontClearance = storedClearance ?: PaheClearance(null, null, false)
+    val firstNumbers = if (storedClearance != null) numbers else numbers.filter { it != 3 }
+    val firstCandidates = firstNumbers.mapNotNull { ServerRegistry.build(it, upFrontClearance.cookie, upFrontClearance.userAgent) }
     // 2.0-dev1.7: resolveWithFailover returns ResolvedDownload —
     // the link PLUS the winning server (null when all failed).
     // onAttempt is passed through so the UI can show live progress
     // ("Resolving… · Server N"); the serving server's direct
     // resolveDownload is also an attempt, so it fires too.
-    val resolved: ResolvedDownload = try {
-        if (fromMediaIndex) {
-            // Media-index rows carry no sessions — NEVER resolveDownload
-            // with empty sessions. Resolve by (series + episode number)
-            // with failover across the chain.
-            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
-        } else if (listServer != null) {
-            // The server that served this list resolves its own
-            // episode the old way first; anything else fails over
-            // to resolveEpisode across the whole chain (including
-            // the serving server, by episode number).
-            val serving = candidates.firstOrNull { it.serverNumber == listServer }
-            if (serving != null) onAttempt?.invoke(listServer)
-            val first = serving?.let {
-                try { it.resolveDownload(episode, quality) } catch (e: Exception) { ResolvedLink.Failed(friendlyDownloadError(e)) }
-            }
-            if (first != null && first !is ResolvedLink.Failed) ResolvedDownload(first, listServer)
-            else MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
-        } else {
-            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
+    val firstResolved: ResolvedDownload? = if (firstCandidates.isNotEmpty()) {
+        resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, firstCandidates, onAttempt)
+    } else null
+    if (firstResolved != null && firstResolved.link !is ResolvedLink.Failed) {
+        // Cache the win (successes only, per-source TTL) so a repeat
+        // tap — or the confirm after a pre-resolved sheet — is instant.
+        if (firstResolved.serverNumber != null) {
+            ResolveCache.store(context, title.id, episode.number, episode.audio, quality, firstResolved)
         }
-    } catch (e: Exception) {
-        ResolvedDownload(ResolvedLink.Failed(friendlyDownloadError(e)), null)
+        return ResolveAttempt(firstResolved, false)
     }
-    // Cache the win (successes only, per-source TTL) so a repeat
-    // tap — or the confirm after a pre-resolved sheet — is instant.
-    if (resolved.link !is ResolvedLink.Failed && resolved.serverNumber != null) {
-        ResolveCache.store(context, title.id, episode.number, episode.audio, quality, resolved)
+    // Phase B: server 3 was held out for lack of a stored
+    // clearance and nothing else served the episode. NOW solve —
+    // and only now — then try server 3 alone (serving-first when
+    // it served the list, else the by-number race over one
+    // candidate). A still-pending human check rides out as
+    // needsClearance, exactly as the old eager path reported it.
+    if (storedClearance == null && 3 in numbers) {
+        val clearance = paheClearanceIfNeeded(context, true)
+        val pahe = ServerRegistry.build(3, clearance.cookie, clearance.userAgent)
+        if (pahe != null) {
+            val paheResolved = resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, listOf(pahe), onAttempt)
+            if (paheResolved.link !is ResolvedLink.Failed && paheResolved.serverNumber != null) {
+                ResolveCache.store(context, title.id, episode.number, episode.audio, quality, paheResolved)
+            }
+            return ResolveAttempt(paheResolved, clearance.needsUserAction)
+        }
+        return ResolveAttempt(ResolvedDownload(ResolvedLink.Failed("No server available — tap Retry."), null), clearance.needsUserAction)
     }
-    return ResolveAttempt(resolved, clearance.needsUserAction)
+    // No server 3 to fall back to: the first race's failure is
+    // the answer (or "no server" when nothing was even attempted).
+    return ResolveAttempt(
+        firstResolved ?: ResolvedDownload(ResolvedLink.Failed("No server available — tap Retry."), null),
+        false,
+    )
 }
 
 private suspend fun resolveAndEnqueue(
@@ -3977,7 +4129,9 @@ private suspend fun resolveAndEnqueue(
             // rides along too, so a terminal job can be retried
             // from Downloads with a fresh resolve (2.0-dev2.2).
             DownloadEngine.enqueue(context, title, episode, quality, link, serverNumber = resolved.serverNumber ?: 0, wifiOverride = wifiOverride, anilistId = anilistId, fromMediaIndex = fromMediaIndex, listServer = listServer)
-            ResolveOutcome.Enqueued
+            // 2.0-dev2.5: the downgrade signal rides out on the
+            // outcome so callers can toast it (see downgradeMessage).
+            ResolveOutcome.Enqueued(downgraded = resolved.downgraded, actualQuality = resolved.link.offeredHeight())
         }
     }
 }
@@ -4191,6 +4345,18 @@ private data class PendingPull(
 // No behaviour change: same 20s race / 8s per-source timeouts,
 // same lazy clearance, kept AniList id, dedup, ranges, toggle,
 // multi-select + batch, resolving labels, row errors, Retry.
+// 2.0-dev2.5 Defect 5 tax 3 — the coalesce key for a resolve:
+// the ResolveCache key (title | episode | audio | quality) PLUS
+// the first server lookup() requires (list server, else the
+// explicit preferred server, else any). Two resolves share a key
+// exactly when the confirm would reuse the pre-resolve's cached
+// win — so a changed chip in the sheet misses the key and
+// resolves fresh, as before.
+private fun resolveCoalesceKey(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, listServer: Int?): String {
+    val first = listServer ?: serverOverride?.takeIf { it in 1..9 } ?: 0
+    return "$titleId|$number|${audioCode(audio)}|$quality|$first"
+}
+
 private class EpisodeListState(
     val context: android.content.Context,
     val prefs: android.content.SharedPreferences,
@@ -4210,6 +4376,18 @@ private class EpisodeListState(
     var pullAudio: String = "jpn"
     var initialAudio: String = "Sub"
     var initialServer: Int = 0
+    // 2.0-dev2.5 Defect 6: download-start feedback — a snackbar
+    // with a View action, hoisted in AnipullAppInner and threaded
+    // in by the holder. Null = no host above → toast fallback.
+    var onDownloadStarted: ((String) -> Unit)? = null
+    // 2.0-dev2.5: default range is 1–100, not All (JS, 2026-11-11).
+    // Applied once when ranges first land — see the holder.
+    var rangeDefaultApplied by mutableStateOf(false)
+    // 2.0-dev2.5 Defect 5 tax 3: in-flight pre-resolves, keyed by
+    // the exact resolve parameters a confirm will use. A confirm
+    // whose key matches awaits the running pre-resolve instead of
+    // starting a second concurrent full resolve.
+    private val preResolveInFlight = mutableMapOf<String, kotlinx.coroutines.Deferred<ResolveAttempt?>>()
     // Loaded-list state — was remember(title.id) in EpisodeList.
     var mediaResult by mutableStateOf<MediaIndexResult?>(null)
     var fallbackResult by mutableStateOf<EpisodeResult?>(null)
@@ -4271,9 +4449,23 @@ private class EpisodeListState(
         serverOverride: Int?,
         wifiOverride: Boolean,
         showDialogOnClearance: Boolean = true,
+        // 2.0-dev2.5: batch callers pass false and report the
+        // downgrade once for the whole batch instead (see
+        // downloadSelected) — per-episode toasts would spam.
+        notifyDowngrade: Boolean = true,
     ): ResolveOutcome {
         resolving = resolving + episode.number
         rowErrors = rowErrors - episode.number
+        // 2.0-dev2.5 Defect 5 tax 3b — COALESCE: if a pre-resolve
+        // for these exact choices is still in flight, await it
+        // instead of running a second full resolve in parallel.
+        // Its win lands in ResolveCache, so the resolveAndEnqueue
+        // below hits the cache; a failed pre-resolve just falls
+        // through to a normal resolve. A changed chip in the sheet
+        // misses the key and resolves fresh, as before.
+        preResolveInFlight[resolveCoalesceKey(title.id, episode.number, episode.audio, quality, serverOverride, listServer)]?.let { deferred ->
+            runCatching { deferred.await() }
+        }
         val outcome = resolveAndEnqueue(
             context, title, episode, quality,
             serverOverride = serverOverride,
@@ -4286,7 +4478,11 @@ private class EpisodeListState(
         resolving = resolving - episode.number
         resolvingServer = resolvingServer - episode.number
         when (outcome) {
-            ResolveOutcome.Enqueued -> Unit
+            // 2.0-dev2.5: a downgraded win toasts once, here — the
+            // single-episode callers (pull, clearance retry) use
+            // this default; the batch suppresses it and reports
+            // once at the end instead.
+            is ResolveOutcome.Enqueued -> if (outcome.downgraded && notifyDowngrade) showToast(context, downgradeMessage(outcome.actualQuality))
             is ResolveOutcome.Error -> rowErrors = rowErrors + (episode.number to outcome.message)
             ResolveOutcome.NeedsClearance -> {
                 pendingPull = PendingPull(episode, quality, serverOverride, anilistId, fromMediaIndex, listServer, wifiOverride)
@@ -4296,6 +4492,12 @@ private class EpisodeListState(
         return outcome
     }
 
+    // Download-start feedback: snackbar with a View action when a
+    // host is threaded in, toast otherwise (Defect 6).
+    private fun notifyDownloadStarted(message: String) {
+        onDownloadStarted?.invoke(message) ?: showToast(context, message)
+    }
+
     // 2.0-dev1.7: a single confirmed episode — explicit per-episode
     // consent, so it may run on any network (wifiOverride = true).
     // The confirm sheet's choices override the list defaults; the
@@ -4303,6 +4505,15 @@ private class EpisodeListState(
     // the resolve path reads episode.audio.
     fun pull(row: EpisodeRow, qualityOverride: String? = null, audioOverride: String? = null, serverChoiceOverride: Int? = null) {
         scope.launch {
+            // 2.0-dev2.5 Defect 5 feedback: instant feedback on
+            // confirm — the snackbar fires BEFORE resolving, so a
+            // multi-second resolve no longer looks like nothing
+            // happened. No second snackbar on Enqueued (the job is
+            // already announced); errors still toast. A real QUEUED
+            // job in the Downloads tab needs an engine-side
+            // placeholder API, since enqueue() requires a
+            // ResolvedLink — TODO(COORDINATOR), see the report.
+            notifyDownloadStarted("Download queued — Episode ${row.number}")
             val ep = if (audioOverride != null) row.info.copy(audio = audioCode(audioOverride)) else row.info
             val outcome = runPull(
                 ep, row.anilistId, row.fromMediaIndex,
@@ -4312,7 +4523,7 @@ private class EpisodeListState(
                 wifiOverride = true,
             )
             when (outcome) {
-                ResolveOutcome.Enqueued -> showToast(context, "Downloading Episode ${row.number}")
+                is ResolveOutcome.Enqueued -> Unit
                 is ResolveOutcome.Error -> showToast(context, outcome.message)
                 ResolveOutcome.NeedsClearance -> Unit
             }
@@ -4325,12 +4536,17 @@ private class EpisodeListState(
     // background; resolveOnly stores the win in ResolveCache, so
     // the confirm reuses it and the download starts instantly.
     // Silent by design: a failure here changes nothing — confirm
-    // just resolves normally. A changed selection in the sheet
-    // misses the cache and resolves via the parallel race instead.
-    // No UI state is touched and no clearance dialog is surfaced
-    // from here; if a human check is needed, confirm surfaces it.
+    // just resolves normally. No UI state is touched and no
+    // clearance dialog is surfaced from here; if a human check is
+    // needed, confirm surfaces it.
+    // 2.0-dev2.5: the pre-resolve is now a tracked Deferred, not a
+    // fire-and-forget Job — runPull awaits a matching in-flight
+    // one (coalesce) instead of doubling the resolve, and a second
+    // pre-resolve for the same choices is never started.
     fun preResolveRow(row: EpisodeRow) {
-        scope.launch {
+        val key = resolveCoalesceKey(title.id, row.number, pullAudio, quality, initialServer, if (row.fromMediaIndex) null else fallbackServer)
+        if (preResolveInFlight.containsKey(key)) return
+        val deferred = scope.async {
             runCatching {
                 resolveOnly(
                     context, title, row.info.copy(audio = pullAudio),
@@ -4338,8 +4554,23 @@ private class EpisodeListState(
                     anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
                     listServer = if (row.fromMediaIndex) null else fallbackServer,
                 )
-            }
+            }.getOrNull()
         }
+        preResolveInFlight[key] = deferred
+        deferred.invokeOnCompletion {
+            if (preResolveInFlight[key] === deferred) preResolveInFlight.remove(key)
+        }
+    }
+
+    // 2.0-dev2.5 Defect 5 tax 3d — pre-resolve EARLIER: when the
+    // list loads (called from the holder's onLoaded effect, not
+    // sheet-open), warm the first few visible rows with the current
+    // defaults, so the likeliest taps are already cached. Bounded
+    // to 3 rows; a cached row returns instantly from resolveOnly,
+    // so re-warms on reload are near-free. A changed sheet chip
+    // still misses the cache and resolves fresh.
+    fun preResolveRows(rows: List<EpisodeRow>) {
+        rows.take(3).forEach { preResolveRow(it) }
     }
 
     // 2.0-dev1.7: multi-select batch — every selected episode with
@@ -4356,21 +4587,35 @@ private class EpisodeListState(
         scope.launch {
             var ok = 0
             var firstError: String? = null
+            // 2.0-dev2.5: downgrade is reported ONCE for the batch,
+            // not once per episode (runPull's per-episode toast is
+            // suppressed below) — first offered height wins.
+            var downgraded = 0
+            var downgradedQuality: Int? = null
             for (row in chosen) {
                 val outcome = runPull(
                     row.info.copy(audio = audioCode(a)), row.anilistId, row.fromMediaIndex,
                     if (row.fromMediaIndex) null else fallbackServer,
-                    q, s, wifiOverride = true,
+                    q, s, wifiOverride = true, notifyDowngrade = false,
                 )
                 when (outcome) {
-                    ResolveOutcome.Enqueued -> ok++
+                    is ResolveOutcome.Enqueued -> {
+                        ok++
+                        if (outcome.downgraded) {
+                            downgraded++
+                            if (downgradedQuality == null) downgradedQuality = outcome.actualQuality
+                        }
+                    }
                     is ResolveOutcome.Error -> if (firstError == null) firstError = outcome.message
                     ResolveOutcome.NeedsClearance -> break
                 }
             }
             selected = emptySet()
-            if (ok > 0) showToast(context, "Downloading $ok episode${if (ok == 1) "" else "s"}")
+            // 2.0-dev2.5 Defect 6: one snackbar for the batch, same
+            // as the single-episode path (was a toast).
+            if (ok > 0) notifyDownloadStarted("Downloading $ok episode${if (ok == 1) "" else "s"}")
             else if (firstError != null) showToast(context, firstError)
+            if (downgraded > 0) showToast(context, downgradeMessage(downgradedQuality))
         }
     }
 
@@ -4413,13 +4658,17 @@ private class EpisodeListState(
         pendingPull = null
         if (retry != null) {
             scope.launch {
+                // 2.0-dev2.5 Defect 5 feedback: same instant
+                // snackbar as a fresh confirm — the re-resolve
+                // after Done can still take seconds.
+                notifyDownloadStarted("Download queued — Episode ${retry.episode.number}")
                 val outcome = runPull(
                     retry.episode, retry.anilistId, retry.fromMediaIndex,
                     retry.listServer, retry.quality, retry.serverOverride,
                     retry.wifiOverride, showDialogOnClearance = false,
                 )
                 when (outcome) {
-                    ResolveOutcome.Enqueued -> showToast(context, "Downloading Episode ${retry.episode.number}")
+                    is ResolveOutcome.Enqueued -> Unit
                     is ResolveOutcome.Error -> showToast(context, outcome.message)
                     ResolveOutcome.NeedsClearance -> Unit
                 }
@@ -4447,6 +4696,7 @@ private fun rememberEpisodeListState(
     serverOverride: Int? = null, // null = Settings default; 0 = Auto (sheet only)
     externalReloadKey: Int = 0, // sheet bumps this after its own check dialog
     onListMeta: ((anilistId: Long?, fromMediaIndex: Boolean, listServer: Int?) -> Unit)? = null,
+    onDownloadStarted: ((String) -> Unit)? = null, // 2.0-dev2.5 Defect 6: snackbar host callback, threaded into the state
 ): EpisodeListState {
     val context = LocalContext.current
     val prefs = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
@@ -4471,6 +4721,7 @@ private fun rememberEpisodeListState(
     state.pullAudio = audioCode(audioFilter ?: (prefs.getString("language", "Sub") ?: "Sub"))
     state.initialAudio = audioFilter ?: (prefs.getString("language", "Sub") ?: "Sub")
     state.initialServer = serverOverride ?: preferredServerNumber(context)
+    state.onDownloadStarted = onDownloadStarted
     val jobs by DownloadEngine.jobs.collectAsState()
     state.jobs = jobs
     // Unified rows. Media-index rows are synthetic EpisodeInfos
@@ -4555,16 +4806,23 @@ private fun rememberEpisodeListState(
     }
     state.rows = rows
     // 2.0-dev1.9: shonenX-style range grouping (see EpisodeRange.kt).
-    // Default is All — same as shonenX (chunk 0); shonenX only
-    // auto-jumps to a chunk when there is a watched/current episode
-    // and Anipull has no watched progress, so there is nothing to
-    // auto-jump to. Ranges only exist past 100 episodes; the index
-    // is clamped because a reload can land a shorter list. The
-    // selection is NOT reset on range change — batch download
-    // filters the FULL rows list, so episodes picked in one range
-    // still download after switching ranges.
+    // 2.0-dev2.5: the DEFAULT is 1–100, not All — JS, 2026-11-11,
+    // reversing the dev1.9 All default. Applied once, when ranges
+    // first land for this title: a later explicit pick (including
+    // All) is never overridden, and reloads keep the current range.
+    // Ranges only exist past 100 episodes; the index is clamped
+    // because a reload can land a shorter list. The selection is
+    // NOT reset on range change — batch download filters the FULL
+    // rows list, so episodes picked in one range still download
+    // after switching ranges. The auto-scroll-to-last-downloaded
+    // effect still switches ranges when its target sits outside
+    // 1–100.
     val ranges = remember(rows) { rows?.let { episodeRanges(it.map { r -> r.number }) } ?: emptyList() }
     state.ranges = ranges
+    if (!state.rangeDefaultApplied && ranges.size > 1) {
+        state.rangeIndex = 1
+        state.rangeDefaultApplied = true
+    }
     state.safeRangeIndex = state.rangeIndex.coerceIn(0, (ranges.size - 1).coerceAtLeast(0))
     val activeRange = ranges.getOrNull(state.safeRangeIndex)
     val visibleRows = remember(rows, activeRange) {
@@ -4707,6 +4965,10 @@ private fun rememberEpisodeListState(
     LaunchedEffect(state.mediaResult, state.fallbackResult, state.anilistResult, audioFilter, state.pullAudio) {
         val eps = rows ?: return@LaunchedEffect
         state.onLoaded?.invoke(eps.map { it.info })
+        // 2.0-dev2.5 Defect 5 tax 3d: the list just loaded — warm
+        // the first visible rows now, while the user is still
+        // browsing, not when the confirm sheet opens.
+        state.preResolveRows(visibleRows?.take(3) ?: emptyList())
         // Bare rows carry the AniList id too, so the season loop
         // resolves them by number like media-index rows. The kept
         // media-index id (index matched, file missing) counts the
@@ -4890,7 +5152,16 @@ private fun jobForRow(jobs: List<DownloadJob>, animeTitle: String, row: EpisodeR
 
 private fun jobStateText(job: DownloadJob): String = when (job.state) {
     JobState.COMPLETED -> "Downloaded"
-    JobState.DOWNLOADING -> "${job.progress}%"
+    // 2.0-dev2.5: same indeterminate rule as DownloadJobRow —
+    // progress < 0 means the total is unknown (PROGRESS_INDETERMINATE),
+    // so show bytes + speed with no % (never "-1%", never clamp to
+    // 0). A 0-byte DOWNLOADING job is still in the connecting /
+    // playlist phase, so it reads "Connecting…" either way.
+    JobState.DOWNLOADING -> when {
+        job.downloadedBytes <= 0L -> "Connecting…"
+        job.progress < 0 -> "${formatBytes(job.downloadedBytes)} · ${"%.1f".format(job.speedMBps)} MB/s"
+        else -> "${job.progress}%"
+    }
     JobState.PAUSED -> "Paused"
     JobState.QUEUED -> "Queued"
     JobState.FAILED -> "Failed"
@@ -4910,6 +5181,74 @@ private fun EpisodeViewToggle(view: String, onPick: (String) -> Unit) {
                     .padding(horizontal = 12.dp, vertical = 6.dp),
                 contentAlignment = Alignment.Center,
             ) { Text(label, color = if (selected) Color.White else Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+        }
+    }
+}
+
+// 2.0-dev2.5: prominent range selector (JS, 2026-11-11 — the old
+// "1–100 ▾" pill was too small and easy to miss). Same options as
+// EpisodeRangeSelector (All / 1–100 / 101–200 … with counts) and
+// the same pill language, but a real control: 44dp min tap height,
+// 15sp bold text, an "Episodes" label + chevron affordance, more
+// padding, and a stronger pink border. Lives here in App.kt (not
+// EpisodeRange.kt — that file is owned by the other child this
+// round); TODO(COORDINATOR): consolidate into EpisodeRangeSelector
+// with a size variant when that file is next touched, so the two
+// don't drift.
+@Composable
+private fun EpisodeRangeSelectorProminent(
+    ranges: List<EpisodeRange>,
+    selectedIndex: Int,
+    onPick: (Int) -> Unit,
+) {
+    if (ranges.size <= 1) return
+    var expanded by remember { mutableStateOf(false) }
+    val current = ranges.getOrNull(selectedIndex) ?: ranges.first()
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Box(
+            modifier = Modifier.clip(RoundedCornerShape(999.dp))
+                .border(1.5.dp, Pink.copy(alpha = 0.8f), RoundedCornerShape(999.dp))
+                .background(Card)
+                .clickable { expanded = true }
+                .defaultMinSize(minHeight = 44.dp)
+                .padding(horizontal = 18.dp, vertical = 10.dp),
+            contentAlignment = Alignment.Center,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Episodes", color = Muted, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(8.dp))
+                Text(current.label, color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.width(6.dp))
+                Text("▾", color = Pink, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+            }
+        }
+        Text("${ranges[0].count} ep", color = Muted, fontSize = 13.sp)
+        DropdownMenu(
+            expanded = expanded,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier.background(Card),
+        ) {
+            ranges.forEachIndexed { idx, range ->
+                val isCurrent = idx == selectedIndex
+                DropdownMenuItem(
+                    text = {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                range.label,
+                                color = if (isCurrent) Pink else TextMain,
+                                fontSize = 13.sp,
+                                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                            )
+                            Spacer(Modifier.width(16.dp))
+                            Text("${range.count} ep", color = Muted, fontSize = 12.sp)
+                        }
+                    },
+                    onClick = { expanded = false; onPick(idx) },
+                )
+            }
         }
     }
 }
@@ -4960,7 +5299,9 @@ private fun LazyListScope.EpisodeRowsSection(
             // 2.0-dev1.9: range selector (All / 1–100 / …) — only
             // shown past 100 episodes; the selector hides itself
             // otherwise, so short titles look exactly as before.
-            EpisodeRangeSelector(ranges, rangeIndex, onRangeChange)
+            // 2.0-dev2.5: the prominent variant (JS, 2026-11-11) —
+            // the old small pill was too easy to miss.
+            EpisodeRangeSelectorProminent(ranges, rangeIndex, onRangeChange)
             // 2.0-dev1.7: multi-select hint (long-press) + the batch
             // action, which only appears while a selection is active.
             Text("Long-press an episode to select multiple", color = Muted, fontSize = 12.sp)
@@ -5241,7 +5582,7 @@ private fun ClearanceWebViewDialog(onDone: () -> Unit, onCancel: () -> Unit) {
 }
 
 @Composable
-fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null, onPosterImageBounds: ((Rect) -> Unit)? = null, targetEpisode: Int? = null) {
+fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null, onPosterImageBounds: ((Rect) -> Unit)? = null, targetEpisode: Int? = null, onDownloadStarted: ((String) -> Unit)? = null) {
     val context = LocalContext.current
     // 2.0-dev1.0: episode rows enqueue directly at the saved quality.
     val qualityPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
@@ -5266,6 +5607,7 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
     val episodeState = rememberEpisodeListState(
         title = title, quality = qualityPref, audioFilter = null,
         onLoaded = { detailLoadedEpisodes = it },
+        onDownloadStarted = onDownloadStarted,
     )
     @Suppress("UNUSED_VARIABLE")
     val episodeRows = episodeState.rows // subscription read — see above; value itself is emitted by EpisodeList(state)
@@ -5538,7 +5880,7 @@ private fun HoldRow(iconRes: Int, label: String, onClick: () -> Unit) {
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit) {
+fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, onDownloadStarted: ((String) -> Unit)? = null) {
     // 2.0-dev1.0: wired for real — quality chips + Sub/Dub toggle,
     // per-episode rows from the same EpisodeSource load as the detail
     // section, Download Season enqueues every loaded episode. The old
@@ -5577,6 +5919,10 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit) {
             var enqueued = 0
             var firstError: String? = null
             var needsClearance = false
+            // 2.0-dev2.5: downgrade is reported ONCE for the season,
+            // not once per episode — first offered height wins.
+            var downgraded = 0
+            var downgradedQuality: Int? = null
             for (ep in eps) {
                 when (val outcome = resolveAndEnqueue(
                     context, title, ep, quality,
@@ -5589,7 +5935,13 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit) {
                     // consents to any network.
                     wifiOverride = false,
                 )) {
-                    ResolveOutcome.Enqueued -> enqueued++
+                    is ResolveOutcome.Enqueued -> {
+                        enqueued++
+                        if (outcome.downgraded) {
+                            downgraded++
+                            if (downgradedQuality == null) downgradedQuality = outcome.actualQuality
+                        }
+                    }
                     is ResolveOutcome.Error -> if (firstError == null) firstError = outcome.message
                     ResolveOutcome.NeedsClearance -> { needsClearance = true; break }
                 }
@@ -5597,8 +5949,13 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit) {
             seasonError = firstError
             seasonBusy = false
             // 2.0-dev1.7: tap feedback for the season too.
-            if (enqueued > 0) showToast(context, "Downloading season — $enqueued episode${if (enqueued == 1) "" else "s"}")
+            // 2.0-dev2.5 Defect 6: one snackbar for the season,
+            // same as the batch (was a toast). Note: while this
+            // sheet is still open the snackbar sits behind it —
+            // it becomes visible when the sheet closes.
+            if (enqueued > 0) onDownloadStarted?.invoke("Downloading season — $enqueued episode${if (enqueued == 1) "" else "s"}") ?: showToast(context, "Downloading season — $enqueued episode${if (enqueued == 1) "" else "s"}")
             else if (firstError != null) showToast(context, firstError)
+            if (downgraded > 0) showToast(context, downgradeMessage(downgradedQuality))
             if (needsClearance) {
                 // 2.0-dev1.6: the chain failed and a human check is
                 // still pending for server 3 — solving it may unlock
@@ -5624,6 +5981,7 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit) {
             seasonFromMediaIndex = fromMediaIndex
             seasonListServer = listServer
         },
+        onDownloadStarted = onDownloadStarted,
     )
     // 2.0-dev2.0: same subscription read as DetailScreen — the
     // sheet already had the onLoaded rescue above, but reading

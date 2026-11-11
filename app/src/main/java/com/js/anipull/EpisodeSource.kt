@@ -55,7 +55,14 @@ sealed class ResolvedLink {
     // Plain mp4. referer MUST be sent on the download GET (Kwik
     // rejects downloads without it). Expires: no — a direct mp4 URL
     // is stable until the file is fetched.
-    data class DirectMp4(val url: String, val referer: String, val subtitles: List<SubtitleTrack> = emptyList()) : ResolvedLink()
+    // 2.0-dev2.5: `actualQuality` is the height (px) this link
+    // actually offers, as stated by the server (DDL resolution /
+    // picked HLS variant height). Null = the server didn't say —
+    // unknown, NOT zero; callers must never treat null as "low".
+    // It is the ONLY honest basis for the file name and for
+    // quality-aware failover; DownloadJob.quality stays the
+    // REQUESTED quality.
+    data class DirectMp4(val url: String, val referer: String, val subtitles: List<SubtitleTrack> = emptyList(), val actualQuality: Int? = null) : ResolvedLink()
     // Master playlist URL. m3u8 URLs expire in 3-5 minutes: the
     // caller must hand this to HlsDownloader immediately, in the
     // same job, with no gap — never queue it for later.
@@ -75,6 +82,12 @@ sealed class ResolvedLink {
         val ivOverrideB64: String? = null,
         val referer: String? = null,
         val origin: String? = null,
+        // 2.0-dev2.5: offered height in px, when the resolver knew
+        // it (e.g. the Pahe button resolution). Null when the master
+        // playlist hasn't been parsed yet — HlsDownloader fills the
+        // real picked height in at download time and the
+        // post-download MediaExtractor check is the final truth.
+        val actualQuality: Int? = null,
     ) : ResolvedLink()
     data class Failed(val message: String) : ResolvedLink()
 }
@@ -83,7 +96,51 @@ sealed class ResolvedLink {
 // every candidate failed). The number — never a source name — is
 // what the UI shows ("Server N") and what the engine stores on the
 // job. 2.0-dev1.7.
-data class ResolvedDownload(val link: ResolvedLink, val serverNumber: Int?)
+// 2.0-dev2.5: `downgraded` is true when the winning link's offered
+// height is below the requested quality's floor (see
+// qualityFloorFor) — i.e. every server that answered could only
+// offer less, and this best-available link was accepted anyway.
+// The file is then named from the ACTUAL quality, never the
+// requested one. TODO(COORDINATOR): App.kt's resolve path can
+// surface this with a toast such as "Only 720p was available on
+// this server" when the returned ResolvedDownload has
+// downgraded=true; the engine only logs it today.
+data class ResolvedDownload(val link: ResolvedLink, val serverNumber: Int?, val downgraded: Boolean = false)
+
+// 2.0-dev2.5 — quality ladder + floor. A download that meets the
+// requested height is ideal; one step down the ladder is the
+// accepted downgrade floor (1080 -> 720, 720 -> 480, 480 -> 360,
+// 360 -> 240, 240 -> 240). Anything below the floor is NOT
+// accepted while another server might still meet it — the race
+// keeps collecting — and a delivered file below the floor fails
+// verification instead of completing.
+internal val QUALITY_LADDER = listOf(2160, 1440, 1080, 720, 480, 360, 240)
+
+internal fun qualityFloorFor(requestedHeight: Int): Int {
+    val stepIndex = QUALITY_LADDER.indexOfFirst { it <= requestedHeight }
+    if (stepIndex < 0) return QUALITY_LADDER.last()
+    return QUALITY_LADDER.getOrElse(stepIndex + 1) { QUALITY_LADDER[stepIndex] }
+}
+
+// Unknown offered quality (null) MEETS the floor: the server didn't
+// say, so the race can't reject it — the post-download
+// MediaExtractor check is the backstop for those links.
+internal fun offeredMeetsFloor(offeredHeight: Int?, requestedHeight: Int): Boolean =
+    offeredHeight == null || offeredHeight >= qualityFloorFor(requestedHeight)
+
+internal fun ResolvedLink.offeredHeight(): Int? = when (this) {
+    is ResolvedLink.DirectMp4 -> actualQuality
+    is ResolvedLink.Hls -> actualQuality
+    is ResolvedLink.Failed -> null
+}
+
+// Thrown (never auto-retried) when the stream/file that actually
+// arrived is below the requested quality's floor: the HLS variant
+// pick, or the post-download MediaExtractor probe. The engine
+// catches this separately from generic failures and marks the job
+// FAILED with this message, so the user sees the real reason and
+// Retry re-resolves instead of re-downloading the same low file.
+internal class QualityMismatchException(message: String) : java.io.IOException(message)
 
 interface EpisodeSource {
     // Internal/logging ONLY — must never reach the UI.
@@ -131,10 +188,12 @@ object EpisodeSources {
     fun anv(): EpisodeSource = AnvEpisodeSource()
 }
 
-// Try candidates in priority order; first non-Failed wins. If all
-// fail, the last Failed is returned (or a generic message when
-// nothing ran), with serverNumber null. onAttempt fires with each
-// server number as it is tried, so the UI can show live progress
+// Try candidates in priority order; the first link meeting the
+// requested quality's floor wins (2.0-dev2.5: a sub-floor link is
+// parked, not taken, while the batch keeps racing). If all fail,
+// the last Failed is returned (or a generic message when nothing
+// ran), with serverNumber null. onAttempt fires with each server
+// number as it is tried, so the UI can show live progress
 // ("Trying Server N…"). The Pahe candidate is passed in already
 // constructed with its clearance — the engine NEVER solves
 // Cloudflare.
@@ -177,19 +236,49 @@ object MultiSourceResolver {
             return ResolvedDownload(ResolvedLink.Failed("No server available — tap Retry."), null)
         }
         var last: ResolvedLink = ResolvedLink.Failed("All servers failed — tap Retry.")
+        // 2.0-dev2.5: best sub-floor link seen across ALL batches.
+        // A batch's first sub-quality win must NOT end the race:
+        // it is parked and the remaining servers are still tried.
+        // If NO server meets the floor, say so honestly instead of
+        // downloading the wrong quality (brief: never silently
+        // deliver a lower quality than selected).
+        var bestFallback: ResolvedDownload? = null
         for (group in candidates.chunked(RESOLVE_RACE_BATCH)) {
-            val (winner, groupLast) = raceGroup(group, title, anilistId, number, audio, quality, onAttempt)
+            val (winner, fallback, groupLast) = raceGroup(group, title, anilistId, number, audio, quality, onAttempt)
             last = groupLast
             if (winner != null) return winner
+            if (fallback != null) {
+                val offered = fallback.link.offeredHeight() ?: 0
+                val bestOffered = bestFallback?.link?.offeredHeight() ?: 0
+                if (bestFallback == null || offered > bestOffered) bestFallback = fallback
+            }
+        }
+        if (bestFallback != null) {
+            val offered = bestFallback.link.offeredHeight()
+            val msg = "No server has ${qualityHeight(quality)}p for this episode — " +
+                "best available is ${offered ?: "?"}p. Try a lower quality."
+            DownloadLogs.log(
+                "RESOLVE",
+                "no server met the ${qualityFloorFor(qualityHeight(quality))}p floor for $quality — " +
+                    "best offered ${offered ?: "?"}p from Server ${bestFallback.serverNumber}; failing honestly instead of downloading the wrong quality",
+            )
+            return ResolvedDownload(ResolvedLink.Failed(msg), null)
         }
         val lastMsg = (last as? ResolvedLink.Failed)?.message ?: "All servers failed — tap Retry."
         DownloadLogs.log("RESOLVE", "all servers failed — last: $lastMsg")
         return ResolvedDownload(last, null)
     }
 
-    // One batch of the race. Returns the winning download (or null)
-    // plus the last failure seen, so the caller can report it when
-    // every batch fails. Every racer logs its own result + latency.
+    // One batch of the race. Returns the winning download (a link
+    // meeting the quality floor — or of unknown quality, which
+    // can't be rejected), the best sub-floor link parked in this
+    // batch (or null), plus the last failure seen, so the caller
+    // can report it when every batch fails. Every racer logs its
+    // own result + latency. A meeting-floor win still ends the
+    // batch immediately (fast path preserved); a sub-floor win
+    // only parks and the batch keeps racing until its racers are
+    // done, so a slower server that CAN meet the quality still
+    // gets its chance.
     private suspend fun raceGroup(
         group: List<EpisodeSource>,
         title: ApiTitle,
@@ -198,7 +287,7 @@ object MultiSourceResolver {
         audio: String,
         quality: String,
         onAttempt: ((Int) -> Unit)?,
-    ): Pair<ResolvedDownload?, ResolvedLink> {
+    ): Triple<ResolvedDownload?, ResolvedDownload?, ResolvedLink> {
         val scope = CoroutineScope(currentCoroutineContext())
         val deferreds = group.map { src ->
             scope.async {
@@ -211,10 +300,10 @@ object MultiSourceResolver {
                     val tookMs = System.currentTimeMillis() - startedMs
                     when (r) {
                         is ResolvedLink.DirectMp4 -> {
-                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — DDL mp4 (${DownloadLogs.sanitizeUrl(r.url)})")
+                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — DDL mp4, offered ${r.offeredHeight() ?: "?"}p (${DownloadLogs.sanitizeUrl(r.url)})")
                         }
                         is ResolvedLink.Hls -> {
-                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — HLS master (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})")
+                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — HLS master, offered ${r.offeredHeight() ?: "?"}p (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})")
                         }
                         is ResolvedLink.Failed -> {
                             DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: FAILED in ${tookMs}ms — ${r.message}")
@@ -230,15 +319,30 @@ object MultiSourceResolver {
         }
         var last: ResolvedLink = ResolvedLink.Failed("All servers failed — tap Retry.")
         var winner: ResolvedDownload? = null
+        var fallback: ResolvedDownload? = null
         val pending = deferreds.toMutableList()
+        val requestedHeight = qualityHeight(quality)
         while (pending.isNotEmpty() && winner == null) {
             select<Unit> {
                 pending.forEach { d ->
                     d.onAwait { (src, r) ->
                         pending.remove(d)
                         when (r) {
-                            is ResolvedLink.DirectMp4 -> winner = ResolvedDownload(r, src.serverNumber)
-                            is ResolvedLink.Hls -> winner = ResolvedDownload(r, src.serverNumber)
+                            is ResolvedLink.DirectMp4, is ResolvedLink.Hls -> {
+                                val offered = r.offeredHeight()
+                                val download = ResolvedDownload(r, src.serverNumber)
+                                if (offeredMeetsFloor(offered, requestedHeight)) {
+                                    winner = download
+                                } else {
+                                    DownloadLogs.log(
+                                        "RESOLVE",
+                                        "Server ${src.serverNumber}: only ${offered ?: "?"}p for $quality " +
+                                            "(floor ${qualityFloorFor(requestedHeight)}p) — parked, still racing",
+                                    )
+                                    val fallbackOffered = fallback?.link?.offeredHeight() ?: 0
+                                    if (fallback == null || (offered ?: 0) > fallbackOffered) fallback = download
+                                }
+                            }
                             is ResolvedLink.Failed -> last = r
                         }
                     }
@@ -248,7 +352,7 @@ object MultiSourceResolver {
         // Best-effort cancel of the losers; their blocking I/O
         // finishes on its own threads and the results are discarded.
         pending.forEach { it.cancel() }
-        return winner to last
+        return Triple(winner, fallback, last)
     }
 
     suspend fun loadEpisodesWithFailover(

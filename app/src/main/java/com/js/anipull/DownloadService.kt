@@ -27,6 +27,13 @@ class DownloadService : Service() {
     private val scope = CoroutineScope(Job() + Dispatchers.Default)
     private var watcher: Job? = null
     private var foregroundStarted = false
+    // 2.0-dev2.5 DEFECT 1/1b: the watcher re-posted the foreground
+    // notification every second with per-job progress text
+    // ("Downloading … E1 · N%") — a second notification that also
+    // re-animated on Nothing OS. The foreground notification is
+    // now the static group summary (see Notifications.kt); the
+    // watcher re-posts it ONLY when its count text changes.
+    private var lastPostedSummary: String? = null
 
     override fun onCreate() {
         super.onCreate()
@@ -64,10 +71,17 @@ class DownloadService : Service() {
                             return@launch
                         }
                     } else {
-                        DownloadNotifications.showServiceNotification(
-                            this@DownloadService,
-                            activeSummary(jobs),
-                        )
+                        // Static count text only — no title, no %
+                        // (per-job progress lives in the per-job
+                        // notification). Re-post only on change.
+                        val summary = activeSummary(jobs)
+                        if (summary != lastPostedSummary) {
+                            lastPostedSummary = summary
+                            DownloadNotifications.showServiceNotification(
+                                this@DownloadService,
+                                summary,
+                            )
+                        }
                     }
                     delay(1000)
                 }
@@ -76,16 +90,19 @@ class DownloadService : Service() {
         return START_NOT_STICKY
     }
 
+    // 2.0-dev2.5 DEFECT 1: count-only text. The old single-job
+    // branch ("Downloading ${title} — E${n} · ${progress}%") put
+    // per-job progress in the foreground notification — the second
+    // notification. Titles and % now live only in the per-job
+    // notification; this stays static so the shade entry sits
+    // quietly with only its child's progress bar moving.
     private fun activeSummary(jobs: List<DownloadJob>): String {
         val active = jobs.filter { it.state == JobState.DOWNLOADING || it.state == JobState.QUEUED }
         val downloading = active.count { it.state == JobState.DOWNLOADING }
         return when {
-            downloading == 0 && active.isEmpty() -> "No active downloads"
+            downloading == 0 && active.isEmpty() -> "Anipull downloads"
             downloading == 0 -> "${active.size} download(s) queued"
-            downloading == 1 -> {
-                val job = active.first { it.state == JobState.DOWNLOADING }
-                "Downloading ${job.animeTitle} — E${job.episodeNumber} · ${job.progress}%"
-            }
+            downloading == 1 -> "Downloading 1 episode"
             else -> "Downloading $downloading episodes"
         }
     }

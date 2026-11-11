@@ -53,14 +53,22 @@ data class RecentAnime(
 // at the end of the list (and a retry replaces + appends), so the
 // reversed list is recency order: the first sighting of an anime
 // wins its title/poster, and the max episode is tracked across
-// all of that anime's jobs. titleId <= 0 (pre-context jobs) falls
-// back to the anime title as the key, with a negative-hash id in
-// the demoToApi style so PosterCard/detail still get a stable id.
+// all of that anime's jobs.
+// 2.0-dev2.5 DEFECT 4: the key is the ANIME, not the job's
+// titleId. Jobs persisted before dev2.2 carry titleId = 0
+// ("title:Death Note") while newer jobs carry the real AniLab id
+// ("id:<n>") — the same anime split into two rows. Group by the
+// normalized title string (lowercase, strip non-alphanumerics —
+// normalizeTitle() in EpisodeSource.kt) so old and new jobs land
+// in one row. The ApiTitle id prefers a real titleId from ANY job
+// in the group (the most recent job may be a pre-context one),
+// falling back to the negative-hash id only when no job in the
+// group ever had one.
 fun recentlyDownloadedAnimes(jobs: List<DownloadJob>): List<RecentAnime> {
     val byKey = LinkedHashMap<String, RecentAnime>()
     for (job in jobs.asReversed()) {
         if (job.animeTitle.isBlank()) continue
-        val key = if (job.titleId > 0) "id:${job.titleId}" else "title:${job.animeTitle}"
+        val key = "title:${normalizeTitle(job.animeTitle)}"
         val existing = byKey[key]
         if (existing == null) {
             val id = if (job.titleId > 0) job.titleId else -job.animeTitle.hashCode().toLong()
@@ -73,8 +81,22 @@ fun recentlyDownloadedAnimes(jobs: List<DownloadJob>): List<RecentAnime> {
                 ),
                 lastEpisode = maxOf(job.episodeNumber, 0),
             )
-        } else if (job.episodeNumber > existing.lastEpisode) {
-            byKey[key] = existing.copy(lastEpisode = job.episodeNumber)
+        } else {
+            var next = existing
+            // Upgrade a placeholder id when a job with a real id
+            // shows up (usually the older job in the group).
+            if (existing.title.id <= 0 && job.titleId > 0) {
+                next = next.copy(title = existing.title.copy(id = job.titleId))
+            }
+            // Keep the most recent poster; fill a missing one from
+            // an older job.
+            if (existing.title.poster == null && job.poster != null) {
+                next = next.copy(title = next.title.copy(poster = job.poster))
+            }
+            if (job.episodeNumber > next.lastEpisode) {
+                next = next.copy(lastEpisode = job.episodeNumber)
+            }
+            byKey[key] = next
         }
     }
     return byKey.values.toList()
