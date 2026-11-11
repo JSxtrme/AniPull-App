@@ -69,18 +69,13 @@
     ]
   },
   "dev": {
-    "versionCode": 60,
-    "versionName": "2.0-dev1.9",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev1.9/anipull-2.0-dev1.9.apk",
-    "sha256": "4ab05ef9a2909de215f8c4bb070f16d705dc662c40defcc033eb135a3186991f",
-    "features": [
-      "Temporary Download Logs section in Settings (under Crash Logs, DEBUGGING) \u2014 a rolling log of the whole download pipeline with a Copy report button, so a failed download can finally be diagnosed from the phone",
-      "Episode range grouping like shonenX \u2014 All, 1\u2013100, 101\u2013200 and so on above the episode list, so long titles like One Piece can be browsed a hundred episodes at a time"
-    ],
+    "versionCode": 61,
+    "versionName": "2.0-dev2.0",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.0/anipull-2.0-dev2.0.apk",
+    "sha256": "cec966ef4988c4655a85b1dbf7602fe22cf025b27956032bfbb253ca637c284c",
+    "features": [],
     "fixes": [
-      "Fixed long titles like One Piece lagging the phone \u2014 the episode list composed all 1,180 rows at once in a plain Column; rows are now lazy items of the scrolling list, so only the viewport is composed",
-      "Fixed every DDL download failing when a custom download folder is picked \u2014 the staging folder was never created, so the file open died before a single byte; the folder is now created first",
-      "Fixed the HLS engine silently writing an error page as the init segment when its fetch failed \u2014 a non-200 init fetch now throws instead of corrupting the download"
+      "Fixed the episode list showing only skeletons \u2014 dev1.9's restructure split the episode list into a state holder and a plain emitter, and the derived episode rows were plain variables that nothing subscribed to, so the detail page never re-rendered when a list landed; rows are snapshot state now and the detail page and download sheet read them in their own scope, so episode rows appear as soon as a source lands (list and grid, detail and sheet)"
     ]
   }
 }
