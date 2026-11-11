@@ -69,23 +69,18 @@
     ]
   },
   "dev": {
-    "versionCode": 67,
-    "versionName": "2.0-dev2.6",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.6/anipull-2.0-dev2.6.apk",
-    "sha256": "1dea4a10268db05347709f0cbb4236a705d84c2f1dd50d2e85307218fc762c48",
+    "versionCode": 68,
+    "versionName": "2.0-dev2.7",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.7/anipull-2.0-dev2.7.apk",
+    "sha256": "08448e3066d748142cd93a7f348a3f36833b243b488873af55788341f4aa92a2",
     "features": [
-      "Downloads now land in your public Downloads folder \u2014 Files > Downloads > Anipull \u2014 so finished videos show up in Gallery and file managers, not hidden inside the app's private folder",
-      "Download sheet now shows the file size for the selected quality before you tap download (e.g. \"1080p \u00b7 240 MB\"), so a wrong-quality link is visible at a glance",
-      "Downloads tab now shows \"downloaded X MB / Y MB\" while downloading, and completed episodes show their real file size on the episode row"
+      "The download race now proves each server's real quality before choosing \u2014 an HLS link's master playlist is checked for its true top resolution, so the winner is always a server that actually has your requested quality, and the log now says why it won"
     ],
     "fixes": [
-      "Fixed downloads landing in a hidden app-private folder \u2014 completed files are now published to the public Downloads/Anipull folder (visible in Gallery/Files), old completed files move there on first launch, and the Settings path label now shows the real location",
-      "Fixed a stale cache replaying the wrong quality \u2014 download links cached before the quality checks existed (no quality tag) are now dropped and never cached again, so a 360p link can no longer keep winning for 24 hours after the fix",
-      "Fixed the download-then-delete quality loop \u2014 unknown-quality DDL links are now probed for their real resolution (a small ranged MP4 header read) before any bytes download, so a 360p file can no longer win a 1080p request; a known 1080p HLS leg now beats an unknown-quality DDL, and JustAnime's DDL leg can no longer shadow its own HLS legs",
-      "Fixed the pre-resolve crash when navigating away mid-warm \u2014 pre-resolves now run on an application-lifetime scope instead of a composable scope",
-      "Fixed the Download Logs summary showing \"unknown\" title/server/link \u2014 it now parses the real enqueue and resolve lines",
-      "Fixed duplicate resolves \u2014 pre-resolve and confirm no longer run two concurrent resolves for the same episode (shared in-flight map, one resolve per episode+quality+audio)",
-      "Fixed episode lists failing on one server \u2014 its API now rejects page sizes over 20 (HTTP 422), so episode fetching now pages at 20"
+      "Fixed the total size changing mid-download \u2014 the total is now computed once when the download starts (exact Content-Length for direct files, bandwidth x duration estimate for streams) and frozen for the whole job, so the ~488 MB figure never moves while progress climbs",
+      "Fixed Cancel sometimes doing nothing \u2014 Cancel now registers immediately in every phase (queued, resolving, downloading, remux, publish), disconnects a stuck download connection at once, and the job lands in Cancelled with the notification dismissed right away instead of finishing anyway",
+      "Fixed the race picking a server on luck \u2014 the winner is now always a proven exact-quality server (first proven arrival is the fastest proven server, so no resolve slowdown); a server that only has a lower quality is parked and served flagged as a downgrade only if nothing proves your quality, and the serving-server shortcut can no longer bypass that check",
+      "Fixed the Editor's Picks header overlapping its posters \u2014 the header now sits cleanly above the carousel with proper spacing, and the same fix was applied to the Explore header, which had the identical layout bug"
     ]
   }
 }
