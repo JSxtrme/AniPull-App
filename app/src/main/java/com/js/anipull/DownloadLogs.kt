@@ -41,11 +41,20 @@ import java.util.Locale
 //   DownloadService.onCreate and CloudflareClearance.ensureClearance,
 //   so resolve-time entries (logged before any engine init) sit in
 //   memory and are flushed to the file on the first init.
-// - Bounded: the last MAX_ENTRIES (200) entries are kept, in memory
-//   and in the file — the log can never grow forever.
+// - Bounded: the first HEAD_KEEP (50) entries AND the last
+//   TAIL_KEEP (150) entries are kept, in memory and in the file —
+//   200 total, so the log can never grow forever. The head pins
+//   the log's start (RESOLVE lines from the first jobs), the tail
+//   keeps the latest failures; the dropped middle is counted and
+//   marked "[... N entries omitted in the middle ...]" in the
+//   report and the file, so the gap is never silent.
+// - report() pins a per-job summary at the top, derived from the
+//   entries themselves (see buildJobSummaries), so the next pasted
+//   log answers "which server and which host" even when 239
+//   segment failures fill the tail.
 // - report(context) returns the full self-contained plain-text
-//   report (app version, device/Android, every entry oldest first)
-//   for Copy; clear() wipes memory + file.
+//   report (app version, device/Android, per-job summary, every
+//   KEPT entry oldest first) for Copy; clear() wipes memory + file.
 // - REDACTION: no secrets, no cookie values, no signed URLs.
 //   sanitizeUrl() strips query params and fragments (host + path
 //   only); sanitize() also scrubs cf_clearance values out of any
@@ -88,13 +97,38 @@ data class DownloadLogEntry(
 
 object DownloadLogs {
     const val MAX_ENTRIES = 200
+    // 2.0-dev2.2 head+tail retention: the first HEAD_KEEP entries
+    // (the log's start — RESOLVE lines included) are pinned and the
+    // last TAIL_KEEP roll; everything in between is dropped and
+    // counted. HEAD_KEEP + TAIL_KEEP == MAX_ENTRIES.
+    const val HEAD_KEEP = 50
+    const val TAIL_KEEP = 150
     private const val DIR_NAME = "download_logs"
     private const val FILE_NAME = "download_log.txt"
 
     private val lock = Any()
     private val buffer = ArrayDeque<DownloadLogEntry>()
+    // Entries dropped from the middle by head+tail trimming (0 =
+    // nothing dropped — the buffer is still a plain prefix).
+    private var omittedMiddleCount = 0
     private var appContext: Context? = null
     private var loadedFromFile = false
+
+    private fun omittedMarker(n: Int) =
+        "[... $n ${if (n == 1) "entry" else "entries"} omitted in the middle ...]"
+
+    private val omittedMarkerRegex =
+        Regex("""\[\.\.\. (\d+) entr(?:y|ies) omitted in the middle \.\.\.\]""")
+
+    private fun parseOmittedMarker(line: String): Int? =
+        omittedMarkerRegex.find(line)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+    // Head+tail trim of a full list: first HEAD_KEEP + last
+    // TAIL_KEEP, plus how many were dropped from the middle.
+    private fun trimHeadTail(list: List<DownloadLogEntry>): Pair<List<DownloadLogEntry>, Int> {
+        if (list.size <= MAX_ENTRIES) return list to 0
+        return (list.take(HEAD_KEEP) + list.takeLast(TAIL_KEEP)) to (list.size - MAX_ENTRIES)
+    }
 
     fun init(context: Context) {
         val ctx = context.applicationContext
@@ -103,13 +137,16 @@ object DownloadLogs {
             appContext = ctx
             if (!loadedFromFile) {
                 loadedFromFile = true
-                // Merge the persisted tail under the in-memory
-                // entries (same process may already have logged
-                // resolve attempts before any init ran).
-                val persisted = readFileEntries(ctx)
-                val merged = (persisted + buffer.toList()).takeLast(MAX_ENTRIES)
+                // Merge the persisted entries under the in-memory
+                // ones (same process may already have logged
+                // resolve attempts before any init ran), keeping
+                // head+tail — and carry the file's omitted count
+                // (its middle gap is real even after a reload).
+                val (persisted, persistedOmitted) = readFileEntries(ctx)
+                val (merged, newlyOmitted) = trimHeadTail(persisted + buffer.toList())
                 buffer.clear()
                 buffer.addAll(merged)
+                omittedMiddleCount = persistedOmitted + newlyOmitted
                 needFlush = true
             }
         }
@@ -121,7 +158,13 @@ object DownloadLogs {
         var ctx: Context? = null
         synchronized(lock) {
             buffer.addLast(entry)
-            while (buffer.size > MAX_ENTRIES) buffer.removeFirst()
+            // Head+tail: once full, drop the oldest NON-head entry
+            // (index HEAD_KEEP) — the first 50 stay pinned, the
+            // last 150 roll, the middle gap grows by one.
+            if (buffer.size > MAX_ENTRIES) {
+                buffer.removeAt(HEAD_KEEP)
+                omittedMiddleCount++
+            }
             ctx = appContext
         }
         ctx?.let { appendToFile(it, entry) }
@@ -138,9 +181,13 @@ object DownloadLogs {
         synchronized(lock) { return buffer.toList() }
     }
 
+    // How many entries were dropped from the middle by head+tail
+    // trimming (0 = none dropped yet).
+    fun omittedCount(): Int = synchronized(lock) { omittedMiddleCount }
+
     fun clear(context: Context) {
         val ctx = context.applicationContext
-        synchronized(lock) { buffer.clear() }
+        synchronized(lock) { buffer.clear(); omittedMiddleCount = 0 }
         try {
             File(File(ctx.filesDir, DIR_NAME), FILE_NAME).delete()
         } catch (_: Exception) {
@@ -152,24 +199,33 @@ object DownloadLogs {
         log("TEST", "Test entry — the download pipeline did not run. Real entries appear here when a download is attempted.")
     }
 
-    // Full self-contained report: header (app + device) + every
-    // entry oldest first, so the last job's stage trail reads top
-    // to bottom. No URLs with query params, no cookie values.
+    // Full self-contained report: header (app + device) + a
+    // per-job summary + every kept entry oldest first, so the last
+    // job's stage trail reads top to bottom. A "[... N entries
+    // omitted in the middle ...]" line marks the head+tail gap.
+    // No URLs with query params, no cookie values.
     fun report(context: Context): String {
         init(context)
         val entries = entries(context)
+        val omitted = omittedCount()
         val version = appVersion(context)
+        val summaries = buildJobSummaries(entries)
         return buildString {
             appendLine("Anipull download log — TEMPORARY debug report")
             appendLine("App: ${version.first} (versionCode ${version.second}, ${context.packageName})")
             appendLine("Device: ${Build.MANUFACTURER} ${Build.MODEL} — Android ${Build.VERSION.RELEASE} (SDK ${Build.VERSION.SDK_INT})")
             appendLine("Generated: ${SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())}")
-            appendLine("Entries: ${entries.size} (kept: last $MAX_ENTRIES)")
+            appendLine("Entries: ${entries.size} kept (first $HEAD_KEEP + last $TAIL_KEEP${if (omitted > 0) ", $omitted omitted in the middle" else ""})")
+            appendLine("---")
+            append(jobSummaryText(summaries))
             appendLine("---")
             if (entries.isEmpty()) {
                 appendLine("No download log entries yet — try a download, then come back here.")
             } else {
-                entries.forEach { appendLine(it.toLine()) }
+                entries.forEachIndexed { index, entry ->
+                    if (omitted > 0 && index == HEAD_KEEP && entries.size > HEAD_KEEP) appendLine(omittedMarker(omitted))
+                    appendLine(entry.toLine())
+                }
             }
             appendLine("---")
             appendLine("End of report. Paste this whole text when reporting a failed download.")
@@ -184,6 +240,274 @@ object DownloadLogs {
             (info.versionName ?: "?") to code
         } catch (_: Exception) {
             "?" to 0L
+        }
+    }
+
+    // --- Per-job summary (2.0-dev2.2) --------------------------------
+    //
+    // Derived from the log entries themselves — no new state, no new
+    // per-segment lines. The summary is what the next pasted log
+    // must answer: which job, which server (number + internal
+    // sub-server name — debug report only, never app UI), which
+    // playlist/segment hosts, which headers went out with the
+    // segment fetches, and what failed first with which HTTP code.
+    //
+    // Sources (all already in the log — nothing invented):
+    // - ENGINE "[job X] enqueue: <title> E<n> <quality> <Sub|Dub>,
+    //   server=N, link=<kind>" gives job id, title, episode,
+    //   quality/audio, winning server number, link kind.
+    // - RESOLVE "start: ep <n> <jpn|eng> <quality>" + the matching
+    //   "Server N (<name>): OK … — HLS master (<url>)" gives the
+    //   sub-server name and the playlist host. A direct-resolve job
+    //   has no RESOLVE lines, so its sub-server stays "unknown".
+    // - HLS "start: master=<url> … referer=<v|none> origin=<v|none>"
+    //   gives the playlist host (again) and the headers sent on
+    //   segment fetches. Lines from before dev2.2 have no referer/
+    //   origin fields — those read "not logged", not "none".
+    // - HLS "media playlist: <n> segments, …, first segment
+    //   host=<host>" gives the segment host + segment count.
+    //   DDL jobs have no segments: segment host is "n/a".
+    // - First "FAILED"/"aborted:" line in the job's window gives
+    //   the first failure; its HTTP code comes from the "HTTP <nnn>"
+    //   in that line. The job's last decisive ENGINE line gives
+    //   the outcome.
+    data class JobSummary(
+        val jobId: String,
+        val title: String,
+        val episodeNumber: Int,
+        val quality: String,
+        val audio: String,
+        val serverNumber: Int,
+        val subServer: String,
+        val linkKind: String,
+        val playlistHost: String,
+        val segmentHost: String,
+        val segmentTotal: Int?,
+        val referer: String,
+        val origin: String,
+        val firstFailure: String?,
+        val firstFailureCode: String?,
+        val outcome: String,
+    )
+
+    private val jobIdRegex = Regex("""^\[job (\S+)\] (.*)$""")
+    private val enqueueRegex = Regex("""enqueue: (.+) E(\d+) (\d+p) (Sub|Dub), server=(\d+), link=([^,]+)""")
+    private val runJobRegex = Regex("""runJob start: server=(\d+), link=([^,]+), quality=(\S+) (\S+)""")
+    private val resolveStartRegex = Regex("""start: ep (\d+) (\S+) (\S+), candidates=""")
+    private val resolveOkRegex = Regex("""Server (\d+)(?: \(([^)]+)\))?: OK in \d+ms — (HLS master|DDL mp4) \((https?://[^)]+)\)""")
+    private val hlsStartRegex = Regex("""start: master=(\S+) quality=(\S+) audio=(\S+)(?: referer=(\S+) origin=(\S+))?""")
+    private val mediaPlaylistRegex = Regex("""media playlist: (\d+) segments,.*first segment host=(\S+)""")
+    private val mediaPlaylistOldRegex = Regex("""media playlist: (\d+) segments""")
+    private val ddlGetRegex = Regex("""GET (https?://\S+) -> HTTP (\d+)""")
+    private val httpCodeRegex = Regex("""HTTP (\d{3})""")
+
+    private fun hostOf(url: String): String? = try {
+        java.net.URL(url).host?.takeIf { it.isNotBlank() }
+    } catch (_: Exception) {
+        url.substringAfter("://", "").substringBefore("/").substringBefore(":").takeIf { it.isNotBlank() }
+    }
+
+    private fun jobIdOf(message: String): String? =
+        jobIdRegex.find(message)?.groupValues?.getOrNull(1)
+
+    private fun buildJobSummaries(entries: List<DownloadLogEntry>): List<JobSummary> {
+        val jobIds = entries.mapNotNull { jobIdOf(it.message) }.distinct()
+        return jobIds.takeLast(5).mapNotNull { summarizeJob(it, entries) }
+    }
+
+    private fun summarizeJob(jobId: String, entries: List<DownloadLogEntry>): JobSummary? {
+        // Job-tagged lines (ENGINE/DDL), in order, with indices.
+        val tagged = entries.mapIndexedNotNull { index, entry ->
+            jobIdOf(entry.message)?.takeIf { it == jobId }?.let { index to entry }
+        }
+        if (tagged.isEmpty()) return null
+        val enqueueEntry = tagged.firstOrNull { (_, e) -> e.message.contains("enqueue: ") }
+        val enqueueIdx = enqueueEntry?.first ?: -1
+
+        var title = "unknown"
+        var episode = 0
+        var quality = "?"
+        var audio = "?"
+        var server = 0
+        var linkKind = "unknown"
+        enqueueEntry?.second?.message?.let { msg ->
+            enqueueRegex.find(msg)?.let { m ->
+                title = m.groupValues[1]
+                episode = m.groupValues[2].toIntOrNull() ?: 0
+                quality = m.groupValues[3]
+                audio = m.groupValues[4]
+                server = m.groupValues[5].toIntOrNull() ?: 0
+                linkKind = m.groupValues[6].trim()
+            }
+        }
+        if (enqueueIdx < 0) {
+            // No enqueue line (e.g. job restored after a restart):
+            // runJob still has server / link / quality / audio.
+            tagged.firstOrNull { (_, e) -> e.message.contains("runJob start:") }?.second?.message?.let { msg ->
+                runJobRegex.find(msg)?.let { m ->
+                    server = m.groupValues[1].toIntOrNull() ?: server
+                    linkKind = m.groupValues[2].trim()
+                    quality = m.groupValues[3]
+                    audio = m.groupValues[4]
+                }
+            }
+        }
+        val isHls = linkKind.contains("HLS", ignoreCase = true)
+        val isDdl = linkKind.contains("DDL", ignoreCase = true) || linkKind.contains("mp4", ignoreCase = true)
+
+        // --- RESOLVE block: the start line matching this job's
+        // episode/audio/quality, then its OK line (name + URL).
+        var subServer = "unknown"
+        var playlistHost = "unknown"
+        if (episode > 0) {
+            val audioLower = when (audio) { "Sub" -> "jpn"; "Dub" -> "eng"; else -> audio.lowercase() }
+            val searchEnd = if (enqueueIdx >= 0) enqueueIdx else entries.size
+            var resolveStartIdx = -1
+            for (i in searchEnd - 1 downTo 0) {
+                val e = entries[i]
+                if (e.stage != "RESOLVE") continue
+                val m = resolveStartRegex.find(e.message) ?: continue
+                if ((m.groupValues[1].toIntOrNull() ?: -1) == episode &&
+                    m.groupValues[2] == audioLower && m.groupValues[3] == quality
+                ) { resolveStartIdx = i; break }
+            }
+            if (resolveStartIdx >= 0) {
+                for (i in resolveStartIdx + 1 until searchEnd) {
+                    val e = entries[i]
+                    if (e.stage != "RESOLVE") continue
+                    if (e.message.startsWith("start:")) break // next resolve block
+                    val m = resolveOkRegex.find(e.message) ?: continue
+                    subServer = m.groupValues[2].ifBlank { "unknown" }
+                    playlistHost = hostOf(m.groupValues[4]) ?: "unknown"
+                    break
+                }
+            }
+        }
+
+        // --- HLS/DDL window: from enqueue to the job's last
+        // tagged line (its terminal ENGINE line). HLS lines carry
+        // no job id, so the window is chronological.
+        val windowStart = if (enqueueIdx >= 0) enqueueIdx else tagged.first().first
+        val windowEnd = tagged.last().first
+        var referer = "not logged (older build)"
+        var origin = "not logged (older build)"
+        var segmentHost = if (isDdl) "n/a" else "unknown"
+        var segmentTotal: Int? = null
+        var firstFailure: String? = null
+        // Two jobs can download in parallel, so HLS lines in this
+        // window may belong to the other job: only trust lines
+        // whose quality/audio match this job (the HLS start line
+        // carries both). Lines after a matched start belong to
+        // this job; if no start line survived in the window at all
+        // (trimmed away), fall back to accepting them — and the
+        // job-tagged ENGINE FAILED fallback below covers the rest.
+        var hlsMatched = false
+        var anyHlsStartSeen = false
+        for (i in windowStart..windowEnd) {
+            val e = entries[i]
+            if (e.stage != "HLS") continue
+            hlsStartRegex.find(e.message)?.let { m ->
+                anyHlsStartSeen = true
+                val qualityMatches = quality == "?" || m.groupValues[2] == quality
+                val audioMatches = audio == "?" || m.groupValues[3] == audio
+                if (qualityMatches && audioMatches) {
+                    hlsMatched = true
+                    hostOf(m.groupValues[1])?.let { playlistHost = it }
+                    if (m.groupValues[4].isNotBlank()) referer = m.groupValues[4]
+                    if (m.groupValues[5].isNotBlank()) origin = m.groupValues[5]
+                }
+            }
+            val belongsToJob = hlsMatched || !anyHlsStartSeen
+            if (belongsToJob) {
+                if (firstFailure == null && (e.message.startsWith("FAILED ") || e.message.startsWith("aborted:"))) {
+                    firstFailure = e.message.removePrefix("FAILED ")
+                }
+                if (segmentTotal == null) {
+                    mediaPlaylistRegex.find(e.message)?.let { m ->
+                        segmentTotal = m.groupValues[1].toIntOrNull()
+                        segmentHost = m.groupValues[2]
+                    } ?: mediaPlaylistOldRegex.find(e.message)?.let { m ->
+                        segmentTotal = m.groupValues[1].toIntOrNull()
+                    }
+                }
+            }
+        }
+        // DDL playlist host fallback: the DDL GET line carries it.
+        if (isDdl && playlistHost == "unknown") {
+            tagged.firstOrNull { (_, e) -> e.stage == "DDL" }?.second?.message?.let { msg ->
+                ddlGetRegex.find(msg)?.let { m -> playlistHost = hostOf(m.groupValues[1]) ?: playlistHost }
+            }
+        }
+        // First failure fallback: a job-tagged ENGINE FAILED line
+        // (covers DDL failures and jobs whose HLS stage never ran).
+        if (firstFailure == null) {
+            tagged.firstOrNull { (_, e) -> e.message.contains("FAILED:") }?.second?.message?.let { msg ->
+                firstFailure = msg.substringAfter("] ", msg).substringAfter("FAILED: ").trim()
+            }
+        }
+        val firstFailureCode = firstFailure?.let { httpCodeRegex.find(it)?.groupValues?.getOrNull(1) }
+
+        // --- Outcome: the job's last decisive ENGINE line wins.
+        var outcome = "in progress / unknown"
+        for ((_, e) in tagged) {
+            val msg = e.message
+            when {
+                msg.contains("COMPLETED:") -> outcome = "COMPLETED"
+                msg.contains("final failure (no auto-retry left):") ->
+                    outcome = "FAILED — " + msg.substringAfter("final failure (no auto-retry left): ").trim()
+                msg.contains("GATED:") -> outcome = "PAUSED — waiting for Wi-Fi"
+                msg.contains("CANCELLED by user") -> outcome = "CANCELLED"
+                msg.contains("auto-retry ") ->
+                    outcome = "FAILED — retrying (" + msg.substringAfter("auto-retry ").trim() + ")"
+                msg.contains("FAILED:") ->
+                    outcome = "FAILED — " + msg.substringAfter("FAILED: ").trim()
+            }
+        }
+
+        return JobSummary(
+            jobId = jobId, title = title, episodeNumber = episode,
+            quality = quality, audio = audio, serverNumber = server,
+            subServer = subServer, linkKind = linkKind,
+            playlistHost = playlistHost, segmentHost = segmentHost,
+            segmentTotal = segmentTotal, referer = referer, origin = origin,
+            firstFailure = firstFailure, firstFailureCode = firstFailureCode,
+            outcome = outcome,
+        )
+    }
+
+    private fun jobSummaryText(summaries: List<JobSummary>): String = buildString {
+        appendLine("PER-JOB SUMMARY (derived from the entries below — sub-server names are internal debug info, never shown in the app UI)")
+        if (summaries.isEmpty()) {
+            appendLine("No job entries yet — start a download and its summary will appear here.")
+            return@buildString
+        }
+        val latest = summaries.last()
+        appendLine("Most recent job:")
+        appendLine("  Job: ${latest.jobId}")
+        appendLine("  Title: ${latest.title} — episode ${if (latest.episodeNumber > 0) latest.episodeNumber else "?"}")
+        appendLine("  Quality/audio: ${latest.quality} ${latest.audio}")
+        appendLine("  Winning server: Server ${latest.serverNumber} (${latest.subServer})")
+        appendLine("  Link: ${latest.linkKind}")
+        appendLine("  Playlist host: ${latest.playlistHost}")
+        appendLine("  Segment host: ${latest.segmentHost}${latest.segmentTotal?.let { " ($it segments)" } ?: ""}")
+        if (latest.linkKind.contains("HLS", ignoreCase = true)) {
+            appendLine("  Headers on segment fetches: Referer: ${latest.referer} · Origin: ${latest.origin}")
+        } else {
+            appendLine("  Headers on segment fetches: n/a (no segments — direct download)")
+        }
+        // Don't repeat the code when the failure text already
+        // carries it ("segment 0: Segment 0 HTTP 403 (HTTP 403)"
+        // would be noise).
+        val failureCodeSuffix = latest.firstFailureCode?.takeIf { code ->
+            latest.firstFailure?.contains("HTTP $code") != true
+        }?.let { " (HTTP $it)" }.orEmpty()
+        appendLine("  First failure: ${latest.firstFailure ?: "none"}$failureCodeSuffix")
+        appendLine("  Outcome: ${latest.outcome}")
+        if (summaries.size > 1) {
+            appendLine("Older jobs (one line each):")
+            summaries.dropLast(1).forEach { s ->
+                appendLine("  - ${s.jobId} | ${s.title} E${if (s.episodeNumber > 0) s.episodeNumber else "?"} | Server ${s.serverNumber} (${s.subServer}) | ${s.linkKind} | ${s.outcome}${s.firstFailureCode?.let { " | first failure HTTP $it" } ?: ""}")
+            }
         }
     }
 
@@ -212,13 +536,22 @@ object DownloadLogs {
     private fun logFile(context: Context): File =
         File(File(context.filesDir, DIR_NAME).apply { mkdirs() }, FILE_NAME)
 
-    private fun readFileEntries(context: Context): List<DownloadLogEntry> {
+    // Entries + the omitted-middle count recorded by the marker
+    // line (if any) — the gap survives a restart. No trimming
+    // here: callers decide (init merges, append trims).
+    private fun readFileEntries(context: Context): Pair<List<DownloadLogEntry>, Int> {
         return try {
             val file = logFile(context)
-            if (!file.exists()) return emptyList()
-            file.readLines().mapNotNull { DownloadLogEntry.fromLine(it) }.takeLast(MAX_ENTRIES)
+            if (!file.exists()) return emptyList<DownloadLogEntry>() to 0
+            var omitted = 0
+            val entries = mutableListOf<DownloadLogEntry>()
+            file.readLines().forEach { line ->
+                parseOmittedMarker(line)?.let { omitted = it }
+                    ?: DownloadLogEntry.fromLine(line)?.let { entries += it }
+            }
+            entries to omitted
         } catch (_: Exception) {
-            emptyList()
+            emptyList<DownloadLogEntry>() to 0
         }
     }
 
@@ -226,24 +559,39 @@ object DownloadLogs {
         try {
             val file = logFile(context)
             file.appendText(entry.toLine() + "\n")
-            // Trim the file to the same bound as the buffer, so a
-            // long session cannot grow it without limit. Trimming
-            // rewrites the whole (small, <=200-line) file.
-            val lines = file.readLines()
-            if (lines.size > MAX_ENTRIES) {
-                file.writeText(lines.takeLast(MAX_ENTRIES).joinToString("\n") + "\n")
+            // Trim the file to the same head+tail bound as the
+            // buffer, so a long session cannot grow it without
+            // limit. Trimming rewrites the whole (small,
+            // <=200-line) file, with the omission marker between
+            // head and tail. The previously omitted count carries
+            // over — the gap only grows.
+            val (entries, prevOmitted) = readFileEntries(context)
+            if (entries.size > MAX_ENTRIES) {
+                val (kept, dropped) = trimHeadTail(entries)
+                writeFileLines(file, kept, prevOmitted + dropped)
             }
         } catch (_: Exception) {
             // Logging must never break a download.
         }
     }
 
+    private fun writeFileLines(file: File, entries: List<DownloadLogEntry>, omitted: Int) {
+        file.writeText(buildString {
+            entries.forEachIndexed { index, entry ->
+                if (omitted > 0 && index == HEAD_KEEP && entries.size > HEAD_KEEP) appendLine(omittedMarker(omitted))
+                appendLine(entry.toLine())
+            }
+        })
+    }
+
     private fun writeFile(context: Context) {
         try {
-            val lines = synchronized(lock) { buffer.map { it.toLine() } }
-            logFile(context).writeText(
-                if (lines.isEmpty()) "" else lines.joinToString("\n") + "\n",
-            )
+            val (lines, omitted) = synchronized(lock) { buffer.toList() to omittedMiddleCount }
+            if (lines.isEmpty()) {
+                logFile(context).writeText("")
+            } else {
+                writeFileLines(logFile(context), lines, omitted)
+            }
         } catch (_: Exception) {
         }
     }
@@ -260,6 +608,9 @@ object DownloadLogs {
 fun DownloadLogsPage() {
     val ctx = LocalContext.current
     var entries by remember { mutableStateOf(DownloadLogs.entries(ctx)) }
+    // Re-read on every composition (refresh() recomposes): the
+    // omitted-middle count changes as the log fills.
+    val omitted = DownloadLogs.omittedCount()
     fun refresh() { entries = DownloadLogs.entries(ctx) }
     fun copyReport() {
         val cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
@@ -272,7 +623,7 @@ fun DownloadLogsPage() {
         SettingsCard {
             Column(modifier = Modifier.padding(vertical = 12.dp)) {
                 Text(
-                    if (entries.isEmpty()) "No download attempts logged yet" else "${entries.size} entr${if (entries.size == 1) "y" else "ies"} saved (last ${DownloadLogs.MAX_ENTRIES} kept)",
+                    if (entries.isEmpty()) "No download attempts logged yet" else "${entries.size} entr${if (entries.size == 1) "y" else "ies"} saved (first ${DownloadLogs.HEAD_KEEP} + last ${DownloadLogs.TAIL_KEEP} kept${if (omitted > 0) ", $omitted omitted in the middle" else ""})",
                     color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.SemiBold,
                 )
                 Spacer(Modifier.height(4.dp))
@@ -338,7 +689,7 @@ fun DownloadLogsPage() {
             }
             Spacer(Modifier.height(12.dp))
             Text(
-                "The copied report lists these oldest first, with the app version and device at the top.",
+                "The copied report starts with a per-job summary, then lists these oldest first, with the app version and device at the top. Only the first 50 + last 150 entries are kept — anything omitted in the middle is marked in the report.",
                 color = Faint, fontSize = 12.sp,
             )
         }

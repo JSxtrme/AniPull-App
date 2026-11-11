@@ -221,7 +221,10 @@ object HlsDownloader {
     // fetching entirely when set: the decoded key is used for ALL
     // segment keys, and the decoded IV is used only when a playlist
     // KEY tag has no explicit IV. `referer` is sent on playlist /
-    // segment / key fetches when the upstream requires it.
+    // segment / key fetches when the upstream requires it. `origin`
+    // is sent alongside it when the upstream requires an Origin too
+    // (JustAnime's calm leg needs both on segments). Every fetch in
+    // this path follows redirects (dev1.9 hypothesis left open).
     suspend fun download(
         masterUrl: String,
         outputFile: File,
@@ -236,6 +239,7 @@ object HlsDownloader {
         keyOverrideB64: String? = null,
         ivOverrideB64: String? = null,
         referer: String? = null,
+        origin: String? = null,
     ): List<SubtitleTrack> = withContext(Dispatchers.IO) {
         val overrideKey: ByteArray? = keyOverrideB64?.let {
             runCatching { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }.getOrNull()
@@ -245,8 +249,10 @@ object HlsDownloader {
             runCatching { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }.getOrNull()
                 ?.takeIf { bytes -> bytes.size == 16 }
         }
-        val fetchHeaders: Map<String, String> = referer?.takeIf { it.isNotBlank() }
-            ?.let { mapOf("Referer" to it) } ?: emptyMap()
+        val fetchHeaders: Map<String, String> = buildMap {
+            referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+            origin?.takeIf { it.isNotBlank() }?.let { put("Origin", it) }
+        }
 
         tempDir.mkdirs()
         val indexFile = File(tempDir, "segments.done")
@@ -268,8 +274,8 @@ object HlsDownloader {
         // shows exactly where a stream dies. URLs are host+path
         // only — never query params / signatures.
         val hlsStartedMs = System.currentTimeMillis()
-        DownloadLogs.log("HLS", "start: master=${DownloadLogs.sanitizeUrl(masterUrl)} quality=$quality audio=$audio")
-        val masterText = EngineHttp.requestWithRetry(masterUrl, headers = fetchHeaders, timeoutMs = 15_000).let {
+        DownloadLogs.log("HLS", "start: master=${DownloadLogs.sanitizeUrl(masterUrl)} quality=$quality audio=$audio referer=${referer ?: "none"} origin=${origin ?: "none"}")
+        val masterText = EngineHttp.requestWithRetry(masterUrl, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true).let {
             DownloadLogs.log("HLS", "master playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
             if (it.code != 200) throw java.io.IOException("Playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
             it.text
@@ -277,7 +283,7 @@ object HlsDownloader {
         val subtitleTracks = parseExtXMedia(masterText, masterUrl).toMutableList()
         val mediaUrl = parseMasterPlaylist(masterText, masterUrl, quality, audio)
         DownloadLogs.log("HLS", "variant: ${DownloadLogs.sanitizeUrl(mediaUrl)}${if (mediaUrl == masterUrl) " (master is media playlist)" else ""}")
-        val mediaText = if (mediaUrl == masterUrl) masterText else EngineHttp.requestWithRetry(mediaUrl, headers = fetchHeaders, timeoutMs = 15_000).let {
+        val mediaText = if (mediaUrl == masterUrl) masterText else EngineHttp.requestWithRetry(mediaUrl, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true).let {
             DownloadLogs.log("HLS", "variant playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
             if (it.code != 200) throw java.io.IOException("Variant playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
             it.text
@@ -289,12 +295,19 @@ object HlsDownloader {
         }
         val playlist = parseMediaPlaylist(mediaText, mediaUrl)
         if (playlist.segments.isEmpty()) throw java.io.IOException("Playlist has no segments — the stream may have expired, retry the download.")
-        DownloadLogs.log("HLS", "media playlist: ${playlist.segments.size} segments, init=${playlist.initSegmentUri != null}, subs=${subtitleTracks.size}")
+        // 2.0-dev2.2: first segment's host, once — the per-segment
+        // lines never carry a URL, so without this the report
+        // cannot say which host the 403s come from. Host only,
+        // never a query/signature.
+        val firstSegmentHost = playlist.segments.firstOrNull()?.uri?.let {
+            try { java.net.URL(it).host } catch (_: Exception) { null }
+        }?.takeIf { it.isNotBlank() } ?: "unknown"
+        DownloadLogs.log("HLS", "media playlist: ${playlist.segments.size} segments, init=${playlist.initSegmentUri != null}, subs=${subtitleTracks.size}, first segment host=$firstSegmentHost")
 
         // Init segment (#EXT-X-MAP) first, if present.
         val initFile = File(tempDir, "init.ts")
         if (playlist.initSegmentUri != null && !initFile.exists()) {
-            val initResp = EngineHttp.requestWithRetry(playlist.initSegmentUri, headers = fetchHeaders, timeoutMs = 15_000)
+            val initResp = EngineHttp.requestWithRetry(playlist.initSegmentUri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true)
             DownloadLogs.log("HLS", "init segment: HTTP ${initResp.code}, ${initResp.bytes.size} bytes")
             if (initResp.code != 200) throw java.io.IOException("Init segment fetch failed (HTTP ${initResp.code}) — retry the download.")
             initFile.writeBytes(initResp.bytes)
@@ -307,7 +320,7 @@ object HlsDownloader {
         suspend fun keyFor(uri: String): ByteArray {
             overrideKey?.let { return it }
             synchronized(keyCache) { keyCache[uri] }?.let { return it }
-            return EngineHttp.requestWithRetry(uri, headers = fetchHeaders, timeoutMs = 10_000).let {
+            return EngineHttp.requestWithRetry(uri, headers = fetchHeaders, timeoutMs = 10_000, followRedirects = true).let {
                 DownloadLogs.log("HLS", "key fetch: ${DownloadLogs.sanitizeUrl(uri)} -> HTTP ${it.code}, ${it.bytes.size} bytes")
                 if (it.code != 200 || it.bytes.size != 16) throw java.io.IOException("Could not fetch the stream key (HTTP ${it.code}).")
                 it.bytes
@@ -342,7 +355,7 @@ object HlsDownloader {
                         val segFile = File(tempDir, "seg_%05d.ts".format(seg.index))
                         if (seg.index in done && segFile.exists() && segFile.length() > 0) return@async
                         try {
-                            val raw = EngineHttp.requestWithRetry(seg.uri, headers = fetchHeaders, timeoutMs = 15_000).let {
+                            val raw = EngineHttp.requestWithRetry(seg.uri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true).let {
                                 if (it.code != 200) throw java.io.IOException("Segment ${seg.index} HTTP ${it.code}")
                                 it.bytes
                             }

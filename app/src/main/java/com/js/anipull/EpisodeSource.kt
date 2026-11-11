@@ -60,12 +60,16 @@ sealed class ResolvedLink {
     // override applies only when the playlist KEY tag has no explicit
     // IV. `referer` is sent on playlist/segment/key fetches when the
     // upstream requires it (e.g. MegaPlay); null = no Referer header.
+    // `origin` is sent alongside it when the upstream requires an
+    // Origin too (e.g. JustAnime's calm leg needs both Referer and
+    // Origin on segment fetches); null = no Origin header.
     data class Hls(
         val masterPlaylistUrl: String,
         val subtitles: List<SubtitleTrack> = emptyList(),
         val keyOverrideB64: String? = null,
         val ivOverrideB64: String? = null,
         val referer: String? = null,
+        val origin: String? = null,
     ) : ResolvedLink()
     data class Failed(val message: String) : ResolvedLink()
 }
@@ -155,11 +159,11 @@ object MultiSourceResolver {
                 val tookMs = System.currentTimeMillis() - startedMs
                 when (r) {
                     is ResolvedLink.DirectMp4 -> {
-                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: OK in ${tookMs}ms — DDL mp4 (${DownloadLogs.sanitizeUrl(r.url)})")
+                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — DDL mp4 (${DownloadLogs.sanitizeUrl(r.url)})")
                         return ResolvedDownload(r, src.serverNumber)
                     }
                     is ResolvedLink.Hls -> {
-                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: OK in ${tookMs}ms — HLS master (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})")
+                        DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — HLS master (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})")
                         return ResolvedDownload(r, src.serverNumber)
                     }
                     is ResolvedLink.Failed -> {

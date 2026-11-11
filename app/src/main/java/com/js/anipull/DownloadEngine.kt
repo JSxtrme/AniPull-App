@@ -63,6 +63,17 @@ data class DownloadJob(
     // persisted jobs still parse.
     val serverNumber: Int = 0,
     val wifiOverride: Boolean = false,
+    // 2.0-dev2.2: resolve context, so a terminal (FAILED/CANCELLED)
+    // job can be retried from the Downloads tab with a FRESH resolve
+    // instead of resurrecting its stale (possibly expired HLS) link.
+    // titleId is the ApiTitle id; anilistId the media-index match id
+    // (may differ from titleId); fromMediaIndex/listServer pick the
+    // resolve path. All default so old persisted jobs still parse —
+    // those pre-date the context and retry via the episode row.
+    val titleId: Long = 0,
+    val anilistId: Long? = null,
+    val fromMediaIndex: Boolean = false,
+    val listServer: Int? = null,
 )
 
 enum class JobState { QUEUED, DOWNLOADING, PAUSED, COMPLETED, FAILED, CANCELLED }
@@ -157,6 +168,10 @@ object DownloadEngine {
         put("filePath", job.filePath ?: JSONObject.NULL)
         put("server", job.serverNumber)
         put("wifi_ok", job.wifiOverride)
+        if (job.titleId > 0) put("title_id", job.titleId)
+        job.anilistId?.let { put("anilist_id", it) }
+        if (job.fromMediaIndex) put("from_media_index", true)
+        job.listServer?.let { put("list_server", it) }
         links[job.id]?.let { link ->
             val linkSubs: List<SubtitleTrack> = when (link) {
                 is ResolvedLink.DirectMp4 -> link.subtitles
@@ -186,6 +201,7 @@ object DownloadEngine {
                     link.keyOverrideB64?.let { put("link_key", it) }
                     link.ivOverrideB64?.let { put("link_iv", it) }
                     link.referer?.let { put("link_referer", it) }
+                    link.origin?.let { put("link_origin", it) }
                 }
                 else -> {}
             }
@@ -218,6 +234,7 @@ object DownloadEngine {
                     obj.optString("link_key").takeIf { it.isNotBlank() },
                     obj.optString("link_iv").takeIf { it.isNotBlank() },
                     obj.optString("link_referer").takeIf { it.isNotBlank() },
+                    obj.optString("link_origin").takeIf { it.isNotBlank() },
                 )
             }
             DownloadJob(
@@ -237,6 +254,10 @@ object DownloadEngine {
                 filePath = obj.optString("filePath").takeIf { it.isNotBlank() },
                 serverNumber = obj.optInt("server", 0),
                 wifiOverride = obj.optBoolean("wifi_ok", false),
+                titleId = obj.optLong("title_id", 0),
+                anilistId = obj.optLong("anilist_id", -1).takeIf { it > 0 },
+                fromMediaIndex = obj.optBoolean("from_media_index", false),
+                listServer = obj.optInt("list_server", -1).takeIf { it in 1..9 },
             )
         } catch (_: Exception) {
             null
@@ -324,6 +345,13 @@ object DownloadEngine {
         link: ResolvedLink,
         serverNumber: Int = 0,
         wifiOverride: Boolean = false,
+        // 2.0-dev2.2: resolve context for a later fresh retry (see
+        // DownloadJob). A terminal existing job (FAILED/CANCELLED)
+        // is replaced below, so a re-pull is always a fresh job
+        // with a fresh link — never a resurrection.
+        anilistId: Long? = null,
+        fromMediaIndex: Boolean = false,
+        listServer: Int? = null,
     ): String {
         init(context)
         val audio = if (episode.audio.equals("eng", ignoreCase = true)) "Dub" else "Sub"
@@ -353,6 +381,10 @@ object DownloadEngine {
                 filePath = null,
                 serverNumber = serverNumber,
                 wifiOverride = wifiOverride,
+                titleId = title.id,
+                anilistId = anilistId,
+                fromMediaIndex = fromMediaIndex,
+                listServer = listServer,
             )
             links[id] = link
             controls[id] = Control()
@@ -562,6 +594,7 @@ object DownloadEngine {
                         keyOverrideB64 = link.keyOverrideB64,
                         ivOverrideB64 = link.ivOverrideB64,
                         referer = link.referer,
+                        origin = link.origin,
                     )
                     is ResolvedLink.Failed -> throw java.io.IOException(link.message)
                 }
@@ -591,7 +624,21 @@ object DownloadEngine {
                     }
                     val allSubs = (linkSubs + hlsSubs).distinctBy { it.url }
                     if (allSubs.isNotEmpty()) {
-                        writeSubtitleSidecars(ctx, job, fileName, finalPath, allSubs)
+                        // Subtitle sidecars live on the same gated
+                        // CDNs, so they get the same Referer/Origin
+                        // the segments got (HLS links only; DDL
+                        // links have no Origin and a plain Referer).
+                        val subHeaders: Map<String, String> = buildMap {
+                            val ref = when (link) {
+                                is ResolvedLink.DirectMp4 -> link.referer
+                                is ResolvedLink.Hls -> link.referer
+                                else -> null
+                            }
+                            ref?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+                            (link as? ResolvedLink.Hls)?.origin
+                                ?.takeIf { it.isNotBlank() }?.let { put("Origin", it) }
+                        }
+                        writeSubtitleSidecars(ctx, job, fileName, finalPath, allSubs, subHeaders)
                     }
                 } catch (_: Exception) {
                 }
@@ -813,6 +860,7 @@ object DownloadEngine {
         fileName: String,
         finalPath: String,
         subs: List<SubtitleTrack>,
+        headers: Map<String, String> = emptyMap(),
     ) {
         val stem = fileName.removeSuffix(".mp4")
         val used = mutableSetOf<String>()
@@ -828,7 +876,7 @@ object DownloadEngine {
                     n++
                 }
                 val bytes = try {
-                    val resp = EngineHttp.requestWithRetry(sub.url, timeoutMs = 15_000)
+                    val resp = EngineHttp.requestWithRetry(sub.url, headers = headers, timeoutMs = 15_000)
                     if (resp.code != 200 || resp.bytes.isEmpty()) null else resp.bytes
                 } catch (_: Exception) {
                     null

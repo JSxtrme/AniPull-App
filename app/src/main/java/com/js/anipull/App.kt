@@ -3306,6 +3306,11 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
     val context = LocalContext.current
     val jobs by DownloadEngine.jobs.collectAsState()
     val active = jobs.filter { it.state == JobState.QUEUED || it.state == JobState.DOWNLOADING || it.state == JobState.PAUSED || it.state == JobState.FAILED }
+    // 2.0-dev2.2: cancelled jobs were invisible here (neither active
+    // nor completed) — and the episode row was stuck on them too.
+    // They now get their own section with a Retry action, same as
+    // FAILED. Retry fresh-resolves; it never reuses the stale link.
+    val cancelled = jobs.filter { it.state == JobState.CANCELLED }
     val completed = DownloadEngine.completedJobs(context)
     Column(
         modifier = Modifier
@@ -3323,7 +3328,7 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
         Spacer(Modifier.height(4.dp))
         Text("Episodes you pull, with live progress.", color = Muted, fontSize = 13.sp)
         Spacer(Modifier.height(16.dp))
-        if (active.isEmpty() && completed.isEmpty()) {
+        if (active.isEmpty() && completed.isEmpty() && cancelled.isEmpty()) {
             Column(
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -3369,6 +3374,13 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
                 if (active.isNotEmpty()) {
                     item { Text("Active", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont) }
                     items(active, key = { it.id }) { job -> DownloadJobRow(job) }
+                }
+                if (cancelled.isNotEmpty()) {
+                    item {
+                        Spacer(Modifier.height(8.dp))
+                        Text("Cancelled", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
+                    }
+                    items(cancelled, key = { it.id }) { job -> DownloadJobRow(job) }
                 }
                 if (completed.isNotEmpty()) {
                     item {
@@ -3450,8 +3462,60 @@ private fun JobChip(label: String) {
     ) { Text(label, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold) }
 }
 
+// 2.0-dev2.2: retry a terminal (FAILED / CANCELLED) job from the
+// Downloads tab. This is a FRESH resolve through the same path a
+// Pull takes — resolveAndEnqueue re-resolves across the server
+// chain and enqueue() replaces the stale job record (same id) with
+// a fresh job carrying the fresh link. The cancelled job's own link
+// is never reused: HLS links expire in minutes. The resolve context
+// (title id, media-index AniList id, list server) was stored on the
+// job at enqueue time; a job persisted before that (titleId == 0)
+// can't be re-resolved from here and the toast says to pull from
+// the episode row instead. An explicit retry consents to any
+// network (wifiOverride = true), same as a Pull. If the chain
+// needs a human check for server 3, there is no dialog in this
+// tab — the toast says to pull from the episode instead.
+private fun retryDownloadJob(
+    context: android.content.Context,
+    scope: kotlinx.coroutines.CoroutineScope,
+    job: DownloadJob,
+) {
+    if (job.titleId <= 0) {
+        showToast(context, "Can't retry this one here — open the episode and pull it again.")
+        return
+    }
+    val title = ApiTitle(
+        id = job.titleId, title = job.animeTitle, poster = job.poster,
+        type = null, year = null, score = null, overview = null,
+        genres = null, status = null, episodes = null,
+    )
+    val episode = EpisodeInfo(
+        number = job.episodeNumber, title = job.episodeTitle, duration = null,
+        audio = if (job.audio.equals("Dub", ignoreCase = true)) "eng" else "jpn",
+        fansub = null, episodeSession = "",
+        animeSession = job.anilistId?.toString() ?: job.titleId.toString(),
+    )
+    scope.launch {
+        val outcome = resolveAndEnqueue(
+            context, title, episode, job.quality,
+            serverOverride = job.serverNumber.takeIf { it in 1..9 },
+            anilistId = job.anilistId,
+            fromMediaIndex = job.fromMediaIndex,
+            listServer = job.listServer,
+            wifiOverride = true,
+        )
+        when (outcome) {
+            ResolveOutcome.Enqueued -> showToast(context, "Downloading Episode ${job.episodeNumber}")
+            is ResolveOutcome.Error -> showToast(context, outcome.message)
+            ResolveOutcome.NeedsClearance -> showToast(context, "A human check is needed — open the episode and pull it again.")
+        }
+    }
+}
+
 @Composable
 private fun DownloadJobRow(job: DownloadJob) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val progress by animateFloatAsState(
         targetValue = (job.progress / 100f).coerceIn(0f, 1f),
         animationSpec = tween(300),
@@ -3491,6 +3555,7 @@ private fun DownloadJobRow(job: DownloadJob) {
                     JobState.PAUSED -> "Paused · ${job.progress}%"
                     JobState.QUEUED -> "Queued…"
                     JobState.FAILED -> job.error ?: "Failed"
+                    JobState.CANCELLED -> "Cancelled"
                     else -> "${job.progress}%"
                 },
                 color = if (job.state == JobState.FAILED) Color(0xFFFF3B30) else Muted,
@@ -3500,7 +3565,11 @@ private fun DownloadJobRow(job: DownloadJob) {
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 if (job.state == JobState.PAUSED) Text("Resume", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.resume(job.id) })
                 else if (job.state == JobState.DOWNLOADING || job.state == JobState.QUEUED) Text("Pause", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.pause(job.id) })
-                Text("Cancel", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.cancel(job.id) })
+                else if (job.state == JobState.FAILED || job.state == JobState.CANCELLED) Text("Retry", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { retryDownloadJob(context, scope, job) })
+                // A cancelled job is already cancelled — no Cancel
+                // action for it. FAILED keeps Cancel (it becomes a
+                // CANCELLED job, which is itself retryable now).
+                if (job.state != JobState.CANCELLED) Text("Cancel", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.cancel(job.id) })
             }
         }
     }
@@ -3755,8 +3824,10 @@ private suspend fun resolveAndEnqueue(
         }
         else -> {
             // The winning server rides on the job so Downloads can
-            // show it ("Server N") at a glance.
-            DownloadEngine.enqueue(context, title, episode, quality, link, serverNumber = resolved.serverNumber ?: 0, wifiOverride = wifiOverride)
+            // show it ("Server N") at a glance. The resolve context
+            // rides along too, so a terminal job can be retried
+            // from Downloads with a fresh resolve (2.0-dev2.2).
+            DownloadEngine.enqueue(context, title, episode, quality, link, serverNumber = resolved.serverNumber ?: 0, wifiOverride = wifiOverride, anilistId = anilistId, fromMediaIndex = fromMediaIndex, listServer = listServer)
             ResolveOutcome.Enqueued
         }
     }
@@ -4623,8 +4694,21 @@ private fun jobForRow(jobs: List<DownloadJob>, animeTitle: String, row: EpisodeR
     // Match the exact audio variant: Sub and Dub of one episode are
     // separate jobs (engine ids include the audio code), so number
     // alone would conflate them.
+    // 2.0-dev2.2: terminal jobs do NOT stick to the row. A CANCELLED
+    // job used to leave the row permanently on "Cancelled" with no
+    // way back — tapping did nothing (onRowTap early-returns on any
+    // job). FAILED was stuck the same way once the engine's single
+    // auto-retry was spent: its only retry was that auto-retry, so
+    // the row sat on "Failed" with no manual path. Both now release
+    // the row to the idle "Pull ↓" state; tapping Pull fresh-resolves
+    // and enqueue() replaces the stale record (its HLS link may
+    // already be expired) with a fresh job. QUEUED / DOWNLOADING /
+    // PAUSED / COMPLETED still attach to the row as before.
     val jobAudio = if (row.audio.equals("eng", ignoreCase = true)) "Dub" else "Sub"
-    return jobs.firstOrNull { it.animeTitle == animeTitle && it.episodeNumber == row.number && it.audio.equals(jobAudio, ignoreCase = true) }
+    return jobs.firstOrNull {
+        it.animeTitle == animeTitle && it.episodeNumber == row.number && it.audio.equals(jobAudio, ignoreCase = true) &&
+            it.state != JobState.CANCELLED && it.state != JobState.FAILED
+    }
 }
 
 private fun jobStateText(job: DownloadJob): String = when (job.state) {

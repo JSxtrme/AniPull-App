@@ -137,7 +137,18 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
     }
 
     private data class StreamSource(val url: String, val quality: Int, val isM3u8: Boolean)
-    private data class ServerStream(val sources: List<StreamSource>, val subtitles: List<SubtitleTrack>)
+    // `headers` is the stream response's own `headers` object, taken
+    // VERBATIM: the segment CDN enforces the upstream-player origin
+    // via Cloudflare and 403s headerless fetches (proven 2026-11-11:
+    // revo needs Referer https://flixcloud.cc/, calm needs Referer
+    // + Origin https://krussdomi.com/). Values differ per backend,
+    // so they are never hardcoded — they come from the API response.
+    private data class ServerStream(
+        val sources: List<StreamSource>,
+        val subtitles: List<SubtitleTrack>,
+        val referer: String? = null,
+        val origin: String? = null,
+    )
 
     private fun parseServerStream(obj: JSONObject?): ServerStream {
         if (obj == null) return ServerStream(emptyList(), emptyList())
@@ -171,7 +182,21 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                 subs += SubtitleTrack(language = lang, url = url, label = label)
             }
         }
-        return ServerStream(sources, subs)
+        // Per-server media headers, verbatim from the response.
+        // Header names are matched case-insensitively; a missing or
+        // empty `headers` object leaves both null.
+        val headersObj = obj.optJSONObject("headers")
+        val referer = headersObj?.let { h ->
+            h.keys().asSequence()
+                .firstOrNull { it.equals("Referer", ignoreCase = true) }
+                ?.let { h.optString(it) }
+        }?.takeIf { it.isNotBlank() }
+        val origin = headersObj?.let { h ->
+            h.keys().asSequence()
+                .firstOrNull { it.equals("Origin", ignoreCase = true) }
+                ?.let { h.optString(it) }
+        }?.takeIf { it.isNotBlank() }
+        return ServerStream(sources, subs, referer, origin)
     }
 
     private fun pickSource(sources: List<StreamSource>, quality: String, wantM3u8: Boolean): StreamSource? {
@@ -252,6 +277,11 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
 
             // HLS legs, in order: revo (verified playlist + key),
             // calm (verified, unencrypted), momo (VM-gated, last).
+            // A leg whose stream response carries no `headers` is
+            // SKIPPED, never fetched headerless: the segment CDNs
+            // 403 every headerless segment fetch, so trying it only
+            // burns the job. If every leg lacks headers, the loop
+            // falls through to the honest Failed below.
             for (server in listOf("revo", "calm", "momo")) {
                 if (!serverHas(server)) continue
                 val resp = apiGet("/watch/$id/episode/$number/$server")
@@ -261,8 +291,18 @@ internal class JustAnimeEpisodeSource : BaseEpisodeSource(
                     ?: root.optJSONObject(if (wantDub) "sub" else "dub")
                     ?: continue
                 val stream = parseServerStream(streamObj)
+                if (stream.referer == null && stream.origin == null) continue
                 val picked = pickSource(stream.sources, quality, wantM3u8 = true) ?: continue
-                return ResolvedLink.Hls(picked.url, subtitles = stream.subtitles)
+                DownloadLogs.log(
+                    "RESOLVE",
+                    "JustAnime $server: HLS, Referer=${stream.referer ?: "none"} Origin=${stream.origin ?: "none"}",
+                )
+                return ResolvedLink.Hls(
+                    picked.url,
+                    subtitles = stream.subtitles,
+                    referer = stream.referer,
+                    origin = stream.origin,
+                )
             }
 
             // Last resort: gigi's direct MP4s (animegg.org times out
