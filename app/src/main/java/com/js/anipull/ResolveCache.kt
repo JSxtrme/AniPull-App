@@ -42,8 +42,14 @@ object ResolveCache {
     private val mem = LinkedHashMap<String, Entry>()
     private var memLoaded = false
 
-    private fun cacheKey(titleId: Long, number: Int, audio: String, quality: String): String =
-        "$titleId|$number|${audioCode(audio)}|$quality"
+    // 2.0-dev2.8: the mode is part of the key — a win decided
+    // under fastest-first must never be served as a smallest-file
+    // win (or vice versa); each mode has its own entries and
+    // flipping the toggle re-resolves under the new mode. Entries
+    // stored before this change (no mode suffix) are orphaned:
+    // never matched, pruned by TTL on load and the 50-entry cap.
+    private fun cacheKey(titleId: Long, number: Int, audio: String, quality: String, preferSmaller: Boolean): String =
+        "$titleId|$number|${audioCode(audio)}|$quality|${if (preferSmaller) "s" else "f"}"
 
     @Synchronized
     fun lookup(
@@ -54,12 +60,16 @@ object ResolveCache {
         quality: String,
         preferred: Int, // 0 = Auto; 1..9 = explicit first server
         listServer: Int?, // server that served the list, tried first
+        // 2.0-dev2.8: the resolve mode the cached win was decided
+        // under — a fastest-first win is never served when the
+        // toggle is ON, and vice versa. Defaults to fastest-first.
+        preferSmaller: Boolean = false,
     ): ResolvedDownload? {
         loadLocked(context)
-        val entry = mem[cacheKey(titleId, number, audio, quality)] ?: return null
+        val entry = mem[cacheKey(titleId, number, audio, quality, preferSmaller)] ?: return null
         val ageMs = System.currentTimeMillis() - entry.resolvedAtMs
         if (ageMs < 0 || ageMs > ttlMs(entry.serverNumber)) {
-            mem.remove(cacheKey(titleId, number, audio, quality))
+            mem.remove(cacheKey(titleId, number, audio, quality, preferSmaller))
             persistLocked(context)
             return null
         }
@@ -88,6 +98,9 @@ object ResolveCache {
         audio: String,
         quality: String,
         resolved: ResolvedDownload,
+        // 2.0-dev2.8: the mode the win was decided under — see
+        // cacheKey. Defaults to fastest-first.
+        preferSmaller: Boolean = false,
     ) {
         val link = resolved.link
         val server = resolved.serverNumber ?: return
@@ -100,7 +113,7 @@ object ResolveCache {
         // loop. Unknown DDLs re-resolve (and re-probe) every time.
         if (link is ResolvedLink.DirectMp4 && link.actualQuality == null) return
         loadLocked(context)
-        val key = cacheKey(titleId, number, audio, quality)
+        val key = cacheKey(titleId, number, audio, quality, preferSmaller)
         mem[key] = Entry(link, server, System.currentTimeMillis())
         // Cap: drop the oldest entries first.
         while (mem.size > MAX_ENTRIES) {

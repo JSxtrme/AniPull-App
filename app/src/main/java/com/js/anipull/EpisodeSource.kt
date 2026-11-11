@@ -273,6 +273,20 @@ object EpisodeSources {
 // timeouts) and die with the caller's job. Each racer is capped
 // at 15 s: a hung resolve fails over in seconds, not after ~40 s
 // of retries (fail fast on resolve — segment retries are untouched).
+//
+// 2.0-dev2.8: SMALLEST-FILE mode (preferSmaller=true, Settings →
+// Downloads → "Prefer smaller files"). An exact-tier arrival is
+// PARKED, not crowned: the batch runs until ALL its racers arrive,
+// every exact candidate gets a size attached (DDL: the probe total
+// it already carries; HLS: estimateHlsSizeBytes on its OWN master
+// playlist — a failed estimate leaves the size unknown), and ALL
+// batches run before the winner is picked — the smallest KNOWN-size
+// exact candidate across every server. When no exact candidate has
+// a known size, the first-arrival exact wins. The downgrade /
+// unknown / honest-fail fallbacks below are UNCHANGED, and the
+// mode never touches the quality floor or the exact-tier rules.
+// OFF (default) is byte-for-byte the old behaviour: first proven-
+// exact arrival crowns immediately, zero added latency.
 object MultiSourceResolver {
     private const val RESOLVE_RACE_BATCH = 3
     private const val RESOLVE_ATTEMPT_TIMEOUT_MS = 15_000L
@@ -285,6 +299,9 @@ object MultiSourceResolver {
         audio: String,
         quality: String,
         onAttempt: ((Int) -> Unit)? = null,
+        // 2.0-dev2.8: smallest-file mode — see the object header.
+        // A pure parameter: EpisodeSource never reads prefs itself.
+        preferSmaller: Boolean = false,
     ): ResolvedDownload {
         // 2.0-dev1.9 TEMPORARY download diagnostics: every resolve
         // attempt is logged (server number, result/error, latency)
@@ -292,7 +309,8 @@ object MultiSourceResolver {
         // answer on the phone. No URLs, no cookies in the log.
         DownloadLogs.log(
             "RESOLVE",
-            "start: ep $number ${audio.lowercase()} $quality, candidates=${candidates.map { it.serverNumber }}",
+            "start: ep $number ${audio.lowercase()} $quality, candidates=${candidates.map { it.serverNumber }}" +
+                (if (preferSmaller) ", prefer-smaller" else ""),
         )
         if (candidates.isEmpty()) {
             DownloadLogs.log("RESOLVE", "no candidates — nothing to try")
@@ -320,10 +338,15 @@ object MultiSourceResolver {
         // served after every batch has run, so a slower server that
         // CAN prove its quality always gets its chance first.
         var bestUnknown: ResolvedDownload? = null
+        // 2.0-dev2.8: exact-tier candidates parked for the
+        // smallest-file comparison (see raceGroup) — collected
+        // across ALL batches, picked only after the last one.
+        val exactCandidates = mutableListOf<ResolvedDownload>()
         for (group in candidates.chunked(RESOLVE_RACE_BATCH)) {
-            val result = raceGroup(group, title, anilistId, number, audio, quality, onAttempt)
+            val result = raceGroup(group, title, anilistId, number, audio, quality, onAttempt, preferSmaller)
             last = result.last
             if (result.winner != null) return result.winner
+            exactCandidates += result.exactCandidates
             if (result.downgrade != null) {
                 val offered = result.downgrade.link.offeredHeight() ?: 0
                 val bestOffered = bestDowngrade?.link?.offeredHeight() ?: 0
@@ -335,6 +358,22 @@ object MultiSourceResolver {
                 if (bestFallback == null || offered > bestOffered) bestFallback = result.fallback
             }
             if (result.unknownFallback != null && bestUnknown == null) bestUnknown = result.unknownFallback
+        }
+        // 2.0-dev2.8: smallest-file mode — the race ran ALL batches
+        // (no exact arrival crowned early), so the smallest
+        // known-size exact candidate across EVERY server wins here,
+        // ahead of the downgrade / unknown / honest-fail fallbacks,
+        // which are unchanged. Unknown-size exacts only win when
+        // no exact candidate has a known size (first arrival then).
+        if (preferSmaller) {
+            pickSmallestExact(exactCandidates)?.let { best ->
+                DownloadLogs.log(
+                    "RESOLVE",
+                    "smallest-file mode: winner Server ${best.serverNumber} — ${best.link.sizeLabel() ?: "size unknown"} at ${best.link.offeredHeight() ?: "?"}p for $quality; " +
+                        "exact candidates: ${exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" }}",
+                )
+                return best
+            }
         }
         if (bestDowngrade != null) {
             val offered = bestDowngrade.link.offeredHeight()
@@ -390,7 +429,49 @@ object MultiSourceResolver {
         val fallback: ResolvedDownload?,
         val unknownFallback: ResolvedDownload?,
         val last: ResolvedLink,
+        // 2.0-dev2.8: exact-tier arrivals parked in this batch for
+        // the smallest-file comparison — empty when the mode is OFF
+        // or no racer proved the requested height. The caller picks
+        // the global smallest across ALL batches (see
+        // pickSmallestExact); a batch never crowns one itself.
+        val exactCandidates: List<ResolvedDownload> = emptyList(),
     )
+
+    // 2.0-dev2.8: smallest KNOWN-size exact wins; an unknown-size
+    // candidate NEVER beats a known-size one. When NO candidate has
+    // a known size, first arrival wins — minByOrNull returns the
+    // first of the equal (MAX_VALUE) keys, and arrival order is
+    // list order: earlier batch first, earlier arrival within a
+    // batch first. A tie on equal known sizes likewise keeps the
+    // earlier arrival.
+    private fun pickSmallestExact(candidates: List<ResolvedDownload>): ResolvedDownload? =
+        candidates.minByOrNull { it.link.sizeBytes() ?: Long.MAX_VALUE }
+
+    // 2.0-dev2.8: smallest-file mode only. An HLS link that proved
+    // the EXACT requested height gets its size attached from its
+    // OWN master playlist (estimateHlsSizeBytes — summed
+    // byte-ranges when present, else AVERAGE-BANDWIDTH x duration,
+    // "~"), so the batch can compare candidates by size. Any other
+    // link passes through untouched: DDL links already carry the
+    // probe total when enrichLink probed them (and a known-quality
+    // DDL with no size stays unknown — no extra probe on the hot
+    // path), and non-exact links never compete on size. A link
+    // that already carries a size keeps it. Never throws; a failed
+    // estimate returns the link unchanged (unknown size).
+    private suspend fun attachExactHlsSizeIfNeeded(link: ResolvedLink, quality: String, audio: String, requestedHeight: Int): ResolvedLink {
+        if (link !is ResolvedLink.Hls) return link
+        if ((link.offeredHeight() ?: 0) < requestedHeight) return link
+        if (link.sizeBytes() != null) return link
+        val headers = buildMap {
+            link.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+            link.origin?.takeIf { it.isNotBlank() }?.let { put("Origin", it) }
+        }
+        val estimate = DdlQualityProbe.estimateHlsSizeBytes(link.masterPlaylistUrl, headers, quality, audio) ?: return link
+        return link.copy(
+            estimatedSizeBytes = estimate.bytes.takeIf { it > 0 },
+            sizeIsEstimate = estimate.isEstimate,
+        )
+    }
 
     // 2.0-dev2.6 — the reliability gate, run inside each racer
     // BEFORE the floor decision sees the link. ONLY unknown-quality
@@ -469,6 +550,11 @@ object MultiSourceResolver {
         }
     }
 
+    // 2.0-dev2.8: with preferSmaller, an EXACT win parks exactly
+    // the same way — the batch runs until ALL its racers arrive,
+    // and the caller picks the smallest across ALL batches. The
+    // `winner` field is then never set by this batch (it stays
+    // null); exact arrivals land in `exactCandidates` instead.
     private suspend fun raceGroup(
         group: List<EpisodeSource>,
         title: ApiTitle,
@@ -477,7 +563,10 @@ object MultiSourceResolver {
         audio: String,
         quality: String,
         onAttempt: ((Int) -> Unit)?,
+        preferSmaller: Boolean = false,
     ): RaceResult {
+        val requestedHeight = qualityHeight(quality)
+        val floor = qualityFloorFor(requestedHeight)
         val scope = CoroutineScope(currentCoroutineContext())
         val deferreds = group.map { src ->
             scope.async {
@@ -493,14 +582,23 @@ object MultiSourceResolver {
                     // untouched (no added latency). 2.0-dev2.7: HLS
                     // links are proved from the master playlist too,
                     // so an HLS-only server can win on merit.
-                    val r = enrichLink(raw)
+                    // 2.0-dev2.8: smallest-file mode — an HLS link
+                    // that proves the exact height also gets its
+                    // size attached here, inside the racer, so all
+                    // candidates size in parallel (see
+                    // attachExactHlsSizeIfNeeded). The dev2.8 size
+                    // caches make a re-tap's master fetch usually
+                    // free; a failed estimate just leaves the size
+                    // unknown.
+                    val enriched = enrichLink(raw)
+                    val r = if (preferSmaller) attachExactHlsSizeIfNeeded(enriched, quality, audio, requestedHeight) else enriched
                     val tookMs = System.currentTimeMillis() - startedMs
                     when (r) {
                         is ResolvedLink.DirectMp4 -> {
                             DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — DDL mp4, offered ${r.offeredHeight() ?: "?"}p (${DownloadLogs.sanitizeUrl(r.url)})" + (r.sizeBytes()?.let { " size=${formatSizeBytes(it, r.sizeIsEstimate())}" } ?: ""))
                         }
                         is ResolvedLink.Hls -> {
-                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — HLS master, offered ${r.offeredHeight() ?: "?"}p (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})")
+                            DownloadLogs.log("RESOLVE", "Server ${src.serverNumber} (${src.sourceName}): OK in ${tookMs}ms — HLS master, offered ${r.offeredHeight() ?: "?"}p (${DownloadLogs.sanitizeUrl(r.masterPlaylistUrl)})" + (r.sizeBytes()?.let { " size=${formatSizeBytes(it, r.sizeIsEstimate())}" } ?: ""))
                         }
                         is ResolvedLink.Failed -> {
                             DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: FAILED in ${tookMs}ms — ${r.message}")
@@ -519,6 +617,9 @@ object MultiSourceResolver {
         var downgrade: ResolvedDownload? = null
         var fallback: ResolvedDownload? = null
         var unknownFallback: ResolvedDownload? = null
+        // 2.0-dev2.8: exact-tier arrivals parked for the
+        // smallest-file comparison (see pickSmallestExact).
+        val exactCandidates = mutableListOf<ResolvedDownload>()
         // 2.0-dev2.7: one-line outcome per arrived racer, so the
         // winner line below can name WHY it won (and what each
         // loser did) instead of leaving the next phone log to
@@ -527,8 +628,6 @@ object MultiSourceResolver {
         val outcomes = mutableListOf<String>()
         val arrivedNumbers = mutableSetOf<Int>()
         val pending = deferreds.toMutableList()
-        val requestedHeight = qualityHeight(quality)
-        val floor = qualityFloorFor(requestedHeight)
         while (pending.isNotEmpty() && winner == null) {
             select<Unit> {
                 pending.forEach { d ->
@@ -553,24 +652,45 @@ object MultiSourceResolver {
                                     )
                                     if (unknownFallback == null) unknownFallback = download
                                 } else if (offered >= requestedHeight) {
-                                    // 2.0-dev2.7: EXACT win — the only
-                                    // tier that ends the batch. First
-                                    // proven exact arrival IS the
-                                    // fastest-proven server, so no
-                                    // settle window is needed (and a
-                                    // window would tax the lone-winner
-                                    // common case against the ~1-2 s
-                                    // bar). Log why it won, with every
-                                    // other racer's outcome so far.
-                                    outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — WINNER"
-                                    winner = download
-                                    val stillRacing = group.map { it.serverNumber } - arrivedNumbers
-                                    DownloadLogs.log(
-                                        "RESOLVE",
-                                        "race winner Server ${src.serverNumber} in ${tookMs}ms — offered ${offered}p, exact for $quality; " +
-                                            "batch ${group.map { it.serverNumber }}: ${outcomes.joinToString("; ")}" +
-                                            (if (stillRacing.isNotEmpty()) "; still racing (cancelled): ${stillRacing.joinToString(prefix = "Server ", separator = ", Server ")}" else ""),
-                                    )
+                                    if (preferSmaller) {
+                                        // 2.0-dev2.8: smallest-file
+                                        // mode — an exact arrival is
+                                        // PARKED, not crowned. The
+                                        // batch runs until ALL its
+                                        // racers arrive and the caller
+                                        // picks the smallest across
+                                        // ALL batches (see
+                                        // pickSmallestExact); an
+                                        // unknown-size exact only wins
+                                        // when no exact candidate has
+                                        // a known size.
+                                        val sizeText = r.sizeLabel() ?: "size unknown"
+                                        outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — exact, parked ($sizeText)"
+                                        DownloadLogs.log(
+                                            "RESOLVE",
+                                            "Server ${src.serverNumber}: exact ${offered}p for $quality in ${tookMs}ms — parked for size compare ($sizeText), still racing",
+                                        )
+                                        exactCandidates += download
+                                    } else {
+                                        // 2.0-dev2.7: EXACT win — the only
+                                        // tier that ends the batch. First
+                                        // proven exact arrival IS the
+                                        // fastest-proven server, so no
+                                        // settle window is needed (and a
+                                        // window would tax the lone-winner
+                                        // common case against the ~1-2 s
+                                        // bar). Log why it won, with every
+                                        // other racer's outcome so far.
+                                        outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — WINNER"
+                                        winner = download
+                                        val stillRacing = group.map { it.serverNumber } - arrivedNumbers
+                                        DownloadLogs.log(
+                                            "RESOLVE",
+                                            "race winner Server ${src.serverNumber} in ${tookMs}ms — offered ${offered}p, exact for $quality; " +
+                                                "batch ${group.map { it.serverNumber }}: ${outcomes.joinToString("; ")}" +
+                                                (if (stillRacing.isNotEmpty()) "; still racing (cancelled): ${stillRacing.joinToString(prefix = "Server ", separator = ", Server ")}" else ""),
+                                        )
+                                    }
                                 } else if (offered >= floor) {
                                     // 2.0-dev2.7: meets the floor but NOT
                                     // the request — parked as a downgrade
@@ -609,20 +729,38 @@ object MultiSourceResolver {
             }
         }
         if (winner == null) {
-            // Batch ended with no exact winner: one line saying so,
-            // so the next phone log shows the race moved on (and
-            // why) instead of going quiet between batches.
-            DownloadLogs.log(
-                "RESOLVE",
-                "batch ${group.map { it.serverNumber }} ended with no exact winner for $quality — " +
-                    "best downgrade: ${downgrade?.let { "Server ${it.serverNumber} (${it.link.offeredHeight() ?: "?"}p)" } ?: "none"}; " +
-                    "unknown parked: ${unknownFallback?.serverNumber?.let { "Server $it" } ?: "none"}",
-            )
+            if (preferSmaller && exactCandidates.isNotEmpty()) {
+                // 2.0-dev2.8: this batch parked exact candidates
+                // instead of crowning one — one line naming the
+                // batch's smallest, so the phone log shows the
+                // comparison happening instead of going quiet
+                // between batches. The caller picks the global
+                // smallest across ALL batches.
+                val batchBest = pickSmallestExact(exactCandidates)
+                DownloadLogs.log(
+                    "RESOLVE",
+                    "batch ${group.map { it.serverNumber }} ended with ${exactCandidates.size} exact candidate(s) for $quality (smallest-file mode) — " +
+                        exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" } +
+                        "; batch smallest: ${batchBest?.let { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" } ?: "none"}; " +
+                        "best downgrade: ${downgrade?.let { "Server ${it.serverNumber} (${it.link.offeredHeight() ?: "?"}p)" } ?: "none"}; " +
+                        "unknown parked: ${unknownFallback?.serverNumber?.let { "Server $it" } ?: "none"}",
+                )
+            } else {
+                // Batch ended with no exact winner: one line saying so,
+                // so the next phone log shows the race moved on (and
+                // why) instead of going quiet between batches.
+                DownloadLogs.log(
+                    "RESOLVE",
+                    "batch ${group.map { it.serverNumber }} ended with no exact winner for $quality — " +
+                        "best downgrade: ${downgrade?.let { "Server ${it.serverNumber} (${it.link.offeredHeight() ?: "?"}p)" } ?: "none"}; " +
+                        "unknown parked: ${unknownFallback?.serverNumber?.let { "Server $it" } ?: "none"}",
+                )
+            }
         }
         // Best-effort cancel of the losers; their blocking I/O
         // finishes on its own threads and the results are discarded.
         pending.forEach { it.cancel() }
-        return RaceResult(winner, downgrade, fallback, unknownFallback, last)
+        return RaceResult(winner, downgrade, fallback, unknownFallback, last, exactCandidates)
     }
 
     suspend fun loadEpisodesWithFailover(

@@ -469,6 +469,10 @@ fun DownloadsSettingsPage() {
     var subs by remember { mutableStateOf(prefs.getBoolean("subs", true)) }
     var autoRetry by remember { mutableStateOf(prefs.getBoolean("auto_retry", true)) }
     var keepScreenOn by remember { mutableStateOf(prefs.getBoolean("keep_screen_on", false)) }
+    // 2.0-dev2.8: "Prefer smaller files" — at the chosen quality,
+    // the race picks the smallest file instead of the fastest
+    // server. Default OFF (fastest first, current behaviour).
+    var preferSmaller by remember { mutableStateOf(prefs.getBoolean("prefer_smaller_files", false)) }
     // 2.0-dev1.6: default download server — 0 = Auto (try servers in
     // priority order 1..9), 1..9 = always try that server first (the
     // rest still back it up if it fails). Same key the sheet reads.
@@ -511,7 +515,7 @@ fun DownloadsSettingsPage() {
         ServerRegistry.saveOrder(ctx, next)
     }
     fun save() {
-        prefs.edit().putInt("parallel", parallel).putInt("speed_mbps", speedLimit).putString("folder", folder).putString("quality", quality).putString("language", language).putBoolean("wifi_only", wifiOnly).putBoolean("ask_season", askSeason).putBoolean("subs", subs).putBoolean("auto_retry", autoRetry).putBoolean("keep_screen_on", keepScreenOn).putInt("preferred_server", preferredServer).apply()
+        prefs.edit().putInt("parallel", parallel).putInt("speed_mbps", speedLimit).putString("folder", folder).putString("quality", quality).putString("language", language).putBoolean("wifi_only", wifiOnly).putBoolean("ask_season", askSeason).putBoolean("subs", subs).putBoolean("auto_retry", autoRetry).putBoolean("keep_screen_on", keepScreenOn).putBoolean("prefer_smaller_files", preferSmaller).putInt("preferred_server", preferredServer).apply()
     }
     val folderPicker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
@@ -573,6 +577,15 @@ fun DownloadsSettingsPage() {
                 }
             }
             Text("Sub = Japanese audio with subtitles. Dub = English audio.", color = Faint, fontSize = 12.sp)
+            Spacer(Modifier.height(16.dp))
+            // 2.0-dev2.8: "Prefer smaller files" — at the chosen
+            // quality, the race picks the smallest file instead of
+            // the fastest server. Default OFF (fastest first).
+            SettingsToggle(
+                "Prefer smaller files",
+                "At your chosen quality, pick the smallest file instead of the fastest server. May take longer — finding the smallest file means waiting to compare servers instead of taking the first one.",
+                preferSmaller,
+            ) { preferSmaller = it; save() }
         }
     }
     Spacer(Modifier.height(20.dp))

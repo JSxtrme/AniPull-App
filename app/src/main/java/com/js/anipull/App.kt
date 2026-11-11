@@ -3686,7 +3686,7 @@ private fun retryDownloadJob(
         // the shared in-flight resolve first; its fresh win lands
         // in ResolveCache, so the resolveAndEnqueue below reuses
         // it instead of doubling the work.
-        awaitInFlightResolve(job.titleId, job.episodeNumber, episode.audio, job.quality, job.serverNumber.takeIf { it in 1..9 })
+        awaitInFlightResolve(job.titleId, job.episodeNumber, episode.audio, job.quality, job.serverNumber.takeIf { it in 1..9 }, preferSmallerFiles(context))
         val outcome = resolveAndEnqueue(
             context, title, episode, job.quality,
             serverOverride = job.serverNumber.takeIf { it in 1..9 },
@@ -3892,6 +3892,17 @@ private fun candidateServerNumbers(context: android.content.Context, preferred: 
     return if (preferred in 1..9) listOf(preferred) + ordered.filter { it != preferred } else ordered
 }
 
+// 2.0-dev2.8: "Prefer smaller files" (Settings → Downloads,
+// QUALITY & LANGUAGE). Default OFF = the fastest-first race,
+// unchanged. Read once per resolve in resolveOnly and threaded
+// down as a parameter — EpisodeSource never reads prefs itself.
+// The mode also rides in the ResolveCache key and the in-flight
+// coalesce key, so a cached / in-flight win decided under one
+// mode is never served under the other.
+private fun preferSmallerFiles(context: android.content.Context): Boolean =
+    context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+        .getBoolean("prefer_smaller_files", false)
+
 private fun serverChoiceLabel(number: Int): String =
     if (number == 0) "Auto" else "Server $number — ${ServerRegistry.description(number)}"
 
@@ -4017,13 +4028,21 @@ private suspend fun resolveViaCandidates(
     listServer: Int?,
     candidates: List<EpisodeSource>,
     onAttempt: ((Int) -> Unit)?,
+    // 2.0-dev2.8: smallest-file mode — threaded to the race.
+    preferSmaller: Boolean = false,
 ): ResolvedDownload {
     return try {
         if (fromMediaIndex) {
             // Media-index rows carry no sessions — NEVER resolveDownload
             // with empty sessions. Resolve by (series + episode number)
             // with failover across the chain.
-            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller)
+        } else if (listServer != null && preferSmaller) {
+            // 2.0-dev2.8: smallest-file mode skips the serving-first
+            // shortcut below — it would crown before sizes are
+            // compared. The serving server still races, first in
+            // line (resolveOnly orders it first in candidates).
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = true)
         } else if (listServer != null) {
             // The server that served this list resolves its own
             // episode the old way first; anything else fails over
@@ -4065,7 +4084,7 @@ private suspend fun resolveViaCandidates(
                 } else ResolvedDownload(proven, listServer)
             } else MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
         } else {
-            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller)
         }
     } catch (e: Exception) {
         ResolvedDownload(ResolvedLink.Failed(friendlyDownloadError(e)), null)
@@ -4088,11 +4107,15 @@ private suspend fun resolveOnly(
     // this is the belt-and-braces copy for the download path).
     CronetHttp.setContext(context)
     val preferred = serverOverride ?: preferredServerNumber(context)
+    // 2.0-dev2.8: read once here and threaded down — the race, the
+    // cache key and the in-flight coalesce key all key off this
+    // one value, so a resolve is coherent under one mode.
+    val preferSmaller = preferSmallerFiles(context)
     // 2.0-dev2.3: resolve cache — a fresh-enough link (per-source
     // TTL: Pahe 90 s, never an expired Pahe link) skips the whole
     // chain AND the clearance ensure, so a repeat tap is instant.
     // A miss behaves exactly like no cache at all.
-    ResolveCache.lookup(context, title.id, episode.number, episode.audio, quality, preferred, listServer)?.let {
+    ResolveCache.lookup(context, title.id, episode.number, episode.audio, quality, preferred, listServer, preferSmaller)?.let {
         return ResolveAttempt(it, false)
     }
     val numbers = candidateServerNumbers(context, preferred).let { ordered ->
@@ -4126,13 +4149,13 @@ private suspend fun resolveOnly(
     // ("Resolving… · Server N"); the serving server's direct
     // resolveDownload is also an attempt, so it fires too.
     val firstResolved: ResolvedDownload? = if (firstCandidates.isNotEmpty()) {
-        resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, firstCandidates, onAttempt)
+        resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, firstCandidates, onAttempt, preferSmaller = preferSmaller)
     } else null
     if (firstResolved != null && firstResolved.link !is ResolvedLink.Failed) {
         // Cache the win (successes only, per-source TTL) so a repeat
         // tap — or the confirm after a pre-resolved sheet — is instant.
         if (firstResolved.serverNumber != null) {
-            ResolveCache.store(context, title.id, episode.number, episode.audio, quality, firstResolved)
+            ResolveCache.store(context, title.id, episode.number, episode.audio, quality, firstResolved, preferSmaller)
         }
         return ResolveAttempt(firstResolved, false)
     }
@@ -4146,9 +4169,9 @@ private suspend fun resolveOnly(
         val clearance = paheClearanceIfNeeded(context, true)
         val pahe = ServerRegistry.build(3, clearance.cookie, clearance.userAgent)
         if (pahe != null) {
-            val paheResolved = resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, listOf(pahe), onAttempt)
+            val paheResolved = resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, listOf(pahe), onAttempt, preferSmaller = preferSmaller)
             if (paheResolved.link !is ResolvedLink.Failed && paheResolved.serverNumber != null) {
-                ResolveCache.store(context, title.id, episode.number, episode.audio, quality, paheResolved)
+                ResolveCache.store(context, title.id, episode.number, episode.audio, quality, paheResolved, preferSmaller)
             }
             return ResolveAttempt(paheResolved, clearance.needsUserAction)
         }
@@ -4308,7 +4331,7 @@ private fun EpisodeDownloadSheet(
     // shows it on the first frame with no fetch at all.
     var sheetSize by remember(row.number) {
         mutableStateOf<SheetSizeState>(
-            ResolveCache.lookup(context, title.id, row.number, initialAudio, initialQuality, initialServer, null)?.link?.sizeLabel()
+            ResolveCache.lookup(context, title.id, row.number, initialAudio, initialQuality, initialServer, null, preferSmallerFiles(context))?.link?.sizeLabel()
                 ?.let { SheetSizeState.Known(it) } ?: SheetSizeState.Unknown,
         )
     }
@@ -4327,7 +4350,7 @@ private fun EpisodeDownloadSheet(
     // previously computed combo answers from ResolveCache +
     // the probe/size caches with no re-fetch.
     LaunchedEffect(quality, audio, server) {
-        val cachedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null)?.link
+        val cachedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null, preferSmallerFiles(context))?.link
         if (cachedLink != null) {
             cachedLink.sizeLabel()?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
             sheetSize = SheetSizeState.Checking
@@ -4337,8 +4360,8 @@ private fun EpisodeDownloadSheet(
         }
         sheetSize = SheetSizeState.Checking
         onWarmSize?.invoke(quality, audio, server)
-        awaitInFlightResolve(title.id, row.number, audio, quality, server)
-        val landedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null)?.link
+        awaitInFlightResolve(title.id, row.number, audio, quality, server, preferSmallerFiles(context))
+        val landedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null, preferSmallerFiles(context))?.link
         if (landedLink != null) {
             landedLink.sizeLabel()?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
             sheetSizeLabelForLink(landedLink, quality, audio)?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
@@ -4547,8 +4570,8 @@ private val resolveInFlight = java.util.concurrent.ConcurrentHashMap<String, kot
 // in-flight resolve has landed in ResolveCache (or failed —
 // the caller then resolves normally). No-op when nothing is in
 // flight for this key.
-private suspend fun awaitInFlightResolve(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?) {
-    resolveInFlight[resolveCoalesceKey(titleId, number, audio, quality, serverOverride)]?.let { deferred ->
+private suspend fun awaitInFlightResolve(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false) {
+    resolveInFlight[resolveCoalesceKey(titleId, number, audio, quality, serverOverride, preferSmaller)]?.let { deferred ->
         runCatching { deferred.await() }
     }
 }
@@ -4574,9 +4597,13 @@ private suspend fun awaitInFlightResolve(titleId: Long, number: Int, audio: Stri
 // vs fresh resolve, so a cached win from the "wrong" list
 // server is never served — the confirm just resolves fresh,
 // sequentially, instead of concurrently.
-private fun resolveCoalesceKey(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?): String {
+private fun resolveCoalesceKey(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false): String {
     val first = serverOverride?.takeIf { it in 1..9 } ?: 0
-    return "$titleId|$number|${audioCode(audio)}|$quality|$first"
+    // 2.0-dev2.8: the mode is in the key — a warm started under
+    // fastest-first must never satisfy a confirm under
+    // smallest-file (or vice versa); the confirm would await the
+    // wrong-mode resolve and then miss its own mode's cache entry.
+    return "$titleId|$number|${audioCode(audio)}|$quality|$first|${if (preferSmaller) "s" else "f"}"
 }
 
 private class EpisodeListState(
@@ -4692,7 +4719,7 @@ private class EpisodeListState(
         // 2.0-dev2.6 (E): the await now reads the SHARED map
         // (awaitInFlightResolve), so a warm started by the OTHER
         // state (detail vs sheet) coalesces too.
-        awaitInFlightResolve(title.id, episode.number, episode.audio, quality, serverOverride)
+        awaitInFlightResolve(title.id, episode.number, episode.audio, quality, serverOverride, preferSmallerFiles(context))
         val outcome = resolveAndEnqueue(
             context, title, episode, quality,
             serverOverride = serverOverride,
@@ -4779,7 +4806,7 @@ private class EpisodeListState(
         // warming the same row at once keep exactly one resolve
         // (the loser's block never starts), and the entry is
         // removed only when THIS deferred completes.
-        val key = resolveCoalesceKey(title.id, row.number, pullAudio, quality, initialServer)
+        val key = resolveCoalesceKey(title.id, row.number, pullAudio, quality, initialServer, preferSmallerFiles(context))
         val deferred = preResolveScope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             runCatching {
                 resolveOnly(
@@ -4811,7 +4838,7 @@ private class EpisodeListState(
     // defaults. Silent like preResolveRow: a failure changes
     // nothing, the sheet just shows no size.
     fun warmSizeFor(row: EpisodeRow, quality: String, audio: String, server: Int) {
-        val key = resolveCoalesceKey(title.id, row.number, audio, quality, server)
+        val key = resolveCoalesceKey(title.id, row.number, audio, quality, server, preferSmallerFiles(context))
         val deferred = preResolveScope.async(start = kotlinx.coroutines.CoroutineStart.LAZY) {
             runCatching {
                 resolveOnly(
@@ -6215,7 +6242,7 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, onDownloadStarted: ((S
                 // pre-resolve warms. Await the shared in-flight
                 // resolve first; its win lands in ResolveCache, so
                 // the resolveAndEnqueue below is a cache hit.
-                awaitInFlightResolve(title.id, ep.number, ep.audio, quality, serverChoice)
+                awaitInFlightResolve(title.id, ep.number, ep.audio, quality, serverChoice, preferSmallerFiles(context))
                 when (val outcome = resolveAndEnqueue(
                     context, title, ep, quality,
                     serverOverride = serverChoice,
