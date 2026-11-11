@@ -72,14 +72,16 @@
     "versionCode": 69,
     "versionName": "2.0-dev2.8",
     "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.8/anipull-2.0-dev2.8.apk",
-    "sha256": "68ecafb5f1ded7813ffba5f3086f43a35e3bef9af0d2661e5cb2afc2d35914c2",
+    "sha256": "53bdc06be96f93f1bfef30c9aba9803910b0391fadad7be81c46059b41457405",
     "features": [
-      "The download confirm sheet now shows the file size live for every quality and language you tap \u2014 tap 720p, Dub, or back to 1080p Sub and the size updates as you tap, with \"checking\u2026\" while it fetches and instant answers for combos already checked"
+      "The download confirm sheet now shows the file size live for every quality and language you tap \u2014 tap 720p, Dub, or back to 1080p Sub and the size updates as you tap, with \"checking\u2026\" while it fetches and instant answers for combos already checked",
+      "New Settings toggle in Downloads: \"Prefer smaller files\" \u2014 at your chosen quality, the race picks the smallest file instead of the fastest server. Off by default (fastest first); turning it on may take longer, since it waits to compare servers instead of taking the first one"
     ],
     "fixes": [
       "Fixed HLS size estimates using the peak bitrate \u2014 estimates now use AVERAGE-BANDWIDTH where the playlist lists it (calm 1080p was ~1.15 GB from peak BANDWIDTH vs ~540 MB from the average), so the \"~\" figure in the sheet is much closer to the real file",
       "Fixed the sheet only showing a size when the pre-resolve had already cached that exact combo \u2014 tapping a different quality or language now warms a resolve for that combo in the background and fills the size in when it lands, without ever blocking the Download button",
-      "Fixed the size being borrowable across sources \u2014 the size now always comes from the actual link being downloaded for that exact quality/language/server (same episode, same 1080p, same sub: momo ~236 MB, calm ~540 MB, revo ~890 MB \u2014 1080p is only the dimensions, every source encodes differently), so a size from one server is never shown for another; when a size genuinely cannot be determined the sheet shows nothing instead of a borrowed number"
+      "Fixed the size being borrowable across sources \u2014 the size now always comes from the actual link being downloaded for that exact quality/language/server (same episode, same 1080p, same sub: momo ~236 MB, calm ~540 MB, revo ~890 MB \u2014 1080p is only the dimensions, every source encodes differently), so a size from one server is never shown for another; when a size genuinely cannot be determined the sheet shows nothing instead of a borrowed number",
+      "Fixed the sheet size going stale when the size preference changes \u2014 the resolve cache is now keyed by the \"Prefer smaller files\" setting too, so flipping the toggle re-resolves under the new mode and the size shown is always for the link that would actually win under the current setting"
     ]
   }
 }
