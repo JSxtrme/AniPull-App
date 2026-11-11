@@ -68,6 +68,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -1690,6 +1691,9 @@ fun AnipullApp() {
 fun AnipullAppInner() {
     val context = LocalContext.current
     var screen by remember { mutableStateOf<ApiTitle?>(null) }
+    // 2.0-dev2.4: episode to auto-scroll to when a detail opens from
+    // Recently Downloaded (null = no auto-scroll, every other origin).
+    var detailTargetEpisode by remember { mutableStateOf<Int?>(null) }
     // 4.8.15: tapped poster's slot (e.g. "carousel-123", "Trending-456").
     // Set on tap, BEFORE screen changes, so AnimatedContent transition
     // renders both outgoing home poster and incoming detail poster with
@@ -1711,6 +1715,12 @@ fun AnipullAppInner() {
         holdFor = t
     }
     var liveSections by remember { mutableStateOf<List<HomeSection>?>(null) }
+    // 2.0-dev2.4: jobs feed the Recently Downloaded home row
+    // (grouped in RecentlyDownloaded.kt; dismissals live there too).
+    val homeJobs by DownloadEngine.jobs.collectAsState()
+    val recentList = remember(homeJobs) { recentlyDownloadedAnimes(homeJobs) }
+    val recentDismissals = rememberRecentDismissals()
+    val visibleRecents = recentList.filter { recentDismissals.isVisible(it) }
     // 1.9-dev5.0 updater: auto-check result, shown on home entry
     // once home has loaded (never blocking loading). Silent when
     // up to date; "Later" snoozes that versionCode.
@@ -1858,7 +1868,7 @@ fun AnipullAppInner() {
         sharedPosterKey = null
     }
     var carouselPage by remember { mutableStateOf(500) }
-    fun openTitle(t: ApiTitle, slot: String? = null, isCarousel: Boolean = false) {
+    fun openTitle(t: ApiTitle, slot: String? = null, isCarousel: Boolean = false, targetEpisode: Int? = null) {
         // 4.8.15: simple. Set shared key BEFORE screen, so both
         // outgoing home poster and incoming detail poster render
         // with the SAME key during AnimatedContent transition.
@@ -1870,6 +1880,7 @@ fun AnipullAppInner() {
         searchOpenBeforeDetail = searchMode || query.isNotBlank()
         if (slot != null) sharedPosterKey = slot
         else if (isCarousel) sharedPosterKey = "carousel-${t.id}"
+        detailTargetEpisode = targetEpisode
         screen = t
     }
     fun goBackFromDetail() {
@@ -1877,6 +1888,9 @@ fun AnipullAppInner() {
         // detail slides out right, home slides in left, poster
         // flies back to its home slot (same shared key, kept).
         screen = null
+        // 2.0-dev2.4: the auto-scroll target belongs to the detail
+        // just closed — a later open without one must not re-scroll.
+        detailTargetEpisode = null
         // 1.9-dev5.1: if the detail came from search / the cached
         // catalog (blank query), put search MODE back on so the
         // catalog grid — and its shared poster slot — is there for
@@ -2350,6 +2364,20 @@ fun AnipullAppInner() {
                     particlesPaused = listState.isScrollInProgress || isSearchFocused,
                 )
             }
+            // 2.0-dev2.4: Recently Downloaded, right after the header
+            // and before every catalog row — home only, never in
+            // search mode, and only while something is visible
+            // (dismissals are filtered above, so an all-dismissed
+            // list leaves no empty item / gap behind).
+            if (query.isBlank() && !searchMode && liveSections != null && visibleRecents.isNotEmpty()) {
+                item(key = "home_recently", contentType = "row") {
+                    RecentlyDownloadedSection(
+                        recents = visibleRecents,
+                        onOpen = { t, ep -> openTitle(t, slot = "recently-${t.id}", targetEpisode = ep) },
+                        onDismiss = { recentDismissals.dismiss(it) },
+                    )
+                }
+            }
             if (query.isNotBlank()) {
                 item(key = "home_search_results", contentType = "search") {
                     Text(
@@ -2423,12 +2451,12 @@ fun AnipullAppInner() {
             } else if (liveSections != null) {
                 val spotlight = liveSections!!.firstOrNull { it.name == "Spotlight" }
                 if (spotlight != null) {
-                    item(key = "home_weekend", contentType = "row") { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { t, slot -> openTitle(t, slot) }, { sheetFor = it }, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
+                    item(key = "home_weekend", contentType = "row") { Box(Modifier.animateItem()) { PosterRow("Weekend marathon picks", emptyList(), spotlight.titles.take(5), { t, slot -> openTitle(t, slot) }, { sheetFor = it }, R.drawable.ic_calendar, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) } }
                 }
                 // 1.9-dev5.0 QOL 3: Show Editor's Picks toggle — off
                 // hides the whole carousel item, not just its motion.
                 if (showEditorsPicks) featured?.let { pick ->
-                    item(key = "home_carousel", contentType = "carousel") {
+                    item(key = "home_carousel", contentType = "carousel") { Box(Modifier.animateItem()) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             androidx.compose.foundation.Image(
                                 painter = painterResource(R.drawable.ic_star),
@@ -2443,7 +2471,7 @@ fun AnipullAppInner() {
                         val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
                             .distinctBy { it.id }.take(5)
                         EditorsPickCarousel(picks, { t, slot -> openTitle(t, slot, isCarousel = true) }, { sheetFor = it }, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null && !pageTransitioning, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, initialPage = carouselPage, onPageChange = { carouselPage = it }, onLongPress = { onCardLongPress(it) })
-                    }
+                    } }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
                     val icon = when (section.name) {
@@ -2458,7 +2486,7 @@ fun AnipullAppInner() {
                         "Top 10 Month" -> R.drawable.ic_trophy
                         else -> null
                     }
-                    item(key = "home_section_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, { sheetFor = it }, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
+                    item(key = "home_section_${section.name}", contentType = "row") { Box(Modifier.animateItem()) { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, { sheetFor = it }, icon, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) } }
                 }
             } else if (homeFailed) {
                 // 1.9-dev2: failed load = skeletons + retry, never demo
@@ -2500,7 +2528,7 @@ fun AnipullAppInner() {
             // They load progressively in the background, like home rows.
             if (!searchMode && query.isBlank() && liveSections != null) {
                 extraSections.forEach { section ->
-                    item(key = "home_extra_${section.name}", contentType = "row") { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, { sheetFor = it }, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) }
+                    item(key = "home_extra_${section.name}", contentType = "row") { Box(Modifier.animateItem()) { PosterRow(section.name, emptyList(), section.titles, { t, slot -> openTitle(t, slot) }, { sheetFor = it }, null, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, scrollStore = rowScrollStore, onLongPress = { onCardLongPress(it) }) } }
                 }
             }
             // 1.9-dev4.8: Explore — after all catalogs, a grid (not a
@@ -2511,7 +2539,7 @@ fun AnipullAppInner() {
             // This is what the Downloads "Browse anime" button points
             // at: home no longer has only a handful of picks.
             if (!searchMode && query.isBlank() && liveSections != null && showExplore) {
-                item(key = "home_explore", contentType = "explore") {
+                item(key = "home_explore", contentType = "explore") { Box(Modifier.animateItem()) {
                     // First composition of Explore = user scrolled
                     // near it, so now (and only now) start loading.
                     LaunchedEffect(Unit) { if (!exploreStarted) { exploreStarted = true; loadExploreNext() } }
@@ -2582,9 +2610,9 @@ fun AnipullAppInner() {
                             }
                         }
                     }
-                }
+                } }
                 if (!exploreFinished) {
-                    item(key = "home_explore_more", contentType = "explore_more") {
+                    item(key = "home_explore_more", contentType = "explore_more") { Box(Modifier.animateItem()) {
                         // Composed only when the user reaches the bottom:
                         // that composition is the scroll trigger for the
                         // next page. The footer stays hidden until the
@@ -2598,11 +2626,11 @@ fun AnipullAppInner() {
                         } else {
                             Spacer(Modifier.height(8.dp))
                         }
-                    }
+                    } }
                 } else {
-                    item(key = "home_explore_done", contentType = "explore_done") {
+                    item(key = "home_explore_done", contentType = "explore_done") { Box(Modifier.animateItem()) {
                         Text("That's the whole Explore catalog for now — back to the top for the picks above, or pull something below.", color = Faint, fontSize = 13.sp)
-                    }
+                    } }
                 }
             }
             // 1.9-dev4.7: footer (the Anipull about section) is
@@ -2610,7 +2638,7 @@ fun AnipullAppInner() {
             // it stayed visible when the search box was tapped
             // (short focused list) and while results were fetching
             // (short skeleton list) — both screenshots JS circled.
-            if (!searchMode && query.isBlank() && !searching && (liveSections == null || exploreFinished || !showExplore)) item(key = "home_footer", contentType = "footer") {
+            if (!searchMode && query.isBlank() && !searching && (liveSections == null || exploreFinished || !showExplore)) item(key = "home_footer", contentType = "footer") { Box(Modifier.animateItem()) {
                 Column {
                     LogoRow()
                     Spacer(Modifier.height(8.dp))
@@ -2624,7 +2652,7 @@ fun AnipullAppInner() {
                     // covers the footer.
                     Spacer(Modifier.height(100.dp))
                 }
-            }
+            } }
         }
     }
     } // close Haze source Box
@@ -2664,6 +2692,7 @@ fun AnipullAppInner() {
                             onPull = { sheetFor = it },
                             isSaved = savedTitles.any { it.id == targetScreen.id },
                             onSaveToggle = { toggleSave(targetScreen) },
+                            targetEpisode = detailTargetEpisode,
                         )
                     }
                 }
@@ -3297,21 +3326,78 @@ fun OnboardingScreen(onFinish: () -> Unit) {
     }
 }
 
+// 2.0-dev2.4: Downloads tab filter pills. Active is DOWNLOADING
+// + PAUSED only; QUEUED and FAILED are their own pills. Under
+// All, the sections stay exactly as before (Active = QUEUED +
+// DOWNLOADING + PAUSED + FAILED, Cancelled, Completed).
+private enum class DownloadFilter(val label: String, val emptyText: String) {
+    ALL("All", ""),
+    ACTIVE("Active", "No active downloads"),
+    QUEUE("Queue", "No queued downloads"),
+    ERRORED("Errored", "No failed downloads"),
+    CANCELLED("Cancelled", "No cancelled downloads"),
+    COMPLETED("Completed", "No completed downloads"),
+}
+
+@Composable
+private fun DownloadFilterPill(
+    filter: DownloadFilter,
+    count: Int,
+    selected: Boolean,
+    onPick: () -> Unit,
+) {
+    // Same pill look as EpisodeViewToggle: pink border + pink
+    // tint when selected, Card + faint border otherwise.
+    Box(
+        modifier = Modifier.clip(RoundedCornerShape(999.dp))
+            .border(1.dp, if (selected) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp))
+            .background(if (selected) Pink.copy(alpha = 0.2f) else Card)
+            .clickable { onPick() }
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text("${filter.label} · $count", color = if (selected) Color.White else Muted, fontSize = 12.sp, fontWeight = FontWeight.Bold) }
+}
+
 @Composable
 fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
     // 2.0-dev1.0: real jobs from DownloadEngine. Active jobs show
     // live progress + pause/resume/cancel; completed jobs show size
-    // + Open/Delete. The notification preview below is unchanged —
-    // it still tests Notifications.kt, not the engine.
+    // + Open/Delete. 2.0-dev2.4: filter pills (All / Active /
+    // Queue / Errored / Cancelled / Completed) + Clear all for
+    // failed/cancelled jobs; the notification preview button that
+    // used to sit below the list is gone.
     val context = LocalContext.current
     val jobs by DownloadEngine.jobs.collectAsState()
-    val active = jobs.filter { it.state == JobState.QUEUED || it.state == JobState.DOWNLOADING || it.state == JobState.PAUSED || it.state == JobState.FAILED }
+    var filter by remember { mutableStateOf(DownloadFilter.ALL) }
+    val activeSection = jobs.filter { it.state == JobState.QUEUED || it.state == JobState.DOWNLOADING || it.state == JobState.PAUSED || it.state == JobState.FAILED }
+    val activeJobs = jobs.filter { it.state == JobState.DOWNLOADING || it.state == JobState.PAUSED }
+    val queuedJobs = jobs.filter { it.state == JobState.QUEUED }
+    val erroredJobs = jobs.filter { it.state == JobState.FAILED }
     // 2.0-dev2.2: cancelled jobs were invisible here (neither active
     // nor completed) — and the episode row was stuck on them too.
     // They now get their own section with a Retry action, same as
     // FAILED. Retry fresh-resolves; it never reuses the stale link.
     val cancelled = jobs.filter { it.state == JobState.CANCELLED }
     val completed = DownloadEngine.completedJobs(context)
+    val counts = mapOf(
+        DownloadFilter.ALL to jobs.size,
+        DownloadFilter.ACTIVE to activeJobs.size,
+        DownloadFilter.QUEUE to queuedJobs.size,
+        DownloadFilter.ERRORED to erroredJobs.size,
+        DownloadFilter.CANCELLED to cancelled.size,
+        DownloadFilter.COMPLETED to completed.size,
+    )
+    // Jobs shown for the selected pill. All keeps every section
+    // as today; any other pill shows only that group, with no
+    // redundant section header.
+    val filteredJobs: List<DownloadJob> = when (filter) {
+        DownloadFilter.ALL -> jobs
+        DownloadFilter.ACTIVE -> activeJobs
+        DownloadFilter.QUEUE -> queuedJobs
+        DownloadFilter.ERRORED -> erroredJobs
+        DownloadFilter.CANCELLED -> cancelled
+        DownloadFilter.COMPLETED -> completed
+    }
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -3327,8 +3413,22 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
         Text("Downloads", color = TextMain, fontSize = 22.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Spacer(Modifier.height(4.dp))
         Text("Episodes you pull, with live progress.", color = Muted, fontSize = 13.sp)
+        Spacer(Modifier.height(12.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            DownloadFilter.values().forEach { pill ->
+                DownloadFilterPill(
+                    filter = pill,
+                    count = counts[pill] ?: 0,
+                    selected = filter == pill,
+                    onPick = { filter = pill },
+                )
+            }
+        }
         Spacer(Modifier.height(16.dp))
-        if (active.isEmpty() && completed.isEmpty() && cancelled.isEmpty()) {
+        if (jobs.isEmpty()) {
             Column(
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -3366,19 +3466,36 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
                     contentAlignment = Alignment.Center,
                 ) { Text("Browse anime", color = OnAccent, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
             }
-        } else {
+        } else if (filter == DownloadFilter.ALL) {
             LazyColumn(
                 modifier = Modifier.fillMaxWidth().weight(1f),
                 verticalArrangement = Arrangement.spacedBy(10.dp),
             ) {
-                if (active.isNotEmpty()) {
+                if (activeSection.isNotEmpty()) {
                     item { Text("Active", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont) }
-                    items(active, key = { it.id }) { job -> DownloadJobRow(job) }
+                    items(activeSection, key = { it.id }) { job -> DownloadJobRow(job) }
                 }
                 if (cancelled.isNotEmpty()) {
                     item {
                         Spacer(Modifier.height(8.dp))
-                        Text("Cancelled", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text("Cancelled", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
+                            // 2.0-dev2.4: clears ONLY cancelled jobs —
+                            // never Active/Queue/Completed. Failed jobs
+                            // sit inside the Active section here, so
+                            // they are cleared from the Errored pill.
+                            Text(
+                                "Clear all", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                                modifier = Modifier.clickable {
+                                    val n = DownloadEngine.clearJobs(context, setOf(JobState.CANCELLED))
+                                    showToast(context, "Cleared $n cancelled downloads")
+                                },
+                            )
+                        }
                     }
                     items(cancelled, key = { it.id }) { job -> DownloadJobRow(job) }
                 }
@@ -3389,61 +3506,53 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit) {
                     }
                     items(completed, key = { it.id }) { job -> CompletedJobRow(job) }
                 }
-                item { Spacer(Modifier.height(8.dp)) }
+                item { Spacer(Modifier.height(16.dp)) }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().weight(1f),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                if (filteredJobs.isEmpty()) {
+                    item { Text(filter.emptyText, color = Muted, fontSize = 13.sp) }
+                } else {
+                    // 2.0-dev2.4: Clear all, only for the two
+                    // terminal-record groups, and only the group
+                    // being viewed. No confirmation dialog — these
+                    // are only failed/cancelled records.
+                    if (filter == DownloadFilter.ERRORED || filter == DownloadFilter.CANCELLED) {
+                        item {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text(
+                                    if (filter == DownloadFilter.ERRORED) "${filteredJobs.size} failed downloads" else "${filteredJobs.size} cancelled downloads",
+                                    color = Muted, fontSize = 13.sp,
+                                )
+                                Text(
+                                    "Clear all", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.clickable {
+                                        if (filter == DownloadFilter.ERRORED) {
+                                            val n = DownloadEngine.clearJobs(context, setOf(JobState.FAILED))
+                                            showToast(context, "Cleared $n failed downloads")
+                                        } else {
+                                            val n = DownloadEngine.clearJobs(context, setOf(JobState.CANCELLED))
+                                            showToast(context, "Cleared $n cancelled downloads")
+                                        }
+                                    },
+                                )
+                            }
+                        }
+                    }
+                    items(filteredJobs, key = { it.id }) { job ->
+                        if (job.state == JobState.COMPLETED) CompletedJobRow(job) else DownloadJobRow(job)
+                    }
+                }
+                item { Spacer(Modifier.height(16.dp)) }
             }
         }
-        // 1.9-dev4.8.1: download notification DESIGN, previewable now.
-        // This posts the exact notification the design specifies
-        // (see Notifications.kt): low-importance Downloads channel,
-        // per-episode progress + MB/s + Pause/Cancel, then a
-        // completion ping to Downloads. Pause/Cancel in the shade
-        // really pause/cancel this preview via
-        // DownloadActionReceiver, they are not dead buttons.
-        Spacer(Modifier.height(16.dp))
-        val dlCtx = LocalContext.current
-        val dlScope = rememberCoroutineScope()
-        var previewMsg by remember { mutableStateOf<String?>(null) }
-        fun startPreview() {
-            val pr = dlCtx.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
-            if (!pr.getBoolean("notif_enabled", true)) { previewMsg = "Download notifications are off in Settings → Notifications."; return }
-            DownloadNotifications.isPaused = false
-            DownloadNotifications.isCancelled = false
-            dlScope.launch {
-                var progress = 0
-                while (progress <= 100) {
-                    if (DownloadNotifications.isCancelled) { previewMsg = "Preview cancelled from the notification."; return@launch }
-                    if (DownloadNotifications.isPaused) { kotlinx.coroutines.delay(500); continue }
-                    DownloadNotifications.showProgress(dlCtx, "Frieren — Episode 1", progress, 8.4, paused = false)
-                    previewMsg = "Preview running: $progress% — check your notification shade."
-                    kotlinx.coroutines.delay(1200)
-                    progress += 10
-                }
-                if (pr.getBoolean("completion_enabled", true)) DownloadNotifications.showComplete(dlCtx, "Frieren — Episode 1")
-                else DownloadNotifications.cancelProgress(dlCtx)
-                previewMsg = "Preview complete — completion ping sent (if enabled in Settings)."
-            }
-        }
-        val notifLauncher = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.RequestPermission()) { granted ->
-            if (granted) startPreview() else previewMsg = "Notification permission denied — the preview can't show."
-        }
-        Box(
-            modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, Pink, RoundedCornerShape(999.dp))
-                .clickable {
-                    val granted = if (android.os.Build.VERSION.SDK_INT >= 33)
-                        androidx.core.content.ContextCompat.checkSelfPermission(dlCtx, android.Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                    else true
-                    if (granted) startPreview() else notifLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
-                }
-                .padding(horizontal = 20.dp, vertical = 11.dp),
-            contentAlignment = Alignment.Center,
-        ) { Text("Preview download notification", color = Pink, fontSize = 13.5.sp, fontWeight = FontWeight.Bold) }
-        if (previewMsg != null) {
-            Spacer(Modifier.height(12.dp))
-            Text(previewMsg!!, color = Muted, fontSize = 13.sp, textAlign = TextAlign.Center)
-        }
-        Spacer(Modifier.height(8.dp))
-        Text("Sample only — this button just previews the notification.", color = Faint, fontSize = 12.sp, textAlign = TextAlign.Center)
-        Spacer(Modifier.height(16.dp))
     }
 }
 
@@ -5132,7 +5241,7 @@ private fun ClearanceWebViewDialog(onDone: () -> Unit, onCancel: () -> Unit) {
 }
 
 @Composable
-fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null, onPosterImageBounds: ((Rect) -> Unit)? = null) {
+fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null, onPosterImageBounds: ((Rect) -> Unit)? = null, targetEpisode: Int? = null) {
     val context = LocalContext.current
     // 2.0-dev1.0: episode rows enqueue directly at the saved quality.
     val qualityPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
@@ -5160,6 +5269,58 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
     )
     @Suppress("UNUSED_VARIABLE")
     val episodeRows = episodeState.rows // subscription read — see above; value itself is emitted by EpisodeList(state)
+    // 2.0-dev2.4: auto-scroll to the last downloaded episode, once
+    // per detail open, only when opened from Recently Downloaded
+    // (targetEpisode != null). Item layout of THIS LazyColumn,
+    // verified against the EpisodeList emitter: 0 = header
+    // (back/poster/synopsis), 1 = "Episodes" header, 2 = the
+    // EpisodeRowsSection header (note/toggle/range selector), then
+    // the episode rows — one item per row in list view, chunked(2)
+    // pairs in grid view. If the target is in a different range,
+    // switch range first and let the effect re-run once visibleRows
+    // holds it; if it is not in the loaded list at all, do nothing
+    // (never crash, never scroll). The (title id, episode) guard
+    // makes it once-per-open even if the list reloads.
+    val detailListState = rememberLazyListState()
+    var detailViewportHeightPx by remember { mutableStateOf(0) }
+    var autoScrollDoneFor by remember { mutableStateOf<Pair<Long, Int>?>(null) }
+    LaunchedEffect(episodeState.visibleRows, targetEpisode, episodeState.episodeView) {
+        val target = targetEpisode ?: return@LaunchedEffect
+        if (autoScrollDoneFor == title.id to target) return@LaunchedEffect
+        val rows = episodeState.rows ?: return@LaunchedEffect
+        if (rows.none { it.number == target }) {
+            // Loaded list has no such episode — nothing to scroll to.
+            autoScrollDoneFor = title.id to target
+            return@LaunchedEffect
+        }
+        val visible = episodeState.visibleRows ?: return@LaunchedEffect
+        val pos = visible.indexOfFirst { it.number == target }
+        if (pos < 0) {
+            // In the list, but hidden by the current range: jump to
+            // the range bracketing the target (All = index 0 has no
+            // min/max, so only a chunk range matches here). The
+            // range switch recomposes visibleRows and this effect
+            // re-runs; if ranges are not built yet, it re-runs when
+            // they land.
+            val rangeIdx = episodeState.ranges.indexOfFirst { r ->
+                r.min != null && r.max != null && target in r.min..r.max
+            }
+            if (rangeIdx > 0) episodeState.setRange(rangeIdx)
+            return@LaunchedEffect
+        }
+        val itemIndex = if (episodeState.episodeView == "grid") 3 + pos / 2 else 3 + pos
+        detailListState.scrollToItem(itemIndex)
+        // Centre the row: scrollToItem put it in view, so its
+        // measured offset/size are in layoutInfo; the delta to the
+        // viewport middle is applied on top. Viewport height 0
+        // (not measured yet) = item visible, just not centred.
+        val info = detailListState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == itemIndex }
+        if (info != null && detailViewportHeightPx > 0) {
+            val delta = (info.offset + info.size / 2) - detailViewportHeightPx / 2
+            if (delta != 0) detailListState.animateScrollBy(delta.toFloat())
+        }
+        autoScrollDoneFor = title.id to target
+    }
     var synExpanded by remember { mutableStateOf(false) }
     // 1.9-dev4.8 extra smoothness: without a hero, the detail fades
     // in over 300ms instead of appearing instantly; with a hero, the
@@ -5183,12 +5344,14 @@ fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit
     // as it did in the build JS just approved — this change only
     // removes the EXTRA info fade/slide on top of it.
     LazyColumn(
+        state = detailListState,
         modifier = Modifier
             .fillMaxSize()
             .background(Bg)
             .statusBarsPadding()
             .navigationBarsPadding()
             .padding(horizontal = 16.dp)
+            .onGloballyPositioned { val h = it.size.height; if (h != detailViewportHeightPx) detailViewportHeightPx = h }
             .alpha(detailAlpha),
     ) {
         item {

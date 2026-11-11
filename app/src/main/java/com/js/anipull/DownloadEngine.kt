@@ -466,6 +466,34 @@ object DownloadEngine {
         DownloadNotifications.cancelJob(context, id)
     }
 
+    // 2.0-dev2.4: Clear all for the Downloads tab — removes every
+    // job in the given states (FAILED and/or CANCELLED only; the
+    // caller never passes Active/Queue/Completed). Drops their
+    // links/controls/attempts entries, cancels their
+    // notifications, and persists. Returns how many were removed
+    // so the UI can toast the count. These are only terminal
+    // records — no downloaded file is touched (a FAILED/CANCELLED
+    // job has none; partials are left alone, same as before).
+    fun clearJobs(context: Context, states: Set<JobState>): Int {
+        val ctx = context.applicationContext
+        val removed: List<DownloadJob>
+        synchronized(lock) {
+            removed = _jobs.value.filter { it.state in states }
+            if (removed.isEmpty()) return 0
+            val ids = removed.map { it.id }.toSet()
+            _jobs.value = _jobs.value.filter { it.id !in ids }
+            ids.forEach { id ->
+                links.remove(id)
+                controls.remove(id)
+                attempts.remove(id)
+            }
+        }
+        persist(ctx)
+        removed.forEach { DownloadNotifications.cancelJob(ctx, it.id) }
+        DownloadLogs.log("ENGINE", "clearJobs: removed ${removed.size} job(s) in states=${states.joinToString { it.name }}")
+        return removed.size
+    }
+
     fun completedJobs(context: Context): List<DownloadJob> {
         init(context)
         return _jobs.value.filter { it.state == JobState.COMPLETED }

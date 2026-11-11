@@ -1,0 +1,15 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp" android:height="24dp"
+    android:viewportWidth="24" android:viewportHeight="24">
+    <!-- 2.0-dev2.4: history clock, hand-authored in the family's
+         white-fill style (cf. ic_calendar / ic_download): a clock
+         ring with hands, and a counterclockwise arrow sweeping
+         over the top, its head pointing down at the left end. -->
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M21,8.5Q20,2 12.5,1.8Q5,2 3,8L5.2,8.6Q6.8,4.2 12.5,4Q18,4.2 18.8,8.5Z
+            M2.8,12.8L6.6,7L1.2,6.6Z" />
+    <path android:fillColor="#FFFFFF" android:fillType="evenOdd"
+        android:pathData="M12,6.5a6.5,6.5 0 1,0 0,13a6.5,6.5 0 1,0 0,-13zM12,8.5a4.5,4.5 0 1,1 0,9a4.5,4.5 0 1,1 0,-9z" />
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M11.5,9.2h1v4h-1zM12,12.5h3v1h-3z" />
+</vector>
