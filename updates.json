@@ -69,12 +69,13 @@
     ]
   },
   "dev": {
-    "versionCode": 71,
-    "versionName": "2.0-dev2.10",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.10/anipull-2.0-dev2.10.apk",
-    "sha256": "2ab3f8b12c248d7dd5ab1fda35b633aafe27758edc68b86534e715843a20c0ab",
+    "versionCode": 72,
+    "versionName": "2.0-dev2.11",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.11/anipull-2.0-dev2.11.apk",
+    "sha256": "469d625f092bc4d3988127cd33da50d8c52c7fac45a86acd35f8d2d69b1d6aa4",
     "features": [
-      "New Settings toggle in Downloads: \"Prefer direct downloads\" \u2014 at your chosen quality, the race prefers a direct file (subtitles burned in, so it plays anywhere) over a stream, and falls back to other sources when no direct file is available. Off by default; it never overrides quality \u2014 a direct file below your chosen quality can never beat a stream that meets it"
+      "New 10th source: Server 10 joins the race \u2014 a direct-download source (subtitles burned in, single file per episode) that can win 1080p Sub requests. It counts as a direct file, so the \"Prefer direct downloads\" toggle prefers it over streams at the same quality. Home now reads \"10 Sources\"",
+      "Home now shows 10 Sources: the stats cell that read \"3 DDL Sources\" now reads the live server count (\"10 Sources\"), and the chip above it reads \"10 servers\" \u2014 both derived from the server list so they stay truthful as sources are added"
     ],
     "fixes": []
   }
