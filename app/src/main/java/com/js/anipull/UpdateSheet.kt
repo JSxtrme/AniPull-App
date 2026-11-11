@@ -83,6 +83,13 @@ import java.io.File
 // the first onProgress callback fires, and only then the
 // Downloaded X/Y — N% text. Nothing else about the flow
 // changed.
+// 2.0-dev2.12, connecting fix: the 302 itself is the slow hop
+// (~1 s of GitHub server time minting the signed asset URL,
+// measured 2026-11-11) and it sat invisible behind that one
+// "Connecting…" with zero retries. The sheet now pre-resolves
+// the asset URL on open (resolveApkAssetUrl, cached 30 min),
+// the download reports honest phases through onPhase, and a
+// failed attempt is retried once.
 // 1.9-dev5.5, changelog sections: the flat What's new / Bug
 // fixes list is now two collapsible sections (ReVanced-style
 // pattern, Anipull's own colours and icons): "New features"
@@ -229,6 +236,11 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
     // — i.e. the first 64KB chunk arrived. Until then the
     // progress card shows "Connecting…" instead of 0%.
     var downloadStarted by remember { mutableStateOf(false) }
+    // 2.0-dev2.12: the live connection phase ("Contacting
+    // GitHub…" / "Redirecting to download server…" / "Starting
+    // download…"), so a slow hop is named instead of one flat
+    // "Connecting…". Null = no phase reported yet.
+    var connectPhase by remember { mutableStateOf<String?>(null) }
     // 1.9-dev5.7: changelog expansion. BOTH sections start
     // expanded (JS took back the New-only default after the 5.6
     // test). Only one present: that one expanded. (The sections
@@ -350,8 +362,9 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
         downloaded = 0L
         total = -1L
         downloadStarted = false
+        connectPhase = null
         scope.launch {
-            val file = downloadUpdate(context, info) { d, t -> downloaded = d; total = t; downloadStarted = true }
+            val file = downloadUpdate(context, info, onPhase = { connectPhase = it }) { d, t -> downloaded = d; total = t; downloadStarted = true }
             if (file == null) {
                 phase = UpdatePhase.Idle
                 errorMsg = "Download failed — check your connection and try again."
@@ -381,6 +394,17 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
     androidx.compose.runtime.LaunchedEffect(permissionReturnCount) {
         if (permissionReturnCount == 0) return@LaunchedEffect
         startDownloadAndInstall()
+    }
+
+    // 2.0-dev2.12: resolve the github.com release link to the
+    // signed asset URL while the user is still reading the
+    // changelog — the Download tap then connects straight to
+    // the asset host instead of waiting on GitHub's slow 302
+    // (~1 s of server time to mint the signed URL). Fire and
+    // forget: a failed resolve just means the download follows
+    // the redirect live, exactly as before.
+    androidx.compose.runtime.LaunchedEffect(info.apkUrl) {
+        resolveApkAssetUrl(info.apkUrl)
     }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState) {
@@ -478,9 +502,14 @@ fun UpdateSheet(info: UpdateInfo, currentVersionName: String, onLater: () -> Uni
                     // "Connecting…" instead of "Downloaded 0.0 MB
                     // / ? — 0%". The Downloaded text only appears
                     // once the first chunk lands (downloadStarted).
+                    // 2.0-dev2.12: the phase is named when known
+                    // ("Contacting GitHub…", "Redirecting to
+                    // download server…", "Starting download…",
+                    // "Retrying…") so a slow hop is visible
+                    // instead of one frozen "Connecting…".
                     Text(
                         if (phase == UpdatePhase.Installing) "Installing... 100%"
-                        else if (!downloadStarted) "Connecting…"
+                        else if (!downloadStarted) connectPhase ?: "Connecting…"
                         else "Downloaded ${fmtMB(downloaded)} / ${fmtMB(total)} — $pct%",
                         color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
                     )

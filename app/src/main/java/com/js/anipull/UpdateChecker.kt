@@ -190,20 +190,91 @@ suspend fun checkForUpdate(context: Context, channel: String = updateChannel(con
  *  JSON provides one — a mismatch deletes the file and returns
  *  null. Returns the file on success, null on any failure.
  *  onProgress is called from the IO thread; Compose state writes
- *  from there are safe (snapshot state is thread-safe). */
-suspend fun downloadUpdate(context: Context, info: UpdateInfo, onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit): File? = withContext(Dispatchers.IO) {
-    val dir = File(context.cacheDir, "updates").apply { mkdirs() }
+ *  from there are safe (snapshot state is thread-safe).
+ *  2.0-dev2.12: onPhase reports the connection setup honestly
+ *  ("Contacting GitHub…" / "Redirecting to download server…" /
+ *  "Starting download…") instead of one flat "Connecting…", and
+ *  a failed attempt is retried ONCE — a transient stall used to
+ *  be a dead end that needed a second tap. The download prefers
+ *  the URL pre-resolved when the sheet opened (see
+ *  resolveApkAssetUrl), so the tap connects straight to the
+ *  asset host instead of waiting on GitHub's slow 302. */
+suspend fun downloadUpdate(
+    context: Context,
+    info: UpdateInfo,
+    onPhase: (String) -> Unit = {},
+    onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
+): File? = withContext(Dispatchers.IO) {
     val out = downloadedUpdateFile(context)
-    val digest = MessageDigest.getInstance("SHA-256")
-    try {
-        val conn = (URL(info.apkUrl).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 10000
-            readTimeout = 30000
+    repeat(2) { attempt ->
+        try {
+            downloadUpdateOnce(context, info, out, onPhase, onProgress)?.let { return@withContext it }
+            // Null = HTTP error or SHA mismatch: retrying the
+            // same URL would fail the same way, so stop here.
+            return@withContext null
+        } catch (e: Exception) {
+            // Connect/read failure mid-flight: delete the partial
+            // file and try once more from scratch.
+            out.delete()
+            if (attempt == 0) onPhase("Retrying…")
         }
-        if (conn.responseCode != 200) return@withContext null
-        val total = conn.contentLengthLong
+    }
+    null
+}
+
+/** One download attempt. Throws on any IO failure (the caller
+ *  retries once); returns null on an HTTP error or a SHA
+ *  mismatch. Redirects are followed manually (max 5) so the
+ *  phase callback can say "Redirecting…" instead of the UI
+ *  sitting on one word while HttpURLConnection silently hops
+ *  hosts — the github.com link 302s to
+ *  release-assets.githubusercontent.com, and that hop is the
+ *  slowest part of the whole update (~1 s of GitHub server time
+ *  minting the signed URL, measured 2026-11-11). */
+private fun downloadUpdateOnce(
+    context: Context,
+    info: UpdateInfo,
+    out: File,
+    onPhase: (String) -> Unit,
+    onProgress: (downloadedBytes: Long, totalBytes: Long) -> Unit,
+): File? {
+    val digest = MessageDigest.getInstance("SHA-256")
+    File(context.cacheDir, "updates").apply { mkdirs() }
+    // Pre-resolved asset URL (sheet open) if still fresh,
+    // otherwise the github.com link — the redirect is then
+    // followed live below, exactly as before.
+    val startUrl = cachedResolvedApkUrl(info.apkUrl) ?: info.apkUrl
+    var conn: HttpURLConnection? = null
+    try {
+        onPhase(if (startUrl == info.apkUrl) "Contacting GitHub…" else "Connecting to download server…")
+        var url = URL(startUrl)
+        var redirects = 0
+        while (true) {
+            val c = (url.openConnection() as HttpURLConnection).apply {
+                instanceFollowRedirects = false
+                connectTimeout = 10000
+                readTimeout = 30000
+            }
+            conn = c
+            val code = c.responseCode
+            if (code in 301..308) {
+                val location = c.getHeaderField("Location")
+                if (location.isNullOrBlank() || redirects >= 5) return null
+                onPhase("Redirecting to download server…")
+                c.disconnect()
+                conn = null
+                url = URL(url, location)
+                redirects++
+                continue
+            }
+            if (code != 200) return null
+            break
+        }
+        val finalConn = conn ?: return null
+        val total = finalConn.contentLengthLong
+        onPhase("Starting download…")
         var downloaded = 0L
-        conn.inputStream.use { input ->
+        finalConn.inputStream.use { input ->
             FileOutputStream(out).use { output ->
                 val buf = ByteArray(64 * 1024)
                 while (true) {
@@ -216,16 +287,70 @@ suspend fun downloadUpdate(context: Context, info: UpdateInfo, onProgress: (down
                 }
             }
         }
-        conn.disconnect()
+        finalConn.disconnect()
+        conn = null
         val hex = digest.digest().joinToString("") { "%02x".format(it) }
         if (info.sha256 != null && !hex.equals(info.sha256, ignoreCase = true)) {
             out.delete()
-            return@withContext null
+            return null
         }
-        out
-    } catch (_: Exception) {
+        return out
+    } catch (e: Exception) {
+        conn?.disconnect()
         out.delete()
+        throw e
+    }
+}
+
+// ---- 2.0-dev2.12: pre-resolved asset URL --------------------------
+// A github.com release link 302s to a signed
+// release-assets.githubusercontent.com URL (~1 h expiry, ~1 s
+// of GitHub server time to mint it). Resolving that redirect
+// when the update sheet opens moves the slowest hop out of the
+// Download tap's path: the tap then connects straight to the
+// asset host. In-memory only, 30 min TTL (half the signed-URL
+// life), keyed by the github.com URL. A stale or failed resolve
+// just means the download falls back to the original link and
+// follows the redirect live — never worse than before.
+private var resolvedApkUrl: String? = null
+private var resolvedApkUrlFor: String? = null
+private var resolvedApkUrlAtMs: Long = 0L
+private const val RESOLVED_APK_URL_TTL_MS = 30 * 60 * 1000L
+
+private fun cachedResolvedApkUrl(apkUrl: String): String? {
+    if (resolvedApkUrlFor != apkUrl) return null
+    if (System.currentTimeMillis() - resolvedApkUrlAtMs > RESOLVED_APK_URL_TTL_MS) return null
+    return resolvedApkUrl
+}
+
+/** Follows the github.com release redirect once (headers only,
+ *  body never read) and returns the final asset URL, caching it.
+ *  Null when the link doesn't redirect or the request fails —
+ *  the caller then uses the original URL. */
+suspend fun resolveApkAssetUrl(apkUrl: String): String? = withContext(Dispatchers.IO) {
+    cachedResolvedApkUrl(apkUrl)?.let { return@withContext it }
+    var conn: HttpURLConnection? = null
+    try {
+        conn = (URL(apkUrl).openConnection() as HttpURLConnection).apply {
+            instanceFollowRedirects = false
+            connectTimeout = 8000
+            readTimeout = 8000
+        }
+        val code = conn.responseCode
+        val location = conn.getHeaderField("Location")
+        val resolved = if (code in 301..308 && !location.isNullOrBlank()) {
+            URL(URL(apkUrl), location).toString()
+        } else null
+        if (resolved != null) {
+            resolvedApkUrl = resolved
+            resolvedApkUrlFor = apkUrl
+            resolvedApkUrlAtMs = System.currentTimeMillis()
+        }
+        resolved
+    } catch (_: Exception) {
         null
+    } finally {
+        conn?.disconnect()
     }
 }
 
