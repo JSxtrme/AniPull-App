@@ -69,20 +69,20 @@
     ]
   },
   "dev": {
-    "versionCode": 63,
-    "versionName": "2.0-dev2.2",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.2/anipull-2.0-dev2.2.apk",
-    "sha256": "8e8509e5a4de0e823431230d38793fc43fa3e47a67dd7c1d3d8432061efb802f",
+    "versionCode": 64,
+    "versionName": "2.0-dev2.3",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.3/anipull-2.0-dev2.3.apk",
+    "sha256": "6b9b1fcc99ee71bad6077676dccd0bda9643db6427b1e87c3e083d6fc484f2fc",
     "features": [
-      "Downloads now send each server's own stream headers on every fetch \u2014 Server 2's video hosts were refusing every segment without the player origin headers, so downloads failed with all segments blocked",
-      "The download log's Copy report now starts with a per-job summary \u2014 winning server, video host, headers sent, first failure and outcome \u2014 and keeps the first 50 + last 150 entries so the resolve lines can no longer scroll away",
-      "Cancelled downloads can be retried \u2014 a cancelled episode row goes back to the normal download action instead of sticking on 'cancelled', and cancelled jobs in the Downloads tab get a Retry button"
+      "Downloads now start almost instantly \u2014 servers are tried in parallel instead of one-by-one, and opening the download sheet starts resolving in the background so the link is already there when you tap Download",
+      "Resolved links are cached per episode \u2014 a repeat download skips the whole server chain, with a per-server expiry so a short-lived link is never reused after it dies",
+      "A failing server gives up in seconds instead of hanging \u2014 each resolve attempt is capped at 15 seconds and the next server is tried right away"
     ],
     "fixes": [
-      "Fixed every Server 2 download failing with all segments blocked \u2014 its video hosts require the player origin headers (Referer, and Origin for one host) on segment fetches and the app was sending none; the headers each server's own stream response supplies are now sent on playlist, key, segment and subtitle fetches, and a server leg with no headers is skipped instead of fetched headerless",
-      "Fixed cancelled downloads being stuck \u2014 a cancelled episode row showed 'cancelled' forever with no way to download again; cancelled and failed rows now return to the normal download action and start a fresh download, and the Downloads tab shows cancelled jobs with Retry",
-      "Fixed the download log dropping the resolve lines \u2014 the last-200 cap kept only the segment failures, so the winning server scrolled away; the log now keeps the first 50 + last 150 entries with an omission marker in the middle",
-      "HLS fetches now follow redirects like the rest of the app"
+      "Fixed slow downloads caused by servers being tried one at a time \u2014 the top 3 servers are now raced in parallel and the first success wins, with the rest tried in batches; failover still works, it just stops being slow",
+      "Fixed repeat downloads re-resolving from scratch \u2014 a resolved link is now cached per episode + quality + audio, with per-source expiry (Server 3 links expire in 90 seconds, Server 2 links last up to a day, everything else 10 minutes to an hour), so a repeat tap is instant and an expired link is never served",
+      "Fixed the wait between tapping an episode and the download starting \u2014 the download sheet now pre-resolves with your default quality, audio and server while you look at it, so confirming usually needs no resolve at all; changing quality, audio or server in the sheet still resolves for the new choice",
+      "Fixed slow servers blocking the whole download \u2014 a resolve attempt that hangs now fails over after 15 seconds instead of waiting out ~40 seconds of retries; download segment retries are unchanged"
     ]
   }
 }
