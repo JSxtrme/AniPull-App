@@ -72,9 +72,10 @@
     "versionCode": 68,
     "versionName": "2.0-dev2.7",
     "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.7/anipull-2.0-dev2.7.apk",
-    "sha256": "08448e3066d748142cd93a7f348a3f36833b243b488873af55788341f4aa92a2",
+    "sha256": "5b00bbc168d423d4db79eec6a95ac637ee6daf78142b2ca81423b29fe73421bc",
     "features": [
-      "The download race now proves each server's real quality before choosing \u2014 an HLS link's master playlist is checked for its true top resolution, so the winner is always a server that actually has your requested quality, and the log now says why it won"
+      "The download race now proves each server's real quality before choosing \u2014 an HLS link's master playlist is checked for its true top resolution, so the winner is always a server that actually has your requested quality, and the log now says why it won",
+      "Download snackbars can be swiped left or right to dismiss \u2014 the View action still works, and dismissing one never cancels the download"
     ],
     "fixes": [
       "Fixed the total size changing mid-download \u2014 the total is now computed once when the download starts (exact Content-Length for direct files, bandwidth x duration estimate for streams) and frozen for the whole job, so the ~488 MB figure never moves while progress climbs",
