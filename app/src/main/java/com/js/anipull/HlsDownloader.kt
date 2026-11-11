@@ -306,6 +306,11 @@ object HlsDownloader {
             if (it.code != 200) throw java.io.IOException("Playlist fetch failed (HTTP ${it.code}) — the link may have expired, retry the download.")
             it.text
         }
+        // 2.0-dev2.7 DEFECT 2: the fetch above is a blocking call
+        // (up to 15s x 3 attempts, no cancellation inside it) —
+        // a cancel can only land while it runs, so check the
+        // moment it returns, before doing any more work.
+        if (isCancelled()) throw CancellationException("HLS download cancelled")
         val subtitleTracks = parseExtXMedia(masterText, masterUrl).toMutableList()
         val pickedVariant = parseMasterPlaylist(masterText, masterUrl, quality, audio)
         val mediaUrl = pickedVariant.url
@@ -330,6 +335,9 @@ object HlsDownloader {
                 it.text
             }
         }
+        // 2.0-dev2.7 DEFECT 2: same post-fetch cancel check as
+        // the master fetch above.
+        if (isCancelled()) throw CancellationException("HLS download cancelled")
         if (mediaUrl != masterUrl) {
             for (sub in parseExtXMedia(mediaText, mediaUrl)) {
                 if (subtitleTracks.none { it.url == sub.url }) subtitleTracks += sub
@@ -356,6 +364,9 @@ object HlsDownloader {
             DownloadLogs.log("HLS", "init segment: HTTP ${initResp.code}, ${initResp.bytes.size} bytes")
             if (initResp.code != 200) throw java.io.IOException("Init segment fetch failed (HTTP ${initResp.code}) — retry the download.")
             initFile.writeBytes(initResp.bytes)
+            // 2.0-dev2.7 DEFECT 2: post-fetch cancel check (see
+            // the master fetch above).
+            if (isCancelled()) throw CancellationException("HLS download cancelled")
         }
 
         // Keys: fetched once per unique URI, cached. A key override
@@ -391,7 +402,12 @@ object HlsDownloader {
             }
         }
 
-        coroutineScope {
+        // 2.0-dev2.7 DEFECT 2: cancel can only land between the
+        // blocking segment fetches (EngineHttp has no interrupt
+        // handle — see the report), never inside one. The one log
+        // line here proves which phase a phone cancel died in.
+        try {
+            coroutineScope {
             val semaphore = Semaphore(segmentWorkers.coerceIn(1, 16))
             playlist.segments.map { seg ->
                 async {
@@ -404,6 +420,10 @@ object HlsDownloader {
                                 if (it.code != 200) throw java.io.IOException("Segment ${seg.index} HTTP ${it.code}")
                                 it.bytes
                             }
+                            // 2.0-dev2.7 DEFECT 2: the fetch above is
+                            // blocking — check the moment it returns,
+                            // before decrypting / writing its bytes.
+                            if (isCancelled()) throw CancellationException("HLS download cancelled")
                             // IV override applies only when the KEY
                             // tag carried no explicit IV; otherwise
                             // the tag's IV (or the sequence-derived
@@ -434,7 +454,12 @@ object HlsDownloader {
                                     lastReportMs = now
                                     reportBytes = downloadedBytes
                                     reportTimeMs = now
-                                    onProgress(downloadedBytes, estimate, speed.coerceAtLeast(0.0))
+                                    // 2.0-dev2.7 DEFECT 2: never emit
+                                    // progress for a job already
+                                    // cancelled — a draining run must
+                                    // not touch the new incarnation's
+                                    // numbers after a re-queue.
+                                    if (!isCancelled()) onProgress(downloadedBytes, estimate, speed.coerceAtLeast(0.0))
                                 }
                             }
                             markDone(seg.index)
@@ -448,15 +473,24 @@ object HlsDownloader {
                     }
                 }
             }.awaitAll()
+            }
+        } catch (e: CancellationException) {
+            DownloadLogs.log("HLS", "cancelled during segment download (${done.size}/$total segments done)")
+            throw e
         }
         if (failed.isNotEmpty()) {
             DownloadLogs.log("HLS", "aborted: ${failed.size} of $total segments failed in ${System.currentTimeMillis() - hlsStartedMs}ms — first: ${failed.first()}")
             throw java.io.IOException("${failed.size} of $total segments failed — download aborted, retry to resume. First: ${failed.first()}")
         }
+        // 2.0-dev2.7 DEFECT 2: do not emit the finish progress
+        // (total == downloaded) for a cancelled job, and do not
+        // start the remux after a cancel — remux() itself also
+        // checks, per segment and per sample batch.
+        checkPausedOrCancelled()
         onProgress(downloadedBytes, downloadedBytes, 0.0)
         DownloadLogs.log("HLS", "all $total segments done in ${System.currentTimeMillis() - hlsStartedMs}ms, ${downloadedBytes / 1024} KB — remuxing")
 
-        remux(tempDir, playlist.segments.size, initFile, outputFile)
+        remux(tempDir, playlist.segments.size, initFile, outputFile, isCancelled)
         DownloadLogs.log("HLS", "remux done: ${outputFile.length() / 1024} KB -> ${outputFile.name}")
         // Segments are now inside the mp4; clean up.
         try {
@@ -468,11 +502,21 @@ object HlsDownloader {
 
     // Concatenate init + decrypted segments into one TS, then remux
     // to a real mp4 with MediaExtractor + MediaMuxer (NOT raw concat).
-    private fun remux(tempDir: File, segmentCount: Int, initFile: File, outputFile: File) {
+    // 2.0-dev2.7 DEFECT 2: remux used to be a single uninterruptible
+    // blocking stretch — a cancel tapped during it did nothing until
+    // the whole file was remuxed. isCancelled is now checked per
+    // segment while concatenating and every 1024 samples while
+    // muxing, so a remux-phase cancel lands within one segment
+    // copy / one sample batch. Throws CancellationException.
+    private fun remux(tempDir: File, segmentCount: Int, initFile: File, outputFile: File, isCancelled: () -> Boolean = { false }) {
         val combined = File(tempDir, "combined.ts")
         combined.outputStream().use { out ->
             if (initFile.exists()) initFile.inputStream().use { it.copyTo(out) }
             for (i in 0 until segmentCount) {
+                if (isCancelled()) {
+                    DownloadLogs.log("HLS", "remux cancelled during concat (segment $i/$segmentCount)")
+                    throw CancellationException("HLS remux cancelled")
+                }
                 val seg = File(tempDir, "seg_%05d.ts".format(i))
                 if (!seg.exists()) throw java.io.IOException("Missing segment $i at remux — retry the download.")
                 seg.inputStream().use { it.copyTo(out) }
@@ -498,7 +542,14 @@ object HlsDownloader {
             started = true
             val buffer = ByteBuffer.allocate(1024 * 1024)
             val info = android.media.MediaCodec.BufferInfo()
+            var samples = 0
             while (true) {
+                // 2.0-dev2.7 DEFECT 2: remux-phase cancel check —
+                // one sample batch at most.
+                if (++samples % 1024 == 0 && isCancelled()) {
+                    DownloadLogs.log("HLS", "remux cancelled during mux ($samples samples written)")
+                    throw CancellationException("HLS remux cancelled")
+                }
                 val size = extractor.readSampleData(buffer, 0)
                 if (size < 0) break
                 val trackIndex = extractor.sampleTrackIndex

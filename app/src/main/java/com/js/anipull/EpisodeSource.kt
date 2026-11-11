@@ -109,14 +109,15 @@ sealed class ResolvedLink {
 // what the UI shows ("Server N") and what the engine stores on the
 // job. 2.0-dev1.7.
 // 2.0-dev2.5: `downgraded` is true when the winning link's offered
-// height is below the requested quality's floor (see
-// qualityFloorFor) — i.e. every server that answered could only
-// offer less, and this best-available link was accepted anyway.
-// The file is then named from the ACTUAL quality, never the
-// requested one. TODO(COORDINATOR): App.kt's resolve path can
-// surface this with a toast such as "Only 720p was available on
-// this server" when the returned ResolvedDownload has
-// downgraded=true; the engine only logs it today.
+// height is below the REQUESTED height (see qualityFloorFor) —
+// i.e. no server could prove the requested quality, and this
+// best-available link (one step down the ladder, meeting the
+// floor) was accepted anyway. The file is then named from the
+// ACTUAL quality, never the requested one. A link below the
+// floor is never served at all: the race fails honestly instead
+// (see MultiSourceResolver). App.kt's resolve path surfaces this
+// with a toast such as "Only 720p was available on this server"
+// when the returned ResolvedDownload has downgraded=true.
 data class ResolvedDownload(val link: ResolvedLink, val serverNumber: Int?, val downgraded: Boolean = false)
 
 // 2.0-dev2.5 — quality ladder + floor. A download that meets the
@@ -241,15 +242,24 @@ object EpisodeSources {
     fun anv(): EpisodeSource = AnvEpisodeSource()
 }
 
-// Try candidates in priority order; the first link meeting the
-// requested quality's floor wins (2.0-dev2.5: a sub-floor link is
-// parked, not taken, while the batch keeps racing). If all fail,
-// the last Failed is returned (or a generic message when nothing
-// ran), with serverNumber null. onAttempt fires with each server
-// number as it is tried, so the UI can show live progress
-// ("Trying Server N…"). The Pahe candidate is passed in already
-// constructed with its clearance — the engine NEVER solves
-// Cloudflare.
+// Try candidates in priority order. 2.0-dev2.7: the win tier is
+// the REQUESTED height, not the floor — a link that merely meets
+// the floor (one step down, e.g. 720p for a 1080p request) is
+// PARKED as a downgrade candidate, never crowned on arrival, so
+// a slower server that CAN prove the requested quality still gets
+// its chance and a 720p-max server can never win a 1080p request
+// outright. If no server proves the requested height, the best
+// downgrade candidate is served FLAGGED (downgraded=true, so the
+// UI toasts the real height); a link below the floor is never
+// served — the race fails honestly instead. Unknown-quality links
+// rank below any known floor-meeting link (they might meet the
+// request, but a certain 720p beats a gamble) and above the
+// below-floor fallback. If all fail, the last Failed is returned
+// (or a generic message when nothing ran), with serverNumber
+// null. onAttempt fires with each server number as it is tried,
+// so the UI can show live progress ("Trying Server N…"). The
+// Pahe candidate is passed in already constructed with its
+// clearance — the engine NEVER solves Cloudflare.
 //
 // 2.0-dev2.3: RACE, don't chain (MiruDL pattern — no sequential
 // failover tax). Candidates run in batches of 3 in parallel and the
@@ -296,6 +306,13 @@ object MultiSourceResolver {
         // downloading the wrong quality (brief: never silently
         // deliver a lower quality than selected).
         var bestFallback: ResolvedDownload? = null
+        // 2.0-dev2.7: best DOWNGRADE link seen across ALL batches —
+        // known quality, meets the floor, but below the requested
+        // height (e.g. 720p for a 1080p request). It never ends a
+        // batch: a slower server proving the requested height
+        // always beats it. Served, flagged downgraded=true, only
+        // when the whole race ends with no exact winner.
+        var bestDowngrade: ResolvedDownload? = null
         // 2.0-dev2.6: best UNKNOWN-quality link seen across ALL
         // batches (probed once, still unprovable). It ranks ABOVE
         // the known sub-floor fallback — it might meet the floor —
@@ -307,12 +324,26 @@ object MultiSourceResolver {
             val result = raceGroup(group, title, anilistId, number, audio, quality, onAttempt)
             last = result.last
             if (result.winner != null) return result.winner
+            if (result.downgrade != null) {
+                val offered = result.downgrade.link.offeredHeight() ?: 0
+                val bestOffered = bestDowngrade?.link?.offeredHeight() ?: 0
+                if (bestDowngrade == null || offered > bestOffered) bestDowngrade = result.downgrade
+            }
             if (result.fallback != null) {
                 val offered = result.fallback.link.offeredHeight() ?: 0
                 val bestOffered = bestFallback?.link?.offeredHeight() ?: 0
                 if (bestFallback == null || offered > bestOffered) bestFallback = result.fallback
             }
             if (result.unknownFallback != null && bestUnknown == null) bestUnknown = result.unknownFallback
+        }
+        if (bestDowngrade != null) {
+            val offered = bestDowngrade.link.offeredHeight()
+            DownloadLogs.log(
+                "RESOLVE",
+                "no server proved ${qualityHeight(quality)}p for $quality — " +
+                    "serving the best downgrade, ${offered ?: "?"}p from Server ${bestDowngrade.serverNumber}, flagged (UI toasts the real height)",
+            )
+            return bestDowngrade.copy(downgraded = true)
         }
         if (bestUnknown != null) {
             DownloadLogs.log(
@@ -339,19 +370,23 @@ object MultiSourceResolver {
     }
 
     // One batch of the race. Returns the winning download (a link
-    // whose PROVEN quality meets the floor), the best sub-floor link
-    // parked in this batch (or null), the best still-unknown-quality
-    // link parked in this batch (or null), plus the last failure
-    // seen, so the caller can report it when every batch fails.
-    // Every racer logs its own result + latency. A meeting-floor
-    // win still ends the batch immediately (fast path preserved); a
-    // sub-floor win only parks and the batch keeps racing until its
-    // racers are done, so a slower server that CAN meet the quality
-    // still gets its chance. 2.0-dev2.6: an UNKNOWN-quality win
-    // parks exactly the same way — a fast unprovable DDL must never
-    // beat a slower provable HLS just by answering first.
+    // whose PROVEN quality meets the REQUESTED height), the best
+    // downgrade link parked in this batch (known quality, meets
+    // the floor but below the requested height), the best sub-floor
+    // link parked in this batch (or null), the best still-unknown-
+    // quality link parked in this batch (or null), plus the last
+    // failure seen, so the caller can report it when every batch
+    // fails. Every racer logs its own result + latency. An exact
+    // win still ends the batch immediately (fast path preserved);
+    // a downgrade win only parks and the batch keeps racing until
+    // its racers are done, so a slower server that CAN meet the
+    // requested quality still gets its chance. 2.0-dev2.6: an
+    // UNKNOWN-quality win parks exactly the same way — a fast
+    // unprovable DDL must never beat a slower provable HLS just
+    // by answering first.
     private data class RaceResult(
         val winner: ResolvedDownload?,
+        val downgrade: ResolvedDownload?,
         val fallback: ResolvedDownload?,
         val unknownFallback: ResolvedDownload?,
         val last: ResolvedLink,
@@ -359,7 +394,7 @@ object MultiSourceResolver {
 
     // 2.0-dev2.6 — the reliability gate, run inside each racer
     // BEFORE the floor decision sees the link. ONLY unknown-quality
-    // DDLs are probed here: a known-quality link passes through
+    // links are probed here: a known-quality link passes through
     // untouched (zero added latency on the fast path — speed is
     // non-negotiable, and HLS size estimates deliberately do NOT
     // run here; estimateHlsSizeBytes is a public API for lazy,
@@ -368,18 +403,70 @@ object MultiSourceResolver {
     // size rides along for the sheet. A failed probe returns the
     // link unchanged — unknown stays unknown and the parking rule
     // below, not the probe, decides its fate.
+    // 2.0-dev2.7: unknown HLS links are proved the same way, from
+    // the master playlist (max RESOLUTION height across variants
+    // — the same regex HlsDownloader's parseMasterPlaylist uses).
+    // This is what makes the HLS-only servers (AniZone, Nino 2,
+    // AniWaves, …) compete as KNOWN winners at all: they return
+    // no quality tag, so before this fix they could only ever win
+    // the last-resort unknown lottery, never the race on merit —
+    // which is exactly how Server 5 "won" Death Note E1 1080p
+    // without anything proving it was the best choice. One small
+    // GET, in parallel inside the racer, the link's own Referer /
+    // Origin, 5 s cap, no retry; a master that IS a media playlist
+    // (no variants) proves nothing and stays unknown.
     private suspend fun enrichLink(link: ResolvedLink): ResolvedLink {
-        if (link !is ResolvedLink.DirectMp4) return link
-        if (link.actualQuality != null) return link
-        val probe = DdlQualityProbe.probeDdlQuality(
-            link.url,
-            mapOf("Referer" to link.referer),
-        ) ?: return link
-        return link.copy(
-            actualQuality = probe.height ?: link.actualQuality,
-            estimatedSizeBytes = probe.totalBytes ?: link.estimatedSizeBytes,
-            sizeIsEstimate = false,
-        )
+        if (link is ResolvedLink.DirectMp4) {
+            if (link.actualQuality != null) return link
+            val probe = DdlQualityProbe.probeDdlQuality(
+                link.url,
+                mapOf("Referer" to link.referer),
+            ) ?: return link
+            return link.copy(
+                actualQuality = probe.height ?: link.actualQuality,
+                estimatedSizeBytes = probe.totalBytes ?: link.estimatedSizeBytes,
+                sizeIsEstimate = false,
+            )
+        }
+        if (link is ResolvedLink.Hls) {
+            if (link.actualQuality != null) return link
+            val height = probeHlsMasterHeight(link) ?: return link
+            return link.copy(actualQuality = height)
+        }
+        return link
+    }
+
+    // 2.0-dev2.7: same proving as the race, exposed for the
+    // serving-first path in App.kt resolveViaCandidates, which
+    // bypasses the race — a serving server's link must be proven
+    // before it is served, or a 720p-max server can be served
+    // for a 1080p request with no downgrade flag.
+    internal suspend fun proveLink(link: ResolvedLink): ResolvedLink = enrichLink(link)
+
+    private suspend fun probeHlsMasterHeight(link: ResolvedLink.Hls): Int? {
+        if (link.masterPlaylistUrl.isBlank()) return null
+        return try {
+            withTimeoutOrNull(5_000L) {
+                withContext(Dispatchers.IO) {
+                    val headers = buildMap {
+                        link.referer?.let { put("Referer", it) }
+                        link.origin?.let { put("Origin", it) }
+                    }
+                    val resp = EngineHttp.request(
+                        link.masterPlaylistUrl,
+                        headers = headers,
+                        timeoutMs = 5_000,
+                        followRedirects = true,
+                    )
+                    if (resp.code != 200 || !resp.text.contains("#EXTM3U")) null
+                    else Regex("""RESOLUTION=\d+x(\d+)""").findAll(resp.text)
+                        .mapNotNull { it.groupValues.getOrNull(1)?.toIntOrNull() }
+                        .maxOrNull()?.takeIf { it > 0 }
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private suspend fun raceGroup(
@@ -400,10 +487,12 @@ object MultiSourceResolver {
                     val raw = withTimeoutOrNull(RESOLVE_ATTEMPT_TIMEOUT_MS) {
                         src.resolveEpisode(title, anilistId, number, audio, quality)
                     } ?: ResolvedLink.Failed("Server ${src.serverNumber} timed out.")
-                    // 2.0-dev2.6: probe an unknown-quality DDL now —
+                    // 2.0-dev2.6: probe an unknown-quality link now —
                     // a 360p file hiding behind an unknown label is
-                    // parked below, never crowned. Known links and
-                    // HLS links are untouched (no added latency).
+                    // parked below, never crowned. Known links are
+                    // untouched (no added latency). 2.0-dev2.7: HLS
+                    // links are proved from the master playlist too,
+                    // so an HLS-only server can win on merit.
                     val r = enrichLink(raw)
                     val tookMs = System.currentTimeMillis() - startedMs
                     when (r) {
@@ -417,25 +506,35 @@ object MultiSourceResolver {
                             DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: FAILED in ${tookMs}ms — ${r.message}")
                         }
                     }
-                    src to r
+                    Triple(src, r, tookMs)
                 } catch (e: Exception) {
                     val tookMs = System.currentTimeMillis() - startedMs
                     DownloadLogs.log("RESOLVE", "Server ${src.serverNumber}: EXCEPTION in ${tookMs}ms — ${e.javaClass.simpleName}: ${e.message ?: ""}")
-                    src to ResolvedLink.Failed(friendlyDownloadError(e))
+                    Triple(src, ResolvedLink.Failed(friendlyDownloadError(e)), tookMs)
                 }
             }
         }
         var last: ResolvedLink = ResolvedLink.Failed("All servers failed — tap Retry.")
         var winner: ResolvedDownload? = null
+        var downgrade: ResolvedDownload? = null
         var fallback: ResolvedDownload? = null
         var unknownFallback: ResolvedDownload? = null
+        // 2.0-dev2.7: one-line outcome per arrived racer, so the
+        // winner line below can name WHY it won (and what each
+        // loser did) instead of leaving the next phone log to
+        // guess — e.g. "Server 5 won" with no reason is how the
+        // Death Note E1 question arose in the first place.
+        val outcomes = mutableListOf<String>()
+        val arrivedNumbers = mutableSetOf<Int>()
         val pending = deferreds.toMutableList()
         val requestedHeight = qualityHeight(quality)
+        val floor = qualityFloorFor(requestedHeight)
         while (pending.isNotEmpty() && winner == null) {
             select<Unit> {
                 pending.forEach { d ->
-                    d.onAwait { (src, r) ->
+                    d.onAwait { (src, r, tookMs) ->
                         pending.remove(d)
+                        arrivedNumbers += src.serverNumber
                         when (r) {
                             is ResolvedLink.DirectMp4, is ResolvedLink.Hls -> {
                                 val offered = r.offeredHeight()
@@ -447,33 +546,83 @@ object MultiSourceResolver {
                                     // it arrives later in this batch; it
                                     // wins only if the batch ends with no
                                     // known winner at all.
+                                    outcomes += "Server ${src.serverNumber}: unknown quality in ${tookMs}ms — parked"
                                     DownloadLogs.log(
                                         "RESOLVE",
                                         "Server ${src.serverNumber}: quality still unknown after probing — parked, a known-quality link wins first",
                                     )
                                     if (unknownFallback == null) unknownFallback = download
-                                } else if (offered >= qualityFloorFor(requestedHeight)) {
+                                } else if (offered >= requestedHeight) {
+                                    // 2.0-dev2.7: EXACT win — the only
+                                    // tier that ends the batch. First
+                                    // proven exact arrival IS the
+                                    // fastest-proven server, so no
+                                    // settle window is needed (and a
+                                    // window would tax the lone-winner
+                                    // common case against the ~1-2 s
+                                    // bar). Log why it won, with every
+                                    // other racer's outcome so far.
+                                    outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — WINNER"
                                     winner = download
-                                } else {
+                                    val stillRacing = group.map { it.serverNumber } - arrivedNumbers
+                                    DownloadLogs.log(
+                                        "RESOLVE",
+                                        "race winner Server ${src.serverNumber} in ${tookMs}ms — offered ${offered}p, exact for $quality; " +
+                                            "batch ${group.map { it.serverNumber }}: ${outcomes.joinToString("; ")}" +
+                                            (if (stillRacing.isNotEmpty()) "; still racing (cancelled): ${stillRacing.joinToString(prefix = "Server ", separator = ", Server ")}" else ""),
+                                    )
+                                } else if (offered >= floor) {
+                                    // 2.0-dev2.7: meets the floor but NOT
+                                    // the request — parked as a downgrade
+                                    // candidate, never crowned on
+                                    // arrival. A 720p-max server (e.g.
+                                    // AniZone on Death Note E1) must
+                                    // never win a 1080p request
+                                    // outright; it is served, flagged,
+                                    // only if no server proves 1080p.
+                                    outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — parked as downgrade"
                                     DownloadLogs.log(
                                         "RESOLVE",
                                         "Server ${src.serverNumber}: only ${offered}p for $quality " +
-                                            "(floor ${qualityFloorFor(requestedHeight)}p) — parked, still racing",
+                                            "(requested ${requestedHeight}p, floor ${floor}p) — parked as downgrade, still racing",
+                                    )
+                                    val downgradeOffered = downgrade?.link?.offeredHeight() ?: 0
+                                    if (downgrade == null || offered > downgradeOffered) downgrade = download
+                                } else {
+                                    outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — parked, below floor ${floor}p"
+                                    DownloadLogs.log(
+                                        "RESOLVE",
+                                        "Server ${src.serverNumber}: only ${offered}p for $quality " +
+                                            "(floor ${floor}p) — parked, still racing",
                                     )
                                     val fallbackOffered = fallback?.link?.offeredHeight() ?: 0
                                     if (fallback == null || offered > fallbackOffered) fallback = download
                                 }
                             }
-                            is ResolvedLink.Failed -> last = r
+                            is ResolvedLink.Failed -> {
+                                outcomes += "Server ${src.serverNumber}: FAILED in ${tookMs}ms"
+                                last = r
+                            }
                         }
                     }
                 }
             }
         }
+        if (winner == null) {
+            // Batch ended with no exact winner: one line saying so,
+            // so the next phone log shows the race moved on (and
+            // why) instead of going quiet between batches.
+            DownloadLogs.log(
+                "RESOLVE",
+                "batch ${group.map { it.serverNumber }} ended with no exact winner for $quality — " +
+                    "best downgrade: ${downgrade?.let { "Server ${it.serverNumber} (${it.link.offeredHeight() ?: "?"}p)" } ?: "none"}; " +
+                    "unknown parked: ${unknownFallback?.serverNumber?.let { "Server $it" } ?: "none"}",
+            )
+        }
         // Best-effort cancel of the losers; their blocking I/O
         // finishes on its own threads and the results are discarded.
         pending.forEach { it.cancel() }
-        return RaceResult(winner, fallback, unknownFallback, last)
+        return RaceResult(winner, downgrade, fallback, unknownFallback, last)
     }
 
     suspend fun loadEpisodesWithFailover(

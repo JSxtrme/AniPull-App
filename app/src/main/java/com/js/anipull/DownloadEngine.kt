@@ -141,6 +141,10 @@ object DownloadEngine {
     private val links = mutableMapOf<String, ResolvedLink>()
     private val running = mutableSetOf<String>()
     private val lastEmitMs = mutableMapOf<String, Long>()
+    // 2.0-dev2.7 DEFECT 2: the live DDL connection per job, so
+    // cancel() can disconnect() it and unblock a read() stuck in
+    // its 15s readTimeout instead of waiting for the timeout.
+    private val activeDdlConnections = mutableMapOf<String, HttpURLConnection>()
 
     // --- Settings ------------------------------------------------------
 
@@ -548,22 +552,77 @@ object DownloadEngine {
         pump()
     }
 
+    // 2.0-dev2.7 DEFECT 2: Cancel must work from EVERY phase, and
+    // register IMMEDIATELY. The old code only set the flag for a
+    // DOWNLOADING job and left the row + notification showing a
+    // live download until the running loop happened to notice (up
+    // to a 15s blocked read, or a whole remux / publish later),
+    // which read as a dead button. Now the job is marked CANCELLED
+    // and its notification dismissed synchronously, in every
+    // phase: QUEUED / PAUSED / FAILED (auto-retry backoff) /
+    // DOWNLOADING alike. The running runJob still drains in the
+    // background (a blocked EngineHttp fetch cannot be
+    // interrupted — see HlsDownloader), but it can no longer
+    // complete, publish, or retry the job: every exit path checks
+    // control.cancelled first (see runJob), and markCancelled
+    // skips cleanup when the user already re-queued the same id.
     fun cancel(id: String) {
         val job = _jobs.value.firstOrNull { it.id == id } ?: return
         DownloadLogs.logJob(id, "ENGINE", "cancel requested (state=${job.state})")
         // A finished job is not cancellable — cancelling it would
         // delete the downloaded file out from under the user.
         if (job.state == JobState.COMPLETED || job.state == JobState.CANCELLED) return
-        controls[id]?.cancelled = true
+        // Create the control when missing: a job restored from
+        // persistence has no control yet, so the old
+        // controls[id]?.cancelled = true was a silent no-op —
+        // and if pump() then started runJob, its fresh Control
+        // carried cancelled=false and the job downloaded to
+        // completion after the user cancelled.
+        val control = controls.getOrPut(id) { Control() }
+        control.cancelled = true
+        // Unblock a DDL read() stuck in its 15s readTimeout:
+        // disconnect() fails the read at once with a
+        // SocketException, which runJob routes to CANCELLED (see
+        // the generic catch below), never to FAILED / auto-retry.
         val ctx = appContext
-        if (job.state != JobState.DOWNLOADING) {
-            // Not running: mark cancelled + clean up partials now.
-            deletePartials(ctx, job)
-            updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0, progress = 0) }, persistNow = true)
-            ctx?.let { DownloadNotifications.cancelJob(it, id) }
-            pump()
+        synchronized(lock) { activeDdlConnections[id] }?.let { conn ->
+            try {
+                conn.disconnect()
+            } catch (_: Exception) {
+            }
+            DownloadLogs.logJob(id, "ENGINE", "cancel: DDL connection disconnected to unblock read")
         }
-        // Running jobs see the flag in their loop and clean up there.
+        // Register immediately, in every phase. A DOWNLOADING
+        // job's runJob is still draining (see above) but can no
+        // longer finish it; a QUEUED / PAUSED / FAILED job has no
+        // runner, so its partials are dropped now.
+        if (job.state != JobState.DOWNLOADING) deletePartials(ctx, job)
+        updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0, progress = 0) }, persistNow = true)
+        ctx?.let { DownloadNotifications.cancelJob(it, id) }
+        DownloadLogs.logJob(id, "ENGINE", "cancel registered: state=CANCELLED, notification dismissed (runJob drain ${if (job.state == JobState.DOWNLOADING) "still in flight — cleanup on return" else "none"})")
+        pump()
+    }
+
+    // 2.0-dev2.7 DEFECT 2: shared tail of every cancellation exit
+    // (CancellationException, or an IOException caused by the
+    // cancel disconnect — e.g. SocketException from a DDL read).
+    // Skips everything when the user already re-queued this id:
+    // a fresh incarnation owns the staging files now, and
+    // deleting them (or flipping its state) would kill the new
+    // download. QUEUED / PAUSED are the only states a fresh
+    // incarnation can be in while the old runJob still drains —
+    // pump() cannot start it until the old run leaves `running`
+    // in its finally, which runs after this catch.
+    private fun markCancelled(id: String, job: DownloadJob) {
+        val current = _jobs.value.firstOrNull { it.id == id }
+        if (current != null && (current.state == JobState.QUEUED || current.state == JobState.PAUSED)) {
+            DownloadLogs.logJob(id, "ENGINE", "CANCELLED by user, but job was re-queued — leaving the new incarnation alone (no partial delete, no state change)")
+            return
+        }
+        DownloadLogs.logJob(id, "ENGINE", "CANCELLED by user")
+        deletePartials(appContext, job)
+        updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0, progress = 0, downloadedBytes = 0) }, persistNow = true)
+        appContext?.let { DownloadNotifications.cancelJob(it, id) }
     }
 
     fun deleteCompleted(context: Context, id: String) {
@@ -730,7 +789,11 @@ object DownloadEngine {
             DownloadLogs.logJob(id, "ENGINE", "runJob start: server=${job.serverNumber}, link=$linkKind, quality=${job.quality} ${job.audio}")
             val control = controls.getOrPut(id) { Control() }
             if (control.cancelled) {
-                updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0) }, persistNow = true)
+                // 2.0-dev2.7 DEFECT 2: only touch the job when
+                // this run still owns the control — a re-queue
+                // replaces controls[id], and the fresh incarnation
+                // must be left alone.
+                if (controls[id] === control) updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0) }, persistNow = true)
                 return
             }
             // Wi-Fi gate: pause on mobile data instead of burning it.
@@ -746,7 +809,14 @@ object DownloadEngine {
             DownloadLogs.logJob(id, "ENGINE", "wifi gate: wifiOnly=$wifiOnlyOn onWifi=$onWifi wifiOverride=${job.wifiOverride}")
             if (!job.wifiOverride && wifiOnlyOn && !onWifi) {
                 DownloadLogs.logJob(id, "ENGINE", "GATED: paused — waiting for Wi-Fi (mobile data, no override)")
-                updateJob(id, { it.copy(state = JobState.PAUSED, error = "Paused — waiting for Wi-Fi", speedMBps = 0.0) }, persistNow = true)
+                // 2.0-dev2.7 DEFECT 2: a re-queued incarnation owns
+                // the job now (controls[id] was replaced) — return
+                // without touching its state.
+                if (controls[id] !== control) return
+                // 2.0-dev2.7 DEFECT 2: never flip a job the user
+                // just cancelled back to PAUSED — the transform
+                // leaves a CANCELLED job alone.
+                updateJob(id, { if (it.state == JobState.CANCELLED) it else it.copy(state = JobState.PAUSED, error = "Paused — waiting for Wi-Fi", speedMBps = 0.0) }, persistNow = true)
                 return
             }
             // No network at all: wait up to 60s for one to appear
@@ -757,7 +827,10 @@ object DownloadEngine {
                 waited += 2
             }
             if (control.cancelled) {
-                updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0) }, persistNow = true)
+                // 2.0-dev2.7 DEFECT 2: same ownership guard as the
+                // runJob start check — a re-queued incarnation
+                // must be left alone.
+                if (controls[id] === control) updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0) }, persistNow = true)
                 return
             }
             if (!hasNetwork(ctx)) {
@@ -765,7 +838,17 @@ object DownloadEngine {
                 failOrRetry(id, "No connection — check your network and retry.")
                 return
             }
-            updateJob(id, { it.copy(state = JobState.DOWNLOADING, error = null, totalEstimated = link is ResolvedLink.Hls) }, persistNow = true)
+            // 2.0-dev2.7 DEFECT 2: same guard as the Wi-Fi gate —
+            // a cancel that landed after the pre-flight check must
+            // not flip the job back to DOWNLOADING.
+            updateJob(id, { if (it.state == JobState.CANCELLED) it else it.copy(state = JobState.DOWNLOADING, error = null, totalEstimated = link is ResolvedLink.Hls) }, persistNow = true)
+            if (control.cancelled) {
+                markCancelled(id, job)
+                return
+            }
+            // 2.0-dev2.7 DEFECT 1: freeze the total ONCE, before
+            // the first progress report (see freezeTotalAtStart).
+            freezeTotalAtStart(id, link, job, control)
             // 2.0-dev2.5 DEFECT 5: post-resolve silence. The first
             // progress callback used to arrive only with the first
             // segment / first DDL chunk — until then the UI sat at
@@ -805,6 +888,11 @@ object DownloadEngine {
                                 throw QualityMismatchException("Only ${probed}p is available for this episode — try a lower quality.")
                             }
                         }
+                        // 2.0-dev2.7 DEFECT 2: the probe above runs
+                        // up to 5s with no cancel check inside it —
+                        // a cancel that landed during it must stop
+                        // the job here, before the first byte.
+                        if (control.cancelled) throw CancellationException("cancelled")
                         downloadMp4(
                         url = link.url,
                         referer = link.referer,
@@ -873,8 +961,22 @@ object DownloadEngine {
                 // Size is read BEFORE finish(): a successful SAF
                 // copy or MediaStore publish deletes the staged
                 // file, so reading after would be 0.
+                // 2.0-dev2.7 DEFECT 2: a cancel that landed during
+                // the (fast, local) quality probe must stop the job
+                // here, before the publish starts.
+                if (control.cancelled) throw CancellationException("cancelled")
                 val finishedBytes = dest.workFile.length()
                 val finalPath = dest.finish(ctx, finalFileName)
+                // 2.0-dev2.7 DEFECT 2: a cancel that landed DURING
+                // the publish (a whole-file MediaStore / SAF copy,
+                // not interruptible mid-copy) must not leave a
+                // completed file behind: delete what was just
+                // published, then take the normal cancel exit.
+                if (control.cancelled) {
+                    DownloadLogs.logJob(id, "ENGINE", "CANCELLED during publish — deleting published file $finalPath")
+                    deleteFile(ctx, finalPath)
+                    throw CancellationException("cancelled")
+                }
                 DownloadLogs.logJob(id, "ENGINE", "COMPLETED: ${finishedBytes / 1024} KB -> $finalPath (requested ${job.quality}, delivered $actualLabel)")
                 updateJob(id, {
                     it.copy(
@@ -933,11 +1035,18 @@ object DownloadEngine {
                 deletePartials(ctx, job)
                 updateJob(id, { it.copy(state = JobState.FAILED, error = e.message, speedMBps = 0.0) }, persistNow = true)
             } catch (e: CancellationException) {
-                DownloadLogs.logJob(id, "ENGINE", "CANCELLED by user")
-                deletePartials(ctx, job)
-                updateJob(id, { it.copy(state = JobState.CANCELLED, speedMBps = 0.0, progress = 0, downloadedBytes = 0) }, persistNow = true)
-                ctx.let { DownloadNotifications.cancelJob(it, id) }
+                markCancelled(id, job)
             } catch (e: Exception) {
+                if (control.cancelled) {
+                    // 2.0-dev2.7 DEFECT 2: a cancel that landed
+                    // mid-I/O. The DDL disconnect() surfaces here
+                    // as a SocketException, and an HLS fetch that
+                    // returned after cancel as its normal error —
+                    // either way this is a user cancel, never a
+                    // FAILED and never an auto-retry.
+                    DownloadLogs.logJob(id, "ENGINE", "cancelled during I/O (${e.javaClass.simpleName}) — treating as user cancel, not failure")
+                    markCancelled(id, job)
+                } else {
                 // 2.0-dev1.9 diagnostics: the exact failure, not the
                 // friendly string — the friendly text is what the
                 // job stores; this line is what the report shows.
@@ -948,6 +1057,7 @@ object DownloadEngine {
                 // file so auto-retry resumes via HTTP Range.
                 if (link is ResolvedLink.Hls && dest.workFile.exists()) dest.workFile.delete()
                 failOrRetry(id, friendlyDownloadError(e))
+                }
             }
         } finally {
             synchronized(lock) { running -= id }
@@ -956,6 +1066,14 @@ object DownloadEngine {
     }
 
     private fun failOrRetry(id: String, message: String) {
+        // 2.0-dev2.7 DEFECT 2: never fail / retry a cancelled job
+        // — a cancel that lands between the throw and this call
+        // (or during the 5s backoff, before the delayed re-queue
+        // reads the state) must stay CANCELLED.
+        if (_jobs.value.firstOrNull { it.id == id }?.state == JobState.CANCELLED) {
+            DownloadLogs.logJob(id, "ENGINE", "failOrRetry skipped: job is CANCELLED ($message)")
+            return
+        }
         val ctx = appContext
         val shouldRetry = ctx != null && autoRetry(ctx) && (attempts[id] ?: 0) < 1
         if (shouldRetry) {
@@ -991,16 +1109,87 @@ object DownloadEngine {
     //   unchanged (speed-only movement), and at least 500ms
     //   between posts even when progress moved — the notification
     //   layer dedups identical content on top of this.
+    // 2.0-dev2.7 DEFECT 1: the total is FROZEN — see
+    // freezeTotalAtStart. A total, once known, is adopted exactly
+    // once (the first report that carries one) and never
+    // overwritten: the HLS rolling estimate (downloaded + remaining
+    // x average segment size) drifts as segments land, which is
+    // what made "~488 MB" move mid-download, and the HLS finish
+    // callback reports total == downloaded (segment bytes), a
+    // third value again. Progress % is always bytes / frozen
+    // total. Reports for a terminal job are dropped, so a runJob
+    // draining after a cancel cannot resurrect progress on a
+    // CANCELLED row.
     private fun reportProgress(id: String, bytes: Long, total: Long, speed: Double) {
         val now = System.currentTimeMillis()
         val last = lastEmitMs[id] ?: 0L
         val job = _jobs.value.firstOrNull { it.id == id } ?: return
-        val progress = if (total <= 0) PROGRESS_INDETERMINATE
-        else ((bytes * 100) / total).toInt().coerceIn(0, 100)
+        if (job.state == JobState.CANCELLED || job.state == JobState.FAILED || job.state == JobState.COMPLETED) return
+        // Adopt-once: only a job with no total yet takes the
+        // incoming one; a frozen total always wins.
+        val effectiveTotal = if (job.totalBytes > 0) job.totalBytes else total
+        val progress = if (effectiveTotal <= 0) PROGRESS_INDETERMINATE
+        else ((bytes * 100) / effectiveTotal).toInt().coerceIn(0, 100)
         if (now - last < 1000 && progress == job.progress) return
         if (now - last < 500) return
         lastEmitMs[id] = now
-        updateJob(id, { it.copy(progress = progress, downloadedBytes = bytes, totalBytes = if (total > 0) total else 0, speedMBps = speed) })
+        updateJob(id, { it.copy(progress = progress, downloadedBytes = bytes, totalBytes = if (effectiveTotal > 0) effectiveTotal else 0, speedMBps = speed) })
+    }
+
+    // 2.0-dev2.7 DEFECT 1: freeze the job's total ONCE, at job
+    // start, before the first byte is downloaded — the displayed
+    // total must never change after the download starts.
+    // - DDL: the exact total the resolve-time probe read from
+    //   Content-Range (link.estimatedSizeBytes, sizeIsEstimate =
+    //   false). When the probe never ran, the first Content-Length
+    //   report freezes via reportProgress's adopt-once.
+    // - HLS: DdlQualityProbe.estimateHlsSizeBytes — summed
+    //   #EXT-X-BYTERANGE lengths when present (exact), else the
+    //   picked variant's BANDWIDTH x total playlist duration
+    //   ("~" estimate). This replaces the old rolling estimate as
+    //   the job total; the per-segment estimate HlsDownloader
+    //   still reports is ignored once a total is frozen. When the
+    //   probe fails (null), the first segment estimate freezes
+    //   via adopt-once instead — still once, never rewritten.
+    // A resumed job keeps the total frozen by its earlier run.
+    private suspend fun freezeTotalAtStart(id: String, link: ResolvedLink, job: DownloadJob, control: Control) {
+        if (control.cancelled) throw CancellationException("cancelled")
+        val current = _jobs.value.firstOrNull { it.id == id } ?: return
+        if (current.totalBytes > 0) {
+            DownloadLogs.logJob(id, "ENGINE", "total frozen (resumed): ${current.totalBytes / 1024} KB${if (current.totalEstimated) " (estimate)" else ""}")
+            return
+        }
+        when (link) {
+            is ResolvedLink.DirectMp4 -> {
+                link.estimatedSizeBytes?.takeIf { it > 0 }?.let { total ->
+                    freezeTotal(id, total, link.sizeIsEstimate)
+                    DownloadLogs.logJob(id, "ENGINE", "total frozen (DDL probe): ${total / 1024} KB${if (link.sizeIsEstimate) " (estimate)" else " exact"}")
+                } ?: DownloadLogs.logJob(id, "ENGINE", "no DDL probe total — first Content-Length report will freeze the total")
+            }
+            is ResolvedLink.Hls -> {
+                val headers = buildMap {
+                    link.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+                    link.origin?.takeIf { it.isNotBlank() }?.let { put("Origin", it) }
+                }
+                val est = DdlQualityProbe.estimateHlsSizeBytes(link.masterPlaylistUrl, headers, job.quality, job.audio)
+                if (control.cancelled) throw CancellationException("cancelled")
+                if (est != null && est.bytes > 0) {
+                    freezeTotal(id, est.bytes, est.isEstimate)
+                    DownloadLogs.logJob(id, "ENGINE", "total frozen (HLS ${if (est.isEstimate) "BANDWIDTH x duration estimate" else "summed byte-ranges, exact"}): ${est.bytes / 1024} KB")
+                } else {
+                    DownloadLogs.logJob(id, "ENGINE", "HLS size probe returned nothing — first segment estimate will freeze the total")
+                }
+            }
+            else -> {}
+        }
+    }
+
+    // Set the frozen total only when the job has none yet — a
+    // resumed job's earlier total always wins.
+    private fun freezeTotal(id: String, total: Long, estimated: Boolean) {
+        updateJob(id, { job ->
+            if (job.totalBytes > 0) job else job.copy(totalBytes = total, totalEstimated = estimated)
+        })
     }
 
     // --- DDL mp4 download (HTTP Range resume) ---------------------------
@@ -1024,6 +1213,9 @@ object DownloadEngine {
             setRequestProperty("Referer", referer)
             if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
         }
+        // 2.0-dev2.7 DEFECT 2: remember the live connection so
+        // cancel() can disconnect() it out of a blocked read().
+        synchronized(lock) { activeDdlConnections[jobId] = conn }
         try {
             val code = conn.responseCode
             DownloadLogs.logJob(jobId, "DDL", "GET ${DownloadLogs.sanitizeUrl(url)} -> HTTP $code, resumeFrom=${existing}B")
@@ -1071,13 +1263,21 @@ object DownloadEngine {
                             windowStart = now
                             windowBytes = 0
                         }
+                        // 2.0-dev2.7 DEFECT 2: the loop-top check
+                        // runs before the NEXT read — never emit a
+                        // progress report for a job already
+                        // cancelled during this read.
+                        if (control.cancelled) throw CancellationException("cancelled")
                         onProgress(downloaded, total, lastSpeed)
                     }
                 }
             }
+            // 2.0-dev2.7 DEFECT 2: same guard for the EOF report.
+            if (control.cancelled) throw CancellationException("cancelled")
             onProgress(downloaded, total.coerceAtLeast(downloaded), lastSpeed)
             DownloadLogs.logJob(jobId, "DDL", "done: ${downloaded / 1024} KB in ${System.currentTimeMillis() - downloadStartedMs}ms")
         } finally {
+            synchronized(lock) { activeDdlConnections.remove(jobId) }
             conn.disconnect()
         }
     }

@@ -69,7 +69,15 @@ object ResolveCache {
         val first = listServer ?: preferred.takeIf { it in 1..9 }
         if (first != null && entry.serverNumber != first) return null
         DownloadLogs.log("RESOLVE", "cache HIT: Server ${entry.serverNumber}, age ${ageMs}ms")
-        return ResolvedDownload(entry.link, entry.serverNumber)
+        // 2.0-dev2.7: a cached link bypasses the race, so the race's
+        // exact-tier rule has to be re-applied here — a 720p link
+        // cached under a 1080p key must come back flagged
+        // downgraded (UI toasts the real height), never as a silent
+        // 1080p win. Unknown quality stays unflagged: unprovable,
+        // not provably low.
+        val offered = entry.link.offeredHeight()
+        val downgraded = offered != null && offered < qualityHeight(quality)
+        return ResolvedDownload(entry.link, entry.serverNumber, downgraded)
     }
 
     @Synchronized

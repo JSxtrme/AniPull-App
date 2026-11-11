@@ -2478,7 +2478,7 @@ fun AnipullAppInner() {
                 // 1.9-dev5.0 QOL 3: Show Editor's Picks toggle — off
                 // hides the whole carousel item, not just its motion.
                 if (showEditorsPicks) featured?.let { pick ->
-                    item(key = "home_carousel", contentType = "carousel") { Box(Modifier.animateItem()) {
+                    item(key = "home_carousel", contentType = "carousel") { Box(Modifier.animateItem()) { Column {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             androidx.compose.foundation.Image(
                                 painter = painterResource(R.drawable.ic_star),
@@ -2493,7 +2493,7 @@ fun AnipullAppInner() {
                         val picks = (listOfNotNull(featured) + (liveSections!!.firstOrNull { it.name == "Spotlight" }?.titles ?: emptyList()))
                             .distinctBy { it.id }.take(5)
                         EditorsPickCarousel(picks, { t, slot -> openTitle(t, slot, isCarousel = true) }, { sheetFor = it }, autoScroll = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE).getBoolean("carousel_auto", true) && !listState.isScrollInProgress && screen == null && !pageTransitioning, onBounds = { t, rect -> posterBounds[t.id] = rect }, reverseHiddenId = pageHiddenId, reverseFade = pageHiddenFade, initialPage = carouselPage, onPageChange = { carouselPage = it }, onLongPress = { onCardLongPress(it) })
-                    } }
+                    } } }
                 }
                 liveSections!!.filter { it.name != "Spotlight" }.forEach { section ->
                     val icon = when (section.name) {
@@ -2561,7 +2561,11 @@ fun AnipullAppInner() {
             // This is what the Downloads "Browse anime" button points
             // at: home no longer has only a handful of picks.
             if (!searchMode && query.isBlank() && liveSections != null && showExplore) {
-                item(key = "home_explore", contentType = "explore") { Box(Modifier.animateItem()) {
+                // 2.0-dev2.7: same Box-no-Column overlap as the
+                // Editor's Picks header — header Row + Spacer + grid
+                // were direct Box children and stacked on top of
+                // each other. Wrapped in a Column like PosterRow.
+                item(key = "home_explore", contentType = "explore") { Box(Modifier.animateItem()) { Column {
                     // First composition of Explore = user scrolled
                     // near it, so now (and only now) start loading.
                     LaunchedEffect(Unit) { if (!exploreStarted) { exploreStarted = true; loadExploreNext() } }
@@ -2632,7 +2636,7 @@ fun AnipullAppInner() {
                             }
                         }
                     }
-                } }
+                } } }
                 if (!exploreFinished) {
                     item(key = "home_explore_more", contentType = "explore_more") { Box(Modifier.animateItem()) {
                         // Composed only when the user reaches the bottom:
@@ -4011,8 +4015,25 @@ private suspend fun resolveViaCandidates(
                     try { it.resolveDownload(episode, quality) } catch (e: Exception) { ResolvedLink.Failed(friendlyDownloadError(e)) }
                 }
             }
-            if (first != null && first !is ResolvedLink.Failed) ResolvedDownload(first, listServer)
-            else MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
+            // 2.0-dev2.7: the serving-first link used to bypass the
+            // race's proving/tiering entirely — an unproven AniZone
+            // HLS (max 720p on this title) could be served for a
+            // 1080p request with no downgrade flag. Prove it the
+            // same way the race does; a link PROVEN below the
+            // requested height falls through to the race, which
+            // serves it flagged as a downgrade only if nothing
+            // proves the requested height. Proven-exact or still
+            // unknown serves as before (the post-download check
+            // is the backstop for the unknown case).
+            if (first != null && first !is ResolvedLink.Failed) {
+                val proven = MultiSourceResolver.proveLink(first)
+                val offered = proven.offeredHeight()
+                val requested = qualityHeight(quality)
+                if (offered != null && offered < requested) {
+                    DownloadLogs.log("RESOLVE", "serving Server $listServer proved ${offered}p < requested ${requested}p — falling through to race")
+                    MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
+                } else ResolvedDownload(proven, listServer)
+            } else MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
         } else {
             MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt)
         }
