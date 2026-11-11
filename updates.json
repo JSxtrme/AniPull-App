@@ -69,21 +69,13 @@
     ]
   },
   "dev": {
-    "versionCode": 70,
-    "versionName": "2.0-dev2.9",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.9/anipull-2.0-dev2.9.apk",
-    "sha256": "2963430485e79c304cdec78ca47ea81f6f834d54a2ab40218654d48654b07251",
+    "versionCode": 71,
+    "versionName": "2.0-dev2.10",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.10/anipull-2.0-dev2.10.apk",
+    "sha256": "2ab3f8b12c248d7dd5ab1fda35b633aafe27758edc68b86534e715843a20c0ab",
     "features": [
-      "The sheet now pre-warms the size for every quality and language in parallel when it opens, so tapping 720p, Dub or 480p shows the size almost instantly instead of waiting on a full resolve each time",
-      "A download that stalls on one server now fails over to the next server automatically instead of sitting on \"Connecting\u2026\" forever, and the row tells you which phase it is in (\"Fetching playlist\u2026\", \"Downloading init\u2026\", \"Segment 12/267\") instead of one flat \"Connecting\u2026\"",
-      "Downloads are faster across the board: all 9 servers now race at once instead of in batches, JustAnime and AnimeStream resolve their legs in parallel with much lighter pacing, and HLS segments download with 8 workers instead of 4"
+      "New Settings toggle in Downloads: \"Prefer direct downloads\" \u2014 at your chosen quality, the race prefers a direct file (subtitles burned in, so it plays anywhere) over a stream, and falls back to other sources when no direct file is available. Off by default; it never overrides quality \u2014 a direct file below your chosen quality can never beat a stream that meets it"
     ],
-    "fixes": [
-      "Fixed a download hanging on \"Connecting\u2026\" for minutes \u2014 the init-segment fetch could block on a read that never returned and never timed out (Death Note E1 on Server 8 sat for 2m 24s with zero progress). Every HLS fetch now has a hard deadline (10s to first byte, 20\u201330s total) and Cancel disconnects the live connection at once instead of waiting up to 41s for the blocked read to error on its own",
-      "Fixed the sheet size staying on \"checking\u2026\" for seconds per tap \u2014 every quality/language tap used to run a full multi-second resolve race, and nothing was pre-warmed except the opening combo. The sheet now warms all 8 quality/language combos in parallel on open, and stale warms from previous taps are cancelled instead of racing to completion",
-      "Fixed HLS size estimates using a nonsense bitrate \u2014 a revo 1080p master lists BANDWIDTH=5184, which would freeze a ~0.9 MB total for a 23-minute episode. Bandwidths below 100 kbps are now refused as implausible, with a segment-based fallback instead",
-      "Fixed the race leaving real 1080p legs parked as \"unknown\" \u2014 the quality probe only tried once with a 5s cap, so a flapping revo (520) or a slow handshake meant a genuine 1080p link never competed. The probe now retries with a 10s budget, and a master that was fetched but carries no resolution is ranked as a candidate above known-downgrade links instead of below them",
-      "Fixed the Download Logs summary naming the wrong server \u2014 a Server 8 job was labelled \"Server 8 (JustAnime)\" because the summary borrowed the name from a stale resolve block. The name now comes from the server number itself, so it can never mismatch"
-    ]
+    "fixes": []
   }
 }
