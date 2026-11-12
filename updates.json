@@ -69,10 +69,10 @@
     ]
   },
   "dev": {
-    "versionCode": 74,
-    "versionName": "2.0-dev2.13",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.13/anipull-2.0-dev2.13.apk",
-    "sha256": "1605307ff43187a7f48020161d4765700534a6f512ec80e5c02fd9ce96b70b59",
+    "versionCode": 75,
+    "versionName": "2.0-dev2.14",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.14/anipull-2.0-dev2.14.apk",
+    "sha256": "84254734b46b466b1caff96682b64d778fcb25d29235c26ae6d0f61255cc2b60",
     "features": [
       "Before You Start onboarding screen (third screen, after Welcome + Notifications) \u2014 four questions that set the Settings defaults: quality (Ask each time first, then 1080p/720p/480p/360p), Sub/Dub/Ask, subs (Hard / Soft / Both works, Recommended), and size (Best quality / Smallest file / Fastest first). Frieren art pans left to right (Frieren to Fern to Stark) with the settled motion: screen 1.4s, question 1.35s, heading glide 1.7s, background pan 2.6s. Skippable, defaults kept. Existing users see ONLY this screen once after updating \u2014 never Welcome, never the notification re-prompt.",
       "Subs and size are now tri-states: Hard subs races direct files first (HLS fallback), Soft subs races streams first (direct fallback), Both works is today's parallel race; Best quality is a new largest-file race mode (mirror of smallest-file), Fastest first is both size options off. Each phased race waits a bounded 8s for its preferred kind before falling back, so the no-match case doesn't get slower.",
