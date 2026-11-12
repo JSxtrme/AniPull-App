@@ -1415,9 +1415,14 @@ object DownloadEngine {
         // direct-download mode too — a stalled HLS link fails
         // over to a direct exact first when the toggle is ON.
         val preferDirect = prefs(ctx).getBoolean("prefer_direct_downloads", false)
+        // 2.0-dev2.14: same for the soft-subs and largest-file
+        // modes — a stall failover under the wrong mode would
+        // re-resolve under a different preference.
+        val preferSoft = prefs(ctx).getBoolean("prefer_soft_subs", false)
+        val preferLargest = prefs(ctx).getBoolean("prefer_largest_files", false)
         DownloadLogs.logJob(job.id, "RESOLVE", "stall failover: racing servers ${numbers.joinToString()} (excluding stalled Server $stalledServer) for E${job.episodeNumber} ${job.quality} ${job.audio}")
         return try {
-            MultiSourceResolver.resolveWithFailover(candidates, title, job.anilistId, job.episodeNumber, audio, job.quality, preferSmaller = preferSmaller, preferDirect = preferDirect)
+            MultiSourceResolver.resolveWithFailover(candidates, title, job.anilistId, job.episodeNumber, audio, job.quality, preferSmaller = preferSmaller, preferDirect = preferDirect, preferSoft = preferSoft, preferLargest = preferLargest)
         } catch (e: Exception) {
             DownloadLogs.logJob(job.id, "RESOLVE", "stall failover race threw ${e.javaClass.simpleName}: ${e.message ?: ""}")
             null

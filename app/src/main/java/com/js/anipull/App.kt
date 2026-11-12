@@ -1772,6 +1772,17 @@ fun AnipullAppInner() {
                 .getBoolean("done", false)
         )
     }
+    // 2.0-dev2.14: existing users get the new Before You Start
+    // screen ONCE after the v75 update — a version-gated
+    // one-time flag in the same onboarding prefs. New users get
+    // the full flow (the flag is set when they finish it, so
+    // they never see the screen twice either).
+    var beforeYouStartShownV75 by remember {
+        mutableStateOf(
+            context.getSharedPreferences("anipull_onboarding", android.content.Context.MODE_PRIVATE)
+                .getBoolean("before_you_start_shown_v75", false)
+        )
+    }
     // 1.9-dev4.6: loading screen EVERY launch, JS's call — it looks
     // nice, so it should not be skipped just because a cache exists.
     // Previously this was true only when there was no cache, so on
@@ -2264,9 +2275,23 @@ fun AnipullAppInner() {
     if (!onboardingDone) {
         OnboardingScreen(onFinish = {
             context.getSharedPreferences("anipull_onboarding", android.content.Context.MODE_PRIVATE)
-                .edit().putBoolean("done", true).apply()
+                .edit().putBoolean("done", true).putBoolean("before_you_start_shown_v75", true).apply()
             onboardingDone = true
+            beforeYouStartShownV75 = true
         })
+    } else if (!beforeYouStartShownV75) {
+        // 2.0-dev2.14: existing user, first launch after the v75
+        // update — ONLY Before You Start (startPage 2), never
+        // Welcome and never the notification re-prompt. Skippable,
+        // defaults kept, never shown again after this once.
+        OnboardingScreen(
+            onFinish = {
+                context.getSharedPreferences("anipull_onboarding", android.content.Context.MODE_PRIVATE)
+                    .edit().putBoolean("before_you_start_shown_v75", true).apply()
+                beforeYouStartShownV75 = true
+            },
+            startPage = 2,
+        )
     } else if (showLoading) {
         LoadingScreen()
     } else Box(modifier = Modifier.fillMaxSize()) { SharedTransitionLayout {
@@ -3194,22 +3219,27 @@ fun LoadingScreen() {
 }
 
 @Composable
-fun OnboardingScreen(onFinish: () -> Unit) {
-    // First boot only. Welcome -> notification grant, sliding like
-    // attached pages: welcome out left, notification in from the right.
-    // SF Pro Display Semibold here only (JS-supplied font), a real
-    // arrow vector drawable on Start, and a real bell vector drawable
-    // — never a text arrow or an emoji, per JS's explicit rule.
-    var page by remember { mutableStateOf(0) }
+// 2.0-dev2.14: startPage 0 = new users (full Welcome ->
+// Notifications -> Before You Start); 2 = existing users after
+// the v75 update (ONLY Before You Start, once — never Welcome,
+// never the notification re-prompt).
+fun OnboardingScreen(onFinish: () -> Unit, startPage: Int = 0) {
+    // First boot only. Welcome -> notification grant -> Before
+    // You Start, sliding like attached pages: forward slides
+    // left, back slides right. SF Pro Display Semibold here only
+    // (JS-supplied font), a real arrow vector drawable on Start,
+    // and a real bell vector drawable — never a text arrow or an
+    // emoji, per JS's explicit rule.
+    var page by remember { mutableStateOf(startPage) }
     val context = LocalContext.current
     val permissionLauncher = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
-    ) { _ -> onFinish() }
+    ) { _ -> page = 2 }
     fun requestNotif() {
         val granted = androidx.core.content.ContextCompat.checkSelfPermission(
             context, android.Manifest.permission.POST_NOTIFICATIONS,
         ) == android.content.pm.PackageManager.PERMISSION_GRANTED
-        if (granted) onFinish()
+        if (granted) page = 2
         else permissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
     }
     Box(modifier = Modifier.fillMaxSize().background(Bg)) {
@@ -3222,8 +3252,17 @@ fun OnboardingScreen(onFinish: () -> Unit) {
         AnimatedContent(
             targetState = page,
             transitionSpec = {
-                slideInHorizontally(initialOffsetX = { it }) + fadeIn() togetherWith
-                    slideOutHorizontally(targetOffsetX = { -it }) + fadeOut()
+                // 2.0-dev2.14: settled onboarding motion — screen
+                // slides 1.4 s, cubic-bezier(.25,1,.5,1) ease-out
+                // with crossfade; forward slides left, back right.
+                val ease = androidx.compose.animation.core.CubicBezierEasing(0.25f, 1f, 0.5f, 1f)
+                if (targetState > initialState) {
+                    slideInHorizontally(animationSpec = tween(1400, easing = ease), initialOffsetX = { it }) + fadeIn(animationSpec = tween(1400, easing = ease)) togetherWith
+                        slideOutHorizontally(animationSpec = tween(1400, easing = ease), targetOffsetX = { -it }) + fadeOut(animationSpec = tween(1400, easing = ease))
+                } else {
+                    slideInHorizontally(animationSpec = tween(1400, easing = ease), initialOffsetX = { -it }) + fadeIn(animationSpec = tween(1400, easing = ease)) togetherWith
+                        slideOutHorizontally(animationSpec = tween(1400, easing = ease), targetOffsetX = { it }) + fadeOut(animationSpec = tween(1400, easing = ease))
+                }
             },
             label = "onboardingPages",
         ) { current ->
@@ -3317,9 +3356,9 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                         Text("First boot only — never shown again", color = Faint, fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
                     }
                 }
-            } else {
+            } else if (current == 1) {
                 // Notification grant: AoT portrait wallpaper, same fade,
-                // plus the bell. Skip goes straight home, no blocking.
+                // plus the bell. Skip goes to Before You Start, no blocking.
                 Box(modifier = Modifier.fillMaxSize()) {
                     androidx.compose.foundation.Image(
                         painter = painterResource(R.drawable.onboarding_notif),
@@ -3382,15 +3421,345 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                             modifier = Modifier.fillMaxWidth().height(60.dp)
                                 .clip(RoundedCornerShape(999.dp))
                                 .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(999.dp))
-                                .clickable { onFinish() },
+                                // 2.0-dev2.14: Skip goes to Before
+                                // You Start now, not straight home.
+                                .clickable { page = 2 },
                             contentAlignment = Alignment.Center,
                         ) { Text("Skip for now", color = Muted, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
                         Spacer(Modifier.height(16.dp))
                         Text("You can turn this on later from Settings", color = Faint, fontSize = 13.sp, textAlign = TextAlign.Center)
                     }
                 }
+            } else {
+                // 2.0-dev2.14: Before You Start — the third screen.
+                // New users arrive from Notifications; existing
+                // users (startPage 2) land here directly, once.
+                // Previous on the first question goes back to
+                // Notifications only for new users.
+                BeforeYouStartPage(
+                    onFinish = onFinish,
+                    onBackToNotif = if (startPage == 0) { { page = 1 } } else null,
+                )
             }
         }
+        }
+    }
+}
+
+// 2.0-dev2.14: the Frieren onboarding art ships as a base64
+// TEXT asset (app/src/main/assets/frieren_onboarding.jpg.b64 —
+// the GitHub push route rejects binaries, so the JPEG travels
+// as text and is decoded once per process, cached here). A
+// failed decode returns null and the screen falls back to the
+// solid background + scrim, never a crash.
+private var frierenBitmapCache: androidx.compose.ui.graphics.ImageBitmap? = null
+
+@Composable
+private fun rememberFrierenBitmap(context: android.content.Context): androidx.compose.ui.graphics.ImageBitmap? {
+    return remember {
+        frierenBitmapCache ?: runCatching {
+            val b64 = context.assets.open("frieren_onboarding.jpg.b64").bufferedReader().readText()
+            val bytes = android.util.Base64.decode(b64, android.util.Base64.DEFAULT)
+            val bmp = android.graphics.BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+            bmp?.asImageBitmap()?.also { frierenBitmapCache = it }
+        }.getOrNull()
+    }
+}
+
+// 2.0-dev2.14: "Before You Start" — the third onboarding
+// screen (after Welcome + Notifications). Four questions that
+// just set the existing Settings prefs (one source of truth);
+// skippable, today's defaults kept. Frieren art pans
+// left→right as the questions advance (Frieren → Fern →
+// Stark), ending on Stark with the "You're all set" badge.
+// Settled motion: screen slides 1.4 s, question slides
+// 1.35 s, heading glides up 1.7 s, background pans 2.6 s — all
+// cubic-bezier(.25,1,.5,1) ease-out with crossfade.
+@Composable
+private fun BeforeYouStartPage(
+    onFinish: () -> Unit,
+    onBackToNotif: (() -> Unit)?,
+) {
+    val context = LocalContext.current
+    val prefs = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+    // Current prefs pre-selected (existing users see their own
+    // defaults; new users see today's defaults). Every tap
+    // writes the pref immediately — the screen never holds a
+    // separate copy that could drift from Settings.
+    var quality by remember { mutableStateOf(prefs.getString("quality", "1080p") ?: "1080p") }
+    var language by remember { mutableStateOf(prefs.getString("language", "Sub") ?: "Sub") }
+    var subsMode by remember {
+        mutableStateOf(
+            when {
+                prefs.getBoolean("prefer_direct_downloads", false) -> "hard"
+                prefs.getBoolean("prefer_soft_subs", false) -> "soft"
+                else -> "both"
+            }
+        )
+    }
+    var sizeMode by remember {
+        mutableStateOf(
+            when {
+                prefs.getBoolean("prefer_largest_files", false) -> "best"
+                prefs.getBoolean("prefer_smaller_files", false) -> "smallest"
+                else -> "fastest"
+            }
+        )
+    }
+    var step by remember { mutableStateOf(0) } // 0..3 = Q1..Q4, 4 = done
+    fun saveQuality(v: String) { quality = v; prefs.edit().putString("quality", v).apply() }
+    fun saveLanguage(v: String) { language = v; prefs.edit().putString("language", v).apply() }
+    fun saveSubs(v: String) {
+        subsMode = v
+        prefs.edit()
+            .putBoolean("prefer_direct_downloads", v == "hard")
+            .putBoolean("prefer_soft_subs", v == "soft")
+            .apply()
+    }
+    fun saveSize(v: String) {
+        sizeMode = v
+        prefs.edit()
+            .putBoolean("prefer_largest_files", v == "best")
+            .putBoolean("prefer_smaller_files", v == "smallest")
+            .apply()
+    }
+    val ease = androidx.compose.animation.core.CubicBezierEasing(0.25f, 1f, 0.5f, 1f)
+    // Background pan: one third of the frame per question, 2.6 s.
+    val panBias by animateFloatAsState(
+        targetValue = when (step) { 0 -> -1f; 1 -> -0.33f; 2 -> 0.33f; else -> 1f },
+        animationSpec = tween(2600, easing = ease),
+        label = "bysPan",
+    )
+    // Heading glide: opens centred, moves up as one block with
+    // its description — transform-only, no layout reflow.
+    var entered by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { entered = true }
+    val headingLift by animateDpAsState(
+        targetValue = if (entered) 0.dp else 200.dp,
+        animationSpec = tween(1700, easing = ease),
+        label = "bysHeading",
+    )
+    val frieren = rememberFrierenBitmap(context)
+    // "You're all set" badge pop-in on the done step.
+    var badgeIn by remember { mutableStateOf(false) }
+    LaunchedEffect(step) { if (step == 4) badgeIn = true }
+    val badgeScale by animateFloatAsState(
+        targetValue = if (badgeIn) 1f else 0.8f,
+        animationSpec = tween(600, easing = ease),
+        label = "bysBadge",
+    )
+    // Auto-finish a beat after the badge lands; the Done button
+    // below is the same finish, for anyone who doesn't wait.
+    LaunchedEffect(step) {
+        if (step == 4) {
+            kotlinx.coroutines.delay(1600)
+            onFinish()
+        }
+    }
+    Box(modifier = Modifier.fillMaxSize()) {
+        if (frieren != null) {
+            androidx.compose.foundation.Image(
+                bitmap = frieren,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                alignment = androidx.compose.ui.BiasAlignment(horizontalBias = panBias, verticalBias = 0f),
+            )
+        }
+        // Dark fade/scrim for readability — same 62% fade as the
+        // other onboarding screens, a touch darker up top over
+        // the bright Frieren art.
+        Box(
+            Modifier.matchParentSize().background(
+                Brush.verticalGradient(
+                    colorStops = arrayOf(
+                        0.0f to Color(0xFF07070C).copy(alpha = 0.55f),
+                        0.30f to Color.Transparent,
+                        0.50f to Color(0xFF07070C).copy(alpha = 0.60f),
+                        0.62f to Color(0xFF07070C),
+                        1.0f to Color(0xFF07070C),
+                    ),
+                    startY = 0f, endY = Float.POSITIVE_INFINITY,
+                )
+            )
+        )
+        Column(
+            modifier = Modifier.fillMaxSize().statusBarsPadding()
+                .navigationBarsPadding().padding(horizontal = 22.dp, vertical = 28.dp),
+        ) {
+            Spacer(Modifier.weight(1f))
+            // Heading + description glide up as one block.
+            Column(modifier = Modifier.offset(y = headingLift)) {
+                Text("Before you", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.SemiBold)
+                Text("start", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "Four quick questions — your answers become the defaults for every download.",
+                    color = Color(0xFFC9C9D6), fontSize = 17.sp, lineHeight = 24.sp,
+                    fontWeight = FontWeight.SemiBold,
+                )
+            }
+            Spacer(Modifier.height(24.dp))
+            if (step < 4) {
+                AnimatedContent(
+                    targetState = step,
+                    transitionSpec = {
+                        if (targetState > initialState) {
+                            slideInHorizontally(animationSpec = tween(1350, easing = ease), initialOffsetX = { it }) + fadeIn(animationSpec = tween(1350, easing = ease)) togetherWith
+                                slideOutHorizontally(animationSpec = tween(1350, easing = ease), targetOffsetX = { -it }) + fadeOut(animationSpec = tween(1350, easing = ease))
+                        } else {
+                            slideInHorizontally(animationSpec = tween(1350, easing = ease), initialOffsetX = { -it }) + fadeIn(animationSpec = tween(1350, easing = ease)) togetherWith
+                                slideOutHorizontally(animationSpec = tween(1350, easing = ease), targetOffsetX = { it }) + fadeOut(animationSpec = tween(1350, easing = ease))
+                        }
+                    },
+                    label = "bysQuestion",
+                ) { q ->
+                    when (q) {
+                        0 -> BysQuestion(
+                            question = "What quality do you usually download?",
+                            options = listOf(
+                                "ask" to ("Ask each time" to "I'll pick every time"),
+                                "1080p" to ("1080p" to "Sharpest picture, biggest files"),
+                                "720p" to ("720p" to "The sweet spot between looks and size"),
+                                "480p" to ("480p" to "Easy on space, still looks fine"),
+                                "360p" to ("360p" to "Tiny files, downloads in a snap"),
+                            ),
+                            selected = quality,
+                            onSelect = { saveQuality(it) },
+                        )
+                        1 -> BysQuestion(
+                            question = "Sub or Dub?",
+                            options = listOf(
+                                "Sub" to ("Sub" to "Original Japanese audio, English subtitles"),
+                                "Dub" to ("Dub" to "English voices instead of Japanese"),
+                                "ask" to ("Ask each time" to "I'll pick every time"),
+                            ),
+                            selected = language,
+                            onSelect = { saveLanguage(it) },
+                        )
+                        2 -> BysQuestion(
+                            question = "How do you want your subs?",
+                            options = listOf(
+                                "hard" to ("Hard subs" to "Burned into the video. Always there, plays anywhere."),
+                                "soft" to ("Soft subs" to "Separate from the video. Turn them on or off whenever."),
+                                "both" to ("Both works" to "Hard or soft — either is fine by me"),
+                            ),
+                            selected = subsMode,
+                            recommended = "both",
+                            onSelect = { saveSubs(it) },
+                        )
+                        else -> BysQuestion(
+                            question = "We pull from 10 sources, so the same file comes in different sizes. Bigger usually looks sharper, smaller saves space. What should we grab first?",
+                            options = listOf(
+                                "best" to ("Best quality" to "Biggest file, sharpest picture"),
+                                "smallest" to ("Smallest file" to "Smallest file at your chosen quality"),
+                                "fastest" to ("Fastest first" to "The first server to answer wins"),
+                            ),
+                            selected = sizeMode,
+                            onSelect = { saveSize(it) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(20.dp))
+                // Next / Previous above Skip. Next moves on
+                // without answering (keeps the current default);
+                // Previous goes back to change a pick. On the
+                // last question Next becomes Done.
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    if (step > 0 || onBackToNotif != null) {
+                        Box(
+                            modifier = Modifier.weight(1f).height(56.dp)
+                                .clip(RoundedCornerShape(999.dp))
+                                .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(999.dp))
+                                .clickable {
+                                    if (step > 0) step-- else onBackToNotif?.invoke()
+                                },
+                            contentAlignment = Alignment.Center,
+                        ) { Text("Previous", color = Muted, fontSize = 17.sp, fontWeight = FontWeight.Bold) }
+                    }
+                    Box(
+                        modifier = Modifier.weight(1f).height(56.dp)
+                            .clip(RoundedCornerShape(999.dp)).background(Pink)
+                            .clickable { if (step == 3) step = 4 else step++ },
+                        contentAlignment = Alignment.Center,
+                    ) { Text(if (step == 3) "Done" else "Next", color = OnAccent, fontSize = 17.sp, fontWeight = FontWeight.Bold) }
+                }
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    "Skip",
+                    color = Muted, fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().clickable { onFinish() },
+                )
+            } else {
+                // Done: the badge over the Stark end-frame.
+                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                    Box(
+                        modifier = Modifier.graphicsLayer(scaleX = badgeScale, scaleY = badgeScale, alpha = badgeScale)
+                            .clip(RoundedCornerShape(999.dp)).background(Pink)
+                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("You're all set", color = OnAccent, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
+                    Spacer(Modifier.height(20.dp))
+                    Box(
+                        modifier = Modifier.fillMaxWidth().height(56.dp)
+                            .clip(RoundedCornerShape(999.dp)).background(Pink)
+                            .clickable { onFinish() },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("Done", color = OnAccent, fontSize = 17.sp, fontWeight = FontWeight.Bold) }
+                }
+            }
+            Spacer(Modifier.height(16.dp))
+            Text(
+                "You can change these anytime in Settings → Sources",
+                color = Faint, fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
+            )
+        }
+    }
+}
+
+// 2.0-dev2.14: one Before You Start question — the question
+// text plus tappable option rows (pink radio circle, title,
+// plain-words description, optional Recommended badge).
+// Tapping an option selects it AND writes the pref at once.
+@Composable
+private fun BysQuestion(
+    question: String,
+    options: List<Pair<String, Pair<String, String>>>,
+    selected: String,
+    recommended: String? = null,
+    onSelect: (String) -> Unit,
+) {
+    Column {
+        Text(question, color = Color.White, fontSize = 20.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(14.dp))
+        options.forEach { (value, titleDesc) ->
+            val (title, desc) = titleDesc
+            val isSelected = selected == value
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { onSelect(value) }.padding(vertical = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(
+                    modifier = Modifier.size(20.dp).clip(RoundedCornerShape(999.dp)).border(2.dp, if (isSelected) Pink else Color.White.copy(alpha = 0.25f), RoundedCornerShape(999.dp)).background(if (isSelected) Pink else Color.Transparent),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (isSelected) Box(modifier = Modifier.size(8.dp).clip(RoundedCornerShape(999.dp)).background(Color.White))
+                }
+                Spacer(Modifier.width(12.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                        if (recommended == value) {
+                            Spacer(Modifier.width(8.dp))
+                            Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink).padding(horizontal = 8.dp, vertical = 2.dp)) {
+                                Text("Recommended", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(2.dp))
+                    Text(desc, color = Color(0xFFC9C9D6), fontSize = 13.sp, lineHeight = 18.sp)
+                }
+            }
         }
     }
 }
@@ -3686,7 +4055,7 @@ private fun retryDownloadJob(
         // the shared in-flight resolve first; its fresh win lands
         // in ResolveCache, so the resolveAndEnqueue below reuses
         // it instead of doubling the work.
-        awaitInFlightResolve(job.titleId, job.episodeNumber, episode.audio, job.quality, job.serverNumber.takeIf { it in 1..10 }, preferSmallerFiles(context), preferDirectDownloads(context))
+        awaitInFlightResolve(job.titleId, job.episodeNumber, episode.audio, job.quality, job.serverNumber.takeIf { it in 1..10 }, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context))
         val outcome = resolveAndEnqueue(
             context, title, episode, job.quality,
             serverOverride = job.serverNumber.takeIf { it in 1..10 },
@@ -3924,6 +4293,25 @@ private fun preferDirectDownloads(context: android.content.Context): Boolean =
     context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
         .getBoolean("prefer_direct_downloads", false)
 
+// 2.0-dev2.14: "Soft subs" (Settings → Sources, SUBTITLES) —
+// the mirror of preferDirectDownloads: HLS-first phased race,
+// DDL fallback. Default OFF. Mutually exclusive with
+// prefer_direct_downloads in the UI (a race defensively treats
+// preferDirect as winning if both are somehow on). Threaded
+// exactly like the other two modes.
+private fun preferSoftDownloads(context: android.content.Context): Boolean =
+    context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+        .getBoolean("prefer_soft_subs", false)
+
+// 2.0-dev2.14: "Best quality" (Settings → Sources, SIZE) —
+// the mirror of preferSmallerFiles: the race waits, compares
+// sizes, and the biggest known-size exact wins. Default OFF.
+// Mutually exclusive with prefer_smaller_files in the UI.
+// Threaded exactly like the other modes.
+private fun preferLargestFiles(context: android.content.Context): Boolean =
+    context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
+        .getBoolean("prefer_largest_files", false)
+
 private fun serverChoiceLabel(number: Int): String =
     if (number == 0) "Auto" else "Server $number — ${ServerRegistry.description(number)}"
 
@@ -4053,22 +4441,27 @@ private suspend fun resolveViaCandidates(
     preferSmaller: Boolean = false,
     // 2.0-dev2.10: direct-download mode — threaded to the race.
     preferDirect: Boolean = false,
+    // 2.0-dev2.14: soft-subs mode — threaded to the race.
+    preferSoft: Boolean = false,
+    // 2.0-dev2.14: largest-file mode — threaded to the race.
+    preferLargest: Boolean = false,
 ): ResolvedDownload {
     return try {
         if (fromMediaIndex) {
             // Media-index rows carry no sessions — NEVER resolveDownload
             // with empty sessions. Resolve by (series + episode number)
             // with failover across the chain.
-            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect)
-        } else if (listServer != null && (preferSmaller || preferDirect)) {
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect, preferSoft = preferSoft, preferLargest = preferLargest)
+        } else if (listServer != null && (preferSmaller || preferDirect || preferSoft || preferLargest)) {
             // 2.0-dev2.8: smallest-file mode skips the serving-first
             // shortcut below — it would crown before sizes are
             // compared. The serving server still races, first in
             // line (resolveOnly orders it first in candidates).
-            // 2.0-dev2.10: direct-download mode skips it for the
-            // same reason — it would crown an HLS link before a
-            // direct exact has had its chance.
-            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect)
+            // 2.0-dev2.10/2.14: direct-download, soft-subs and
+            // largest-file modes skip it for the same reason — it
+            // would crown one kind before the preferred kind has
+            // had its chance.
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect, preferSoft = preferSoft, preferLargest = preferLargest)
         } else if (listServer != null) {
             // The server that served this list resolves its own
             // episode the old way first; anything else fails over
@@ -4106,11 +4499,11 @@ private suspend fun resolveViaCandidates(
                 val requested = qualityHeight(quality)
                 if (offered != null && offered < requested) {
                     DownloadLogs.log("RESOLVE", "serving Server $listServer proved ${offered}p < requested ${requested}p — falling through to race")
-                    MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect)
+                    MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect, preferSoft = preferSoft, preferLargest = preferLargest)
                 } else ResolvedDownload(proven, listServer)
-            } else MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect)
+            } else MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect, preferSoft = preferSoft, preferLargest = preferLargest)
         } else {
-            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect)
+            MultiSourceResolver.resolveWithFailover(candidates, title, anilistId, episode.number, episode.audio, quality, onAttempt = onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect, preferSoft = preferSoft, preferLargest = preferLargest)
         }
     } catch (e: Exception) {
         ResolvedDownload(ResolvedLink.Failed(friendlyDownloadError(e)), null)
@@ -4139,11 +4532,14 @@ private suspend fun resolveOnly(
     val preferSmaller = preferSmallerFiles(context)
     // 2.0-dev2.10: same for the direct-download mode.
     val preferDirect = preferDirectDownloads(context)
+    // 2.0-dev2.14: same for the soft-subs and largest-file modes.
+    val preferSoft = preferSoftDownloads(context)
+    val preferLargest = preferLargestFiles(context)
     // 2.0-dev2.3: resolve cache — a fresh-enough link (per-source
     // TTL: Pahe 90 s, never an expired Pahe link) skips the whole
     // chain AND the clearance ensure, so a repeat tap is instant.
     // A miss behaves exactly like no cache at all.
-    ResolveCache.lookup(context, title.id, episode.number, episode.audio, quality, preferred, listServer, preferSmaller, preferDirect)?.let {
+    ResolveCache.lookup(context, title.id, episode.number, episode.audio, quality, preferred, listServer, preferSmaller, preferDirect, preferSoft, preferLargest)?.let {
         return ResolveAttempt(it, false)
     }
     val numbers = candidateServerNumbers(context, preferred).let { ordered ->
@@ -4177,13 +4573,13 @@ private suspend fun resolveOnly(
     // ("Resolving… · Server N"); the serving server's direct
     // resolveDownload is also an attempt, so it fires too.
     val firstResolved: ResolvedDownload? = if (firstCandidates.isNotEmpty()) {
-        resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, firstCandidates, onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect)
+        resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, firstCandidates, onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect, preferSoft = preferSoft, preferLargest = preferLargest)
     } else null
     if (firstResolved != null && firstResolved.link !is ResolvedLink.Failed) {
         // Cache the win (successes only, per-source TTL) so a repeat
         // tap — or the confirm after a pre-resolved sheet — is instant.
         if (firstResolved.serverNumber != null) {
-            ResolveCache.store(context, title.id, episode.number, episode.audio, quality, firstResolved, preferSmaller, preferDirect)
+            ResolveCache.store(context, title.id, episode.number, episode.audio, quality, firstResolved, preferSmaller, preferDirect, preferSoft, preferLargest)
         }
         return ResolveAttempt(firstResolved, false)
     }
@@ -4197,9 +4593,9 @@ private suspend fun resolveOnly(
         val clearance = paheClearanceIfNeeded(context, true)
         val pahe = ServerRegistry.build(3, clearance.cookie, clearance.userAgent)
         if (pahe != null) {
-            val paheResolved = resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, listOf(pahe), onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect)
+            val paheResolved = resolveViaCandidates(title, episode, quality, anilistId, fromMediaIndex, listServer, listOf(pahe), onAttempt, preferSmaller = preferSmaller, preferDirect = preferDirect, preferSoft = preferSoft, preferLargest = preferLargest)
             if (paheResolved.link !is ResolvedLink.Failed && paheResolved.serverNumber != null) {
-                ResolveCache.store(context, title.id, episode.number, episode.audio, quality, paheResolved, preferSmaller, preferDirect)
+                ResolveCache.store(context, title.id, episode.number, episode.audio, quality, paheResolved, preferSmaller, preferDirect, preferSoft, preferLargest)
             }
             return ResolveAttempt(paheResolved, clearance.needsUserAction)
         }
@@ -4211,116 +4607,6 @@ private suspend fun resolveOnly(
         firstResolved ?: ResolvedDownload(ResolvedLink.Failed("No server available — tap Retry."), null),
         false,
     )
-}
-
-// 2.0-dev2.13: one key formula for the board, shared by the
-// sheet (reads it), collectBoardFor (fresh-check) and collectBoard
-// (writes it). ServerSizeBoard.key applies audioCode internally,
-// so "Sub"/"Dub" and "jpn"/"eng" key identically — the sheet's
-// chip audio and the episode's audio code are the same board.
-private fun serverSizeBoardKey(titleId: Long, number: Int, audio: String, quality: String, preferSmaller: Boolean, preferDirect: Boolean): String =
-    ServerSizeBoard.key(titleId, number, audio, quality, preferSmaller, preferDirect)
-
-// 2.0-dev2.13: the Auto row's winner WHILE collecting — the
-// store's winnerServer only lands on completion. Same precedence
-// as the race (see resolveWithFailover's collect-all pick): exact
-// KNOWN entries only (offeredHeight >= requested); preferDirect
-// narrows to direct files when any exact direct exists;
-// preferSmaller takes the smallest sizeBytes among the pool
-// (unknown-size exacts sort last, arrival order breaks ties);
-// otherwise the earliest arrival (smallest seq). Null = no exact
-// file has landed yet — the Auto row shows "checking…".
-private fun provisionalBoardWinner(board: BoardState?, requestedHeight: Int, preferSmaller: Boolean, preferDirect: Boolean): Int? {
-    val exact = board?.entries?.values
-        ?.filter { it.state == BoardEntryState.KNOWN && (it.offeredHeight ?: 0) >= requestedHeight }
-        ?.sortedBy { it.seq } ?: return null
-    if (exact.isEmpty()) return null
-    val pool = if (preferDirect) {
-        val direct = exact.filter { it.isDirect }
-        if (direct.isNotEmpty()) direct else exact
-    } else exact
-    return if (preferSmaller) pool.minByOrNull { it.sizeBytes ?: Long.MAX_VALUE }?.serverNumber
-    else pool.firstOrNull()?.serverNumber
-}
-
-// 2.0-dev2.13: per-server size board collect — the collect-all
-// twin of resolveOnly. Same candidate building (candidateServerNumbers
-// order, stored-clearance peek for Server 3, Server 3 held out when
-// no stored clearance — NEVER a clearance solve, NO phase B, NO
-// serving-first shortcut): the board must show what the race can
-// see without a human check. The race runs in collect-all mode so
-// every racer's outcome lands in ServerSizeBoard via onBoardEntry;
-// servers with no entry when the race ends (held-out Server 3,
-// never-arriving racers) are marked NO_FILE, the winner is stored
-// in ResolveCache exactly as resolveOnly stores it, and the board
-// is completed with that winner. Returns the attempt so the warm
-// (collectBoardFor) can reuse the winner.
-private suspend fun collectBoard(
-    context: android.content.Context,
-    title: ApiTitle,
-    episode: EpisodeInfo,
-    quality: String,
-    anilistId: Long? = null,
-    fromMediaIndex: Boolean = false,
-    listServer: Int? = null,
-): ResolveAttempt {
-    CronetHttp.setContext(context)
-    val preferSmaller = preferSmallerFiles(context)
-    val preferDirect = preferDirectDownloads(context)
-    val boardKey = serverSizeBoardKey(title.id, episode.number, episode.audio, quality, preferSmaller, preferDirect)
-    val numbers = candidateServerNumbers(context, 0).let { ordered ->
-        if (listServer != null) listOf(listServer) + ordered.filter { it != listServer } else ordered
-    }
-    // Stored-clearance peek only (cheap prefs read, never a solve):
-    // a valid stored clearance lets Server 3 race with everyone
-    // else; without one it is held out and its row shows "—".
-    val storedClearance: PaheClearance? = if (3 in numbers) {
-        CloudflareClearance.loadStored(context)?.let { PaheClearance(it.cookieValue, it.userAgent, false) }
-    } else null
-    val upFrontClearance = storedClearance ?: PaheClearance(null, null, false)
-    val firstNumbers = if (storedClearance != null) numbers else numbers.filter { it != 3 }
-    val firstCandidates = firstNumbers.mapNotNull { ServerRegistry.build(it, upFrontClearance.cookie, upFrontClearance.userAgent) }
-    // Seed every server's row as CHECKING; the held-out Server 3
-    // flips to "—" immediately — it is never attempted, so
-    // "checking…" would be a lie for the whole collect.
-    ServerSizeBoard.start(boardKey, numbers)
-    if (storedClearance == null && 3 in numbers) ServerSizeBoard.markNoFile(boardKey, 3)
-    val resolved = try {
-        if (firstCandidates.isNotEmpty()) {
-            MultiSourceResolver.resolveWithFailover(
-                firstCandidates, title, anilistId, episode.number, episode.audio, quality,
-                preferSmaller = preferSmaller, preferDirect = preferDirect,
-                collectAll = true, onBoardEntry = { ServerSizeBoard.putEntry(boardKey, it) },
-            )
-        } else {
-            ResolvedDownload(ResolvedLink.Failed("No server available — tap Retry."), null)
-        }
-    } catch (e: Exception) {
-        ResolvedDownload(ResolvedLink.Failed(friendlyDownloadError(e)), null)
-    }
-    // Every candidate with no entry — or still CHECKING after the
-    // race ended — has no file at this quality: "—", never a row
-    // stuck on "checking…" on a complete board. markNoFile never
-    // overwrites a KNOWN/UNKNOWN entry.
-    val landed = ServerSizeBoard.boards.value[boardKey]?.entries ?: emptyMap()
-    numbers.forEach { n ->
-        val entry = landed[n]
-        if (entry == null || entry.state == BoardEntryState.CHECKING) ServerSizeBoard.markNoFile(boardKey, n)
-    }
-    // Same store call resolveOnly makes (successes only — store()
-    // itself drops Failed links and null servers).
-    if (resolved.serverNumber != null) {
-        ResolveCache.store(context, title.id, episode.number, episode.audio, quality, resolved, preferSmaller, preferDirect)
-    }
-    // 2.0-dev2.13: only an EXACT winner rides the board's Auto
-    // row — a downgrade/unprovable/unknown fallback winner is
-    // not a file at the selected quality, so tagging its "—"
-    // row [Auto] (and showing its size as the Auto size) would
-    // lie. The confirm path still serves such a fallback exactly
-    // as before; the board just doesn't claim it.
-    val exactWinner = if (resolved.link !is ResolvedLink.Failed && (resolved.link.offeredHeight() ?: 0) >= qualityHeight(quality)) resolved.serverNumber else null
-    ServerSizeBoard.setWinnerAndComplete(boardKey, exactWinner)
-    return ResolveAttempt(resolved, false)
 }
 
 private suspend fun resolveAndEnqueue(
@@ -4393,57 +4679,57 @@ private fun showToast(context: android.content.Context, message: String) {
     }
 }
 
-// 2.0-dev2.13: one row of the per-server size board — radio +
-// "Server N · <size>" + tag pills. Selected = pink radio + pink
-// outline (as in the approved mockup). Dense single line (~40 dp).
-// `enabled` false = CHECKING / NO_FILE rows, shown but not
-// tappable; `mutedText` = UNKNOWN rows ("Unknown", tappable).
-@Composable
-private fun BoardServerRow(
-    text: String,
-    tags: List<String>,
-    selected: Boolean,
-    enabled: Boolean,
-    mutedText: Boolean = false,
-    onClick: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().height(40.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, if (selected) Pink else Color.Transparent, RoundedCornerShape(8.dp))
-            .background(if (selected) Pink.copy(alpha = 0.10f) else Color.Transparent)
-            .clickable(enabled = enabled, onClick = onClick)
-            .padding(horizontal = 10.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(if (selected) "◉" else "○", color = if (selected) Pink else Muted, fontSize = 14.sp)
-        Spacer(Modifier.width(8.dp))
-        Text(
-            text, color = if (mutedText) Muted else TextMain, fontSize = 13.sp,
-            modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis,
-        )
-        tags.forEach { tag ->
-            Spacer(Modifier.width(4.dp))
-            Box(
-                modifier = Modifier.clip(RoundedCornerShape(999.dp))
-                    .border(1.dp, Pink, RoundedCornerShape(999.dp))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-                contentAlignment = Alignment.Center,
-            ) { Text(tag, color = Pink, fontSize = 10.sp, fontWeight = FontWeight.Bold) }
+// 2.0-dev2.8: live sheet-size state machine for the per-episode
+// confirm sheet. Unknown = the size could not be determined (or
+// no fetch has finished) — the sheet shows NO size line, exactly
+// like the old behaviour. Checking = a fetch is in flight — the
+// sheet shows "Size: checking…". Known = a label for THIS combo.
+// The Download button is never disabled or blocked by this state.
+private sealed class SheetSizeState {
+    object Unknown : SheetSizeState()
+    object Checking : SheetSizeState()
+    data class Known(val label: String) : SheetSizeState()
+}
+
+// 2.0-dev2.8: size label for ONE already-resolved link — never
+// borrowed from another source or server. Order: the link's own
+// stored size first (exact DDL probe total / API label, or an HLS
+// estimate a resolver already attached); else a DDL link is
+// probed at its OWN url (exact total from Content-Range), and an
+// HLS link is estimated from its OWN master playlist (summed
+// byte-ranges when present, else AVERAGE-BANDWIDTH x duration,
+// "~"). Null = this link's size genuinely cannot be determined —
+// the caller shows nothing, never a number from elsewhere.
+private suspend fun sheetSizeLabelForLink(link: ResolvedLink, quality: String, audio: String): String? {
+    link.sizeLabel()?.let { return it }
+    return when (link) {
+        is ResolvedLink.DirectMp4 -> {
+            val headers = if (link.referer.isNotBlank()) mapOf("Referer" to link.referer) else emptyMap()
+            val probe = DdlQualityProbe.probeDdlQuality(link.url, headers, timeoutMs = 4_000) ?: return null
+            probe.totalBytes?.takeIf { it > 0 }?.let { formatSizeBytes(it, estimate = false) }
         }
+        is ResolvedLink.Hls -> {
+            val headers = buildMap {
+                link.referer?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
+                link.origin?.takeIf { it.isNotBlank() }?.let { put("Origin", it) }
+            }
+            val estimate = DdlQualityProbe.estimateHlsSizeBytes(link.masterPlaylistUrl, headers, quality, audio)
+                ?: return null
+            if (estimate.bytes > 0) formatSizeBytes(estimate.bytes, estimate.isEstimate) else null
+        }
+        is ResolvedLink.Failed -> null
     }
 }
 
 // 2.0-dev1.7: per-episode confirm sheet — tapping an episode
 // row / grid cell NO LONGER downloads immediately. It opens this
 // sheet instead: episode title + "Episode N", Quality chips
-// (360/480/720/1080), Sub/Dub, and a per-server size board (Auto
-// + Server 1..10 rows, each with its file size), all pre-selected
-// from the caller's current choices (the Settings prefs in detail,
-// the DownloadSheet's own chips inside the sheet). Only the
-// confirm button pulls. Chip patterns reuse DownloadSheet's
-// OutlinedButton rows; no source names anywhere — servers are
-// "Server N" only, as everywhere else.
+// (360/480/720/1080), Sub/Dub, and a Server row (Auto / Server
+// 1..10), all pre-selected from the caller's current choices (the
+// Settings prefs in detail, the DownloadSheet's own chips inside
+// the sheet). Only the confirm button pulls. Chip patterns reuse
+// DownloadSheet's OutlinedButton rows; no source names anywhere —
+// servers are "Server N" only, as everywhere else.
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun EpisodeDownloadSheet(
@@ -4454,85 +4740,78 @@ private fun EpisodeDownloadSheet(
     initialServer: Int, // 0 = Auto
     onDismiss: () -> Unit,
     onConfirm: (quality: String, audio: String, server: Int) -> Unit,
-    // 2.0-dev2.13: collects the per-server size board for the
-    // sheet's CURRENT chips (threaded in from EpisodeListDialogs,
-    // which owns the state). Null = no collector available; the
-    // board then stays empty and rows show "checking…".
-    onCollectBoard: ((quality: String, audio: String) -> Unit)? = null,
+    // 2.0-dev2.8: warms a resolve for the sheet's CURRENT chips
+    // (threaded in from EpisodeListDialogs, which owns the state).
+    // Null = no warmer available; the sheet then shows a size only
+    // when a link is already cached for the combo.
+    onWarmSize: ((quality: String, audio: String, server: Int) -> Unit)? = null,
 ) {
     var quality by remember(row.number) { mutableStateOf(initialQuality) }
     var audio by remember(row.number) { mutableStateOf(initialAudio) }
     var server by remember(row.number) { mutableStateOf(initialServer) }
-    var sizesExpanded by remember { mutableStateOf(true) }
     val context = LocalContext.current
-    val preferSmaller = preferSmallerFiles(context)
-    val preferDirect = preferDirectDownloads(context)
-    // 2.0-dev2.13: the board for this combo + mode. The key does
-    // NOT include the picked server — the board is the full
-    // per-server list for the combo, and picking a row only
-    // chooses which server is tried first.
-    val boardKey = serverSizeBoardKey(title.id, row.number, audio, quality, preferSmaller, preferDirect)
-    val boards by ServerSizeBoard.boards.collectAsState()
-    val board = boards[boardKey]
-    // 2.0-dev2.13: tapping another quality/audio starts (or
-    // awaits) that combo's collect; rows stream in as racers
-    // land. The collect is coalesced + cancellable like the other
-    // warms (see collectBoardFor); a fresh board answers instantly
-    // with no re-collect.
-    LaunchedEffect(quality, audio) {
-        onCollectBoard?.invoke(quality, audio)
+    // 2.0-dev2.8: instant Known when the cached link for the
+    // OPENING combo already carries a size — a re-tap / reopen
+    // shows it on the first frame with no fetch at all.
+    var sheetSize by remember(row.number) {
+        mutableStateOf<SheetSizeState>(
+            ResolveCache.lookup(context, title.id, row.number, initialAudio, initialQuality, initialServer, null, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context))?.link?.sizeLabel()
+                ?.let { SheetSizeState.Known(it) } ?: SheetSizeState.Unknown,
+        )
     }
-    // 2.0-dev2.13: Auto winner — the store's winner once the
-    // collect completed, the provisional one (same precedence)
-    // while racers are still landing.
-    val requestedHeight = qualityHeight(quality)
-    val autoWinner = if (board?.complete == true) board.winnerServer
-    else provisionalBoardWinner(board, requestedHeight, preferSmaller, preferDirect)
-    val autoText = when {
-        autoWinner != null -> "Auto — Server $autoWinner · ${board?.entries?.get(autoWinner)?.sizeLabel ?: "Unknown"}"
-        board?.complete == true -> "Auto — Unknown"
-        else -> "Auto — checking…"
-    }
-    // 2.0-dev2.13: [Smallest] — the smallest known-size file,
-    // only when it isn't the winner's row (that row already
-    // carries [Auto]).
-    val smallestServer = board?.entries?.values
-        ?.filter { it.state == BoardEntryState.KNOWN && it.sizeBytes != null }
-        ?.minByOrNull { it.sizeBytes ?: Long.MAX_VALUE }?.serverNumber
-    // 2.0-dev2.13: empty state — complete AND no file at this
-    // quality on any server (no KNOWN or UNKNOWN entry).
-    val boardEmpty = board?.complete == true &&
-        board.entries.values.none { it.state == BoardEntryState.KNOWN || it.state == BoardEntryState.UNKNOWN }
-    // 2.0-dev2.13: row order — smallest known size first,
-    // UNKNOWN next, CHECKING next, NO_FILE last; each group in
-    // server-number order (known rows without a size sort after
-    // sized knowns). A missing entry is CHECKING while the board
-    // is still collecting, NO_FILE once it completed.
-    val serverRows = (1..10).sortedWith(Comparator { a, b ->
-        val ea = board?.entries?.get(a)
-        val eb = board?.entries?.get(b)
-        val sa = ea?.state ?: if (board?.complete == true) BoardEntryState.NO_FILE else BoardEntryState.CHECKING
-        val sb = eb?.state ?: if (board?.complete == true) BoardEntryState.NO_FILE else BoardEntryState.CHECKING
-        fun rank(state: BoardEntryState, hasSize: Boolean): Int = when (state) {
-            BoardEntryState.KNOWN -> if (hasSize) 0 else 1
-            BoardEntryState.UNKNOWN -> 2
-            BoardEntryState.CHECKING -> 3
-            BoardEntryState.NO_FILE -> 4
+    // 2.0-dev2.8: live size for the current chips, in order:
+    // (i) the cached link for this EXACT combo (same title /
+    // episode / audio / quality / first server — the link the
+    // confirm would actually download, never another server's
+    // link as a proxy) -> its own sizeLabel, instant;
+    // (ii) that link without a size -> probe / estimate THAT
+    // link's own URL / master playlist (see
+    // sheetSizeLabelForLink); (iii) no cached link -> warm a
+    // resolve for THIS combo in the background, await the
+    // coalesced in-flight resolve, then re-run (i)/(ii) on what
+    // landed. A fetch that yields nothing leaves Unknown (no
+    // size line). The effect re-runs on every chip tap; a
+    // previously computed combo answers from ResolveCache +
+    // the probe/size caches with no re-fetch. 2.0-dev2.9: sheet-open
+    // warms every chip combo (see warmAllSheetCombos), so step
+    // (iii) usually just awaits an in-flight warm — and only
+    // starts one when none exists (await-first, below).
+    LaunchedEffect(quality, audio, server) {
+        // 2.0-dev2.14: "ask" defaults leave quality/audio blank
+        // until the user picks — no size to show, and no warm to
+        // run, until both are chosen.
+        if (quality.isBlank() || (audio != "Sub" && audio != "Dub")) {
+            sheetSize = SheetSizeState.Unknown
+            return@LaunchedEffect
         }
-        val ra = rank(sa, ea?.sizeBytes != null)
-        val rb = rank(sb, eb?.sizeBytes != null)
-        val byRank = ra - rb
-        if (byRank != 0) byRank
-        else if (ra == 0) {
-            val bySize = (ea?.sizeBytes ?: Long.MAX_VALUE).compareTo(eb?.sizeBytes ?: Long.MAX_VALUE)
-            if (bySize != 0) bySize else a - b
-        } else a - b
-    })
+        val cachedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context))?.link
+        if (cachedLink != null) {
+            cachedLink.sizeLabel()?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
+            sheetSize = SheetSizeState.Checking
+            sheetSizeLabelForLink(cachedLink, quality, audio)?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
+            sheetSize = SheetSizeState.Unknown
+            return@LaunchedEffect
+        }
+        sheetSize = SheetSizeState.Checking
+        // 2.0-dev2.9: await-first — a warm for this combo is
+        // usually already in flight (sheet-open warm-all, or a
+        // list warm); starting another resolve here used to
+        // double the race this effect was about to wait for.
+        // Only start one when nothing is warming this combo.
+        if (!isResolveInFlight(title.id, row.number, audio, quality, server, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context))) {
+            onWarmSize?.invoke(quality, audio, server)
+        }
+        awaitInFlightResolve(title.id, row.number, audio, quality, server, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context))
+        val landedLink = ResolveCache.lookup(context, title.id, row.number, audio, quality, server, null, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context))?.link
+        if (landedLink != null) {
+            landedLink.sizeLabel()?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
+            sheetSizeLabelForLink(landedLink, quality, audio)?.let { sheetSize = SheetSizeState.Known(it); return@LaunchedEffect }
+        }
+        sheetSize = SheetSizeState.Unknown
+    }
     Dialog(onDismissRequest = onDismiss) {
         Column(
-            // 2.0-dev2.13: scrollable — 11 board rows must fit
-            // small screens (the old fixed column would clip).
-            modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).clip(RoundedCornerShape(20.dp)).background(Card).padding(16.dp),
+            modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp)).background(Card).padding(16.dp),
         ) {
             Row(verticalAlignment = Alignment.Top) {
                 PosterImage(
@@ -4575,6 +4854,24 @@ private fun EpisodeDownloadSheet(
                     ) { Text("${q}p", fontSize = 13.sp) }
                 }
             }
+            // 2.0-dev2.8: live size (see the LaunchedEffect above
+            // the Dialog). Known -> the label; Checking -> the
+            // "checking…" line; Unknown -> NO size line at all
+            // (never an invented or borrowed size). The Download
+            // button below is never gated on this state.
+            // NOTE: the season DownloadSheet has no single-episode
+            // size, so it deliberately shows none there.
+            when (val sizeState = sheetSize) {
+                is SheetSizeState.Known -> {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Size: ${sizeState.label}", color = Muted, fontSize = 12.sp)
+                }
+                is SheetSizeState.Checking -> {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Size: checking…", color = Muted, fontSize = 12.sp)
+                }
+                is SheetSizeState.Unknown -> Unit
+            }
             Spacer(Modifier.height(10.dp))
             Text("Audio", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(6.dp))
@@ -4603,90 +4900,43 @@ private fun EpisodeDownloadSheet(
                 }
             }
             Spacer(Modifier.height(10.dp))
-            // 2.0-dev2.13: the per-server size board replaces the
-            // single "Size:" line AND the Server chip row — the
-            // list IS the server picker. Tapping a row sets the
-            // same `server` state the old chips set (0 = Auto);
-            // the confirm path is untouched. The Download button
-            // below is never gated on the board.
+            Text("Server", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(6.dp))
             Row(
-                modifier = Modifier.fillMaxWidth().clickable { sizesExpanded = !sizesExpanded },
-                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                Text(
-                    "File size by server",
-                    color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(if (sizesExpanded) "⌄" else "⌃", color = Muted, fontSize = 14.sp)
-            }
-            if (sizesExpanded) {
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    "Same episode, same quality — but each server's file is a different size. Tap one to download it.",
-                    color = Muted, fontSize = 12.sp, lineHeight = 16.sp,
-                )
-                Spacer(Modifier.height(8.dp))
-                if (boardEmpty) {
-                    // No file at this quality on any server — one
-                    // honest line instead of rows. The Download
-                    // button stays: the existing confirm path
-                    // handles it (toasts / fails honestly).
-                    Text(
-                        "No server has a file at ${quality}p $audio — try a lower quality.",
-                        color = Muted, fontSize = 13.sp,
-                    )
-                } else {
-                    BoardServerRow(
-                        text = autoText,
-                        tags = if (autoWinner != null) listOf("Auto") else emptyList(),
-                        selected = server == 0,
-                        enabled = true,
-                        onClick = { server = 0 },
-                    )
-                    serverRows.forEach { n ->
-                        val entry = board?.entries?.get(n)
-                        val state = entry?.state
-                            ?: if (board?.complete == true) BoardEntryState.NO_FILE else BoardEntryState.CHECKING
-                        val sizeText = when (state) {
-                            BoardEntryState.KNOWN -> entry?.sizeLabel ?: "Unknown"
-                            BoardEntryState.UNKNOWN -> "Unknown"
-                            BoardEntryState.CHECKING -> "checking…"
-                            BoardEntryState.NO_FILE -> "—"
-                        }
-                        val tags = buildList {
-                            if (n == autoWinner) add("Auto")
-                            if (n == smallestServer && n != autoWinner) add("Smallest")
-                            if (entry?.isDirect == true) add("Direct")
-                        }
-                        BoardServerRow(
-                            text = "Server $n · $sizeText",
-                            tags = tags,
-                            selected = server == n,
-                            enabled = state == BoardEntryState.KNOWN || state == BoardEntryState.UNKNOWN,
-                            mutedText = state == BoardEntryState.UNKNOWN,
-                            onClick = { server = n },
-                        )
-                    }
+                (listOf(0 to "Auto") + (1..10).map { it to "Server $it" }).forEach { (n, label) ->
+                    OutlinedButton(
+                        onClick = { server = n },
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 0.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = if (server == n) Pink else Color.Transparent,
+                            contentColor = Color.White,
+                        ),
+                    ) { Text(label, fontSize = 13.sp) }
                 }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Auto picks for you. Tapping a server tries it first — the others still work as backup.",
-                    color = Muted, fontSize = 12.sp,
-                )
             }
+            Spacer(Modifier.height(6.dp))
+            Text(
+                "Auto tries servers in order until one works.",
+                color = Muted, fontSize = 12.sp,
+            )
             Spacer(Modifier.height(12.dp))
             Button(
-                onClick = { onConfirm(quality, audio, server) },
+                // 2.0-dev2.14: "ask" defaults leave quality/audio
+                // blank until the user picks — the confirm is
+                // blocked with a toast, never pulled on a blank.
+                onClick = {
+                    when {
+                        quality.isBlank() -> showToast(context, "Pick a quality first")
+                        audio != "Sub" && audio != "Dub" -> showToast(context, "Pick Sub or Dub first")
+                        else -> onConfirm(quality, audio, server)
+                    }
+                },
                 colors = ButtonDefaults.buttonColors(containerColor = Pink),
                 modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text(
-                    if (server == 0) "Download Episode ${row.number}"
-                    else "Download Episode ${row.number} · Server $server",
-                    color = OnAccent, fontWeight = FontWeight.Bold,
-                )
-            }
+            ) { Text("Download Episode ${row.number}", color = OnAccent, fontWeight = FontWeight.Bold) }
         }
     }
 }
@@ -4788,8 +5038,8 @@ private val sheetWarms = java.util.concurrent.ConcurrentHashMap<String, MutableS
 // in-flight resolve has landed in ResolveCache (or failed —
 // the caller then resolves normally). No-op when nothing is in
 // flight for this key.
-private suspend fun awaitInFlightResolve(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false, preferDirect: Boolean = false) {
-    resolveInFlight[resolveCoalesceKey(titleId, number, audio, quality, serverOverride, preferSmaller, preferDirect)]?.let { deferred ->
+private suspend fun awaitInFlightResolve(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false, preferDirect: Boolean = false, preferSoft: Boolean = false, preferLargest: Boolean = false) {
+    resolveInFlight[resolveCoalesceKey(titleId, number, audio, quality, serverOverride, preferSmaller, preferDirect, preferSoft, preferLargest)]?.let { deferred ->
         runCatching { deferred.await() }
     }
 }
@@ -4799,8 +5049,8 @@ private suspend fun awaitInFlightResolve(titleId: Long, number: Int, audio: Stri
 // the old code started a new full race and only then awaited
 // the coalesced one, so a chip tap doubled the race it was
 // about to wait for.
-private fun isResolveInFlight(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false, preferDirect: Boolean = false): Boolean =
-    resolveInFlight.containsKey(resolveCoalesceKey(titleId, number, audio, quality, serverOverride, preferSmaller, preferDirect))
+private fun isResolveInFlight(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false, preferDirect: Boolean = false, preferSoft: Boolean = false, preferLargest: Boolean = false): Boolean =
+    resolveInFlight.containsKey(resolveCoalesceKey(titleId, number, audio, quality, serverOverride, preferSmaller, preferDirect, preferSoft, preferLargest))
 
 // 2.0-dev2.5 Defect 5 tax 3 — the coalesce key for a resolve:
 // the ResolveCache key (title | episode | audio | quality) PLUS
@@ -4823,7 +5073,7 @@ private fun isResolveInFlight(titleId: Long, number: Int, audio: String, quality
 // vs fresh resolve, so a cached win from the "wrong" list
 // server is never served — the confirm just resolves fresh,
 // sequentially, instead of concurrently.
-private fun resolveCoalesceKey(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false, preferDirect: Boolean = false): String {
+private fun resolveCoalesceKey(titleId: Long, number: Int, audio: String, quality: String, serverOverride: Int?, preferSmaller: Boolean = false, preferDirect: Boolean = false, preferSoft: Boolean = false, preferLargest: Boolean = false): String {
     val first = serverOverride?.takeIf { it in 1..10 } ?: 0
     // 2.0-dev2.8: the mode is in the key — a warm started under
     // fastest-first must never satisfy a confirm under
@@ -4832,7 +5082,10 @@ private fun resolveCoalesceKey(titleId: Long, number: Int, audio: String, qualit
     // 2.0-dev2.10: the direct-download mode joins the key the
     // same way ("d"/"h"), so a warm under one combination of the
     // two toggles never satisfies a confirm under another.
-    return "$titleId|$number|${audioCode(audio)}|$quality|$first|${if (preferSmaller) "s" else "f"}${if (preferDirect) "d" else "h"}"
+    // 2.0-dev2.14: the two tri-states join the key the same way —
+    // size "s"/"L"/"f", subs "d"/"S"/"h" (same letters as the
+    // ResolveCache key).
+    return "$titleId|$number|${audioCode(audio)}|$quality|$first|${when { preferSmaller -> "s"; preferLargest -> "L"; else -> "f" }}${when { preferDirect -> "d"; preferSoft -> "S"; else -> "h" }}"
 }
 
 private class EpisodeListState(
@@ -4948,7 +5201,7 @@ private class EpisodeListState(
         // 2.0-dev2.6 (E): the await now reads the SHARED map
         // (awaitInFlightResolve), so a warm started by the OTHER
         // state (detail vs sheet) coalesces too.
-        awaitInFlightResolve(title.id, episode.number, episode.audio, quality, serverOverride, preferSmallerFiles(context), preferDirectDownloads(context))
+        awaitInFlightResolve(title.id, episode.number, episode.audio, quality, serverOverride, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context))
         val outcome = resolveAndEnqueue(
             context, title, episode, quality,
             serverOverride = serverOverride,
@@ -5067,13 +5320,18 @@ private class EpisodeListState(
         // removed only when THIS deferred completes.
         // 2.0-dev2.9: via startWarmResolve (shared warm-starter,
         // 4-permit cap); not tracked for sheet-dismiss cancel.
+        // 2.0-dev2.14: a blank quality (the "ask" default) warms
+        // at 1080p — a warm keyed "" would never be hit by the
+        // confirm, which resolves under the picked one. The key
+        // and the resolve use the SAME guarded value.
+        val q0 = quality.ifBlank { "1080" }
         startWarmResolve(
-            resolveCoalesceKey(title.id, row.number, pullAudio, quality, initialServer, preferSmallerFiles(context), preferDirectDownloads(context)),
+            resolveCoalesceKey(title.id, row.number, pullAudio, q0, initialServer, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context)),
             trackSheetKey = null,
         ) {
             resolveOnly(
                 context, title, row.info.copy(audio = pullAudio),
-                quality, serverOverride = initialServer,
+                q0, serverOverride = initialServer,
                 anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
                 listServer = if (row.fromMediaIndex) null else fallbackServer,
             )
@@ -5100,41 +5358,13 @@ private class EpisodeListState(
         // flight is a no-op (putIfAbsent) — the sheet's
         // await-first check makes that the common path.
         startWarmResolve(
-            resolveCoalesceKey(title.id, row.number, audio, quality, server, preferSmallerFiles(context), preferDirectDownloads(context)),
+            resolveCoalesceKey(title.id, row.number, audio, quality, server, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context)),
             trackSheetKey = "${title.id}|${row.number}",
         ) {
             resolveOnly(
                 context, title, row.info.copy(audio = audioCode(audio)),
                 quality, serverOverride = server,
                 anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
-                listServer = if (row.fromMediaIndex) null else fallbackServer,
-            )
-        }
-    }
-
-    // 2.0-dev2.13: BOARD collect for the sheet's CURRENT chips —
-    // the collect-all twin of warmSizeFor. Same shape: via
-    // startWarmResolve (shared warm-starter, 4-permit cap), tracked
-    // under the same sheetWarms key so cancelSheetWarms cancels it
-    // on dismiss. The coalesce key is "board|" + the winner-only
-    // key with a null server override (the board is the full
-    // per-server list, server-independent), so a collect for one
-    // combo never coalesces with another combo's — or with a
-    // winner-only warm. Await-first: a fresh (complete, < 90 s)
-    // board is served as-is, and an in-flight collect is a no-op
-    // (putIfAbsent inside startWarmResolve).
-    fun collectBoardFor(row: EpisodeRow, quality: String, audio: String) {
-        val preferSmaller = preferSmallerFiles(context)
-        val preferDirect = preferDirectDownloads(context)
-        val key = serverSizeBoardKey(title.id, row.number, audio, quality, preferSmaller, preferDirect)
-        if (ServerSizeBoard.fresh(key)) return
-        startWarmResolve(
-            "board|" + resolveCoalesceKey(title.id, row.number, audio, quality, null, preferSmaller, preferDirect),
-            trackSheetKey = "${title.id}|${row.number}",
-        ) {
-            collectBoard(
-                context, title, row.info.copy(audio = audioCode(audio)),
-                quality, anilistId = row.anilistId, fromMediaIndex = row.fromMediaIndex,
                 listServer = if (row.fromMediaIndex) null else fallbackServer,
             )
         }
@@ -5150,20 +5380,20 @@ private class EpisodeListState(
     // Silent like preResolveRow: a failure changes nothing, the
     // sheet just shows no size for that combo.
     fun warmAllSheetCombos(row: EpisodeRow) {
+        // 2.0-dev2.14: a blank quality/audio (the "ask" default)
+        // warms at 1080p/Sub — a warm keyed "" would never be hit
+        // by the confirm, which resolves under the picked values.
+        val q0 = quality.ifBlank { "1080" }
+        val a0 = initialAudio.takeIf { it == "Sub" || it == "Dub" } ?: "Sub"
         val qualities = listOf("360", "480", "720", "1080")
-        val otherAudio = if (initialAudio == "Sub") "Dub" else "Sub"
+        val otherAudio = if (a0 == "Sub") "Dub" else "Sub"
         val ordered = buildList {
-            add(quality to initialAudio)
-            qualities.filter { it != quality }.forEach { add(it to initialAudio) }
-            add(quality to otherAudio)
-            qualities.filter { it != quality }.forEach { add(it to otherAudio) }
+            add(q0 to a0)
+            qualities.filter { it != q0 }.forEach { add(it to a0) }
+            add(q0 to otherAudio)
+            qualities.filter { it != q0 }.forEach { add(it to otherAudio) }
         }
-        ordered.forEachIndexed { index, (q, a) ->
-            // 2.0-dev2.13: the OPENING combo collects the full
-            // board; the other 7 combos keep today's cheap
-            // winner-only warm.
-            if (index == 0) collectBoardFor(row, q, a) else warmSizeFor(row, q, a, initialServer)
-        }
+        ordered.forEach { (q, a) -> warmSizeFor(row, q, a, initialServer) }
     }
 
     // 2.0-dev2.9: cancel this episode's still-pending sheet warms
@@ -5198,8 +5428,8 @@ private class EpisodeListState(
     fun downloadSelected() {
         val chosen = rows?.filter { selected.contains(it.number) } ?: return
         if (chosen.isEmpty()) return
-        val q = prefs.getString("quality", "1080p")?.removeSuffix("p")?.takeIf { it.isNotBlank() } ?: "1080"
-        val a = prefs.getString("language", "Sub") ?: "Sub"
+        val q = prefs.getString("quality", "1080p")?.removeSuffix("p")?.takeIf { it.isNotBlank() && it != "ask" } ?: "1080"
+        val a = (prefs.getString("language", "Sub") ?: "Sub").takeIf { it != "ask" } ?: "Sub"
         val s = preferredServerNumber(context)
         scope.launch {
             var ok = 0
@@ -5336,7 +5566,12 @@ private fun rememberEpisodeListState(
     // Pull audio for media-index rows (which have no per-episode
     // audio): the sheet toggle when set, else the Settings language.
     state.pullAudio = audioCode(audioFilter ?: (prefs.getString("language", "Sub") ?: "Sub"))
-    state.initialAudio = audioFilter ?: (prefs.getString("language", "Sub") ?: "Sub")
+    // 2.0-dev2.14: "ask" language → no audio pre-selected in the
+    // confirm sheet (""), so the user picks Sub or Dub there.
+    // pullAudio still falls back to "jpn" above (audioCode("ask")
+    // = "jpn") — the list needs SOME audio to load; the confirm
+    // applies the chosen one at pull time.
+    state.initialAudio = (audioFilter ?: (prefs.getString("language", "Sub") ?: "Sub")).takeIf { it != "ask" } ?: ""
     state.initialServer = serverOverride ?: preferredServerNumber(context)
     state.onDownloadStarted = onDownloadStarted
     val jobs by DownloadEngine.jobs.collectAsState()
@@ -5726,25 +5961,28 @@ private fun EpisodeListDialogs(state: EpisodeListState) {
     }
     // 2.0-dev1.7: the per-episode confirm sheet.
     state.confirmRow?.let { row ->
-        // 2.0-dev2.13: warm every chip combo (4 qualities x
-        // Sub/Dub) now, so a chip tap hits the cache instead
-        // of starting a fresh multi-second race. The opening
-        // combo collects the full per-server board (collect-all
-        // race); the other 7 warm winner-only. The old
-        // preResolveRow for the opening combo is gone — the
-        // collect stores the same winner in ResolveCache, so a
-        // second winner-only race next to it would be pure waste.
+        // 2.0-dev2.3: pre-resolve when the sheet opens, so the link
+        // is already cached by the time the user taps Download.
         androidx.compose.runtime.LaunchedEffect(row) {
+            state.preResolveRow(row)
+            // 2.0-dev2.9: warm every chip combo (4 qualities x
+            // Sub/Dub) now, so a chip tap hits the cache instead
+            // of starting a fresh multi-second race. The opening
+            // combo above coalesces with its twin inside.
             state.warmAllSheetCombos(row)
         }
         EpisodeDownloadSheet(
             row = row, title = state.title,
-            initialQuality = state.quality,
-            initialAudio = state.initialAudio,
+            // 2.0-dev2.14: "ask" quality/language → the sheet opens
+            // with no chip selected (""), so the user picks there.
+            // state.quality is already the 1080 fallback for
+            // warming; only the SHEET's initial value is blanked.
+            initialQuality = if (state.prefs.getString("quality", "1080p") == "ask") "" else state.quality,
+            initialAudio = if (state.prefs.getString("language", "Sub") == "ask") "" else state.initialAudio,
             initialServer = state.initialServer,
             onDismiss = { state.cancelSheetWarms(row); state.onConfirmDismiss() },
             onConfirm = { q, a, s -> state.onConfirm(q, a, s) },
-            onCollectBoard = { q, a -> state.collectBoardFor(row, q, a) },
+            onWarmSize = { q, a, s -> state.warmSizeFor(row, q, a, s) },
         )
     }
 }
@@ -6226,8 +6464,11 @@ private fun ClearanceWebViewDialog(onDone: () -> Unit, onCancel: () -> Unit) {
 fun DetailScreen(title: ApiTitle, onBack: () -> Unit, onPull: (ApiTitle) -> Unit, isSaved: Boolean = false, onSaveToggle: () -> Unit = {}, heroPosterHidden: Boolean = false, detailFade: Float = 1f, onPosterBounds: ((Rect) -> Unit)? = null, onPosterImageBounds: ((Rect) -> Unit)? = null, targetEpisode: Int? = null, onDownloadStarted: ((String) -> Unit)? = null) {
     val context = LocalContext.current
     // 2.0-dev1.0: episode rows enqueue directly at the saved quality.
+    // 2.0-dev2.14: "ask" quality → the list warms at 1080p (the
+    // old default); the confirm sheet itself asks (see
+    // EpisodeListDialogs, which passes "" as initialQuality).
     val qualityPref = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
-        .getString("quality", "1080p")?.removeSuffix("p")?.takeIf { it.isNotBlank() } ?: "1080"
+        .getString("quality", "1080p")?.removeSuffix("p")?.takeIf { it.isNotBlank() && it != "ask" } ?: "1080"
     // 2.0-dev1.9 (compile fix): the episode-list state is created
     // here, in @Composable context, before the LazyColumn — the
     // plain EpisodeList(state) emission inside the LazyColumn
@@ -6532,8 +6773,8 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, onDownloadStarted: ((S
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val prefs = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
-    var quality by remember { mutableStateOf(prefs.getString("quality", "1080p")?.removeSuffix("p")?.takeIf { it.isNotBlank() } ?: "1080") }
-    var audio by remember { mutableStateOf(prefs.getString("language", "Sub") ?: "Sub") }
+    var quality by remember { mutableStateOf(prefs.getString("quality", "1080p")?.removeSuffix("p")?.takeIf { it.isNotBlank() && it != "ask" } ?: "") }
+    var audio by remember { mutableStateOf((prefs.getString("language", "Sub") ?: "Sub").takeIf { it != "ask" } ?: "") }
     var loadedEpisodes by remember { mutableStateOf<List<EpisodeInfo>?>(null) }
     // 2.0-dev1.6: what kind of list the rows came from — the season
     // loop resolves media-index rows by episode number and fallback
@@ -6552,6 +6793,11 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, onDownloadStarted: ((S
     var sheetReloadKey by remember { mutableStateOf(0) }
     var seasonRetryPending by remember { mutableStateOf(false) }
     fun startSeasonDownload() {
+        // 2.0-dev2.14: "ask" defaults leave quality/audio blank
+        // until the user picks — the season is blocked with a
+        // toast, never enqueued on a blank.
+        if (quality.isBlank()) { showToast(context, "Pick a quality first"); return }
+        if (audio != "Sub" && audio != "Dub") { showToast(context, "Pick Sub or Dub first"); return }
         val eps = loadedEpisodes ?: return
         if (seasonBusy) return
         seasonBusy = true
@@ -6571,7 +6817,7 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, onDownloadStarted: ((S
                 // pre-resolve warms. Await the shared in-flight
                 // resolve first; its win lands in ResolveCache, so
                 // the resolveAndEnqueue below is a cache hit.
-                awaitInFlightResolve(title.id, ep.number, ep.audio, quality, serverChoice, preferSmallerFiles(context), preferDirectDownloads(context))
+                awaitInFlightResolve(title.id, ep.number, ep.audio, quality, serverChoice, preferSmallerFiles(context), preferDirectDownloads(context), preferSoftDownloads(context), preferLargestFiles(context))
                 when (val outcome = resolveAndEnqueue(
                     context, title, ep, quality,
                     serverOverride = serverChoice,
@@ -6700,7 +6946,7 @@ fun DownloadSheet(title: ApiTitle, onDismiss: () -> Unit, onDownloadStarted: ((S
                     colors = ButtonDefaults.buttonColors(containerColor = Pink),
                     modifier = Modifier.fillMaxWidth(),
                     enabled = !loadedEpisodes.isNullOrEmpty() && !seasonBusy,
-                ) { Text(if (seasonBusy) "Resolving…" else "Download Season ($quality" + "p)", color = OnAccent, fontWeight = FontWeight.Bold) }
+                ) { Text(if (seasonBusy) "Resolving…" else if (quality.isBlank()) "Download Season" else "Download Season ($quality" + "p)", color = OnAccent, fontWeight = FontWeight.Bold) }
                 if (seasonError != null) {
                     Spacer(Modifier.height(8.dp))
                     Text(seasonError!!, color = Color(0xFFFF3B30), fontSize = 13.sp, lineHeight = 19.sp)

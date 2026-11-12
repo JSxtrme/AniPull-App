@@ -17,9 +17,16 @@ now) — this repo is where the Android app actually lives.
 
 Honest state, November 2026:
 
-- ✅ Browsing and search work, live, via the AniLab metadata API (no key).
+- ✅ Browsing and search work, live, via the AniLab metadata API (no key),
+  with episode counts from AniList as the fallback.
   Home rows, search-as-you-type, detail pages, season switcher, watch-order
   guide, genre catalog rows, settings, downloads page shell.
+- ✅ **1.9 is the current stable release** (versionCode 50, 2026-11-06).
+  In-app updater with Dev/Stable channels, long-press hold sheet
+  (Save / Download / Share), Library with backup & restore, onboarding,
+  Editor's Picks carousel, Explore grid, Settings hub, AMOLED Black,
+  Light mode, and Crash Logs. The updater downloads the new APK in-app
+  and installs it in place — no manual APK hunting.
 - ⚠️ **Downloads are still demo-only.** Tapping download shows
   "Not wired yet". The download engine / resolver stage has not started:
   no per-episode pull, no queue, no pause/resume yet. AniLab gives no
@@ -33,24 +40,25 @@ Honest state, November 2026:
 
 Grab an APK from the
 [Releases](https://github.com/JSxtrme/AniPull-App/releases) page and
-install it over the previous build — every build so far is signed with the
-same debug key on purpose, so this updates in place:
+install it over the previous build — every build since 1.9-dev4.8.8 is
+signed with the same stable release key, so this updates in place:
 
 ```sh
 adb install -r anipull-<version>.apk
 ```
 
 If Android complains about a signature mismatch, uninstall first
-(`adb uninstall com.js.anipull`) and then install fresh. A proper release
-signing key is a later step, before any public release.
+(`adb uninstall com.js.anipull`) and then install fresh. Builds before
+the stable-key switch (1.8 and earlier dev builds) used a different key
+and need that one uninstall.
 
 | | |
 | --- | --- |
 | Package | `com.js.anipull` |
 | Min / target SDK | 26 / 36 (compile SDK 37) |
-| Size | ~7.5 MB |
+| Size | ~3.7 MB (R8 + resource shrinking since 1.9) |
 | Language / UI | Kotlin + Jetpack Compose (Material 3) |
-| Font | Outfit (OFL, bundled in `res/font`) |
+| Font | Outfit (OFL, bundled in `res/font`) + SF Pro Display (headings) |
 
 ## Features
 
@@ -94,8 +102,10 @@ adb install -r app/build/outputs/apk/release/app-release.apk
 
 `local.properties` is intentionally not committed — it only holds your
 local SDK path. Nothing in this repo is a secret: no API keys, no tokens,
-no passwords, no signing keys. The debug signing key lives in your
-`~/.android` folder, not in this repo.
+no passwords, no signing keys. The release signing key lives outside the
+repo (local `signing.properties` + keystore, gitignored); without it the
+build falls back to a debug key. GitHub Actions builds use the same
+release key from encrypted repository secrets.
 
 ## Project layout
 
@@ -107,6 +117,10 @@ app/src/main/
     App.kt                        # the whole UI (~2000 lines, Compose)
     AniLab.kt                     # AniLab API client + poster cache
     DemoData.kt                   # 15-title demo fallback catalog
+    UpdateChecker.kt              # in-app updater (channels, download, SHA check)
+    UpdateSheet.kt                # update bottom sheet + changelog card
+    Settings.kt                   # Settings hub + sub-pages
+    CrashLogs.kt                  # crash log capture (filesDir/crash_logs)
   res/
     drawable/                     # vector icons + launcher icon layers
     mipmap-anydpi-v26/            # adaptive launcher icon
@@ -129,6 +143,7 @@ gradle.properties
 | 1.6 | Sub/Dub chips, folder picker, thicker/less-laggy trail, How section removed, extra genre catalog rows (Action, Romance, Comedy, Fantasy) |
 | 1.7 | Logo swapped to the v2 mark: pink diamond + two rounded chevrons + white arrow, dark launcher background |
 | 1.8 | Themed/monochrome launcher icon simplified to diamond + chevrons only (no arrow) — in a single colour the white arrow merged into the white chevrons. Colour icon unchanged. *Phone check pending.* |
+| 1.9 | **Stable.** In-app updater (Dev/Stable channels, verified end to end on-device), redesigned update changelog card, long-press hold sheet, Library with backup & restore, onboarding, Editor's Picks carousel, Explore grid, Settings hub, AMOLED Black, Light mode, Crash Logs, R8 + resource shrinking (APK 10.2 MB → 3.7 MB). 33 new features, 26 fixes. Signed with the stable release key. |
 
 ## Design notes
 
@@ -137,9 +152,10 @@ gradle.properties
   layer are designed separately for exactly this reason — the monochrome
   layer is white-on-transparent, no pink square.
 - **Metadata:** AniLab (`https://anilab2.amdapi.click/api`, no key) is
-  the metadata provider. Its home/search endpoints return poster + id
+  the metadata provider — titles, posters, search, home. Its home/search endpoints return poster + id
   only, so titles are enriched one `/post` call at a time, and episode
-  counts are never invented.
+  counts are never invented. Episode counts fall back to AniList
+  (https://anilist.co, no key) when AniLab has none.
 - **Sources, for later:** AnimePahe, AnimeTosho, AnimeOut. Pahe cannot be
   a Vercel backend (Cloudflare blocks datacenter IPs, verified live) —
   that is a website-repo problem, not an app problem; on-device, a WebView
@@ -168,6 +184,7 @@ be dishonest not to say so plainly:
   hero poster spring (stiffness 195, critically damped) that the
   home-to-detail transition is built on.
 - **AniLab** — the metadata API that makes browsing work at all.
+- **AniList** — the episode-count fallback when AniLab has none.
 - **Outfit font (OFL)** — bundled in `res/font`.
 
 In short: Anipull's look is its own (near-black, pink, Outfit/SF),
@@ -176,4 +193,4 @@ Nuvio. Thanks, Nuvio team.
 
 ## License / use
 
-Personal project, private repo. Don't redistribute builds as your own.
+Personal project, public repo. Don't redistribute builds as your own.

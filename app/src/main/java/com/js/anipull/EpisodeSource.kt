@@ -7,14 +7,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.selects.onTimeout
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicLong
 
 // 2.0-dev1.6 ENGINE — episode sources (multi-source).
 // A source turns an AniLab title into an episode list and resolves one
@@ -260,132 +256,6 @@ object EpisodeSources {
     fun animeHeaven(): EpisodeSource = AnimeHeavenEpisodeSource()
 }
 
-// 2.0-dev2.13 — PER-SERVER SIZE BOARD (download sheet, "File size by
-// server"). Today only the race WINNER survives (resolveOnly returns
-// one ResolvedDownload, ResolveCache stores only that winner); the
-// board keeps the FULL per-server outcome list for one combo, streamed
-// as racers land, so the sheet can show one row per server with that
-// server's file size for the selected quality/language. In-memory
-// ONLY — never persisted: links expire (Pahe 90 s), so a board is
-// re-collected per sheet open. Key shape mirrors
-// ResolveCache.cacheKey: title|ep|audio|quality|mode, mode = the two
-// toggles ("s"/"f" + "d"/"h"). Thread-safety: written from race
-// coroutines, read from the UI — a ConcurrentHashMap of immutable
-// BoardState snapshots plus a MutableStateFlow holding an immutable
-// snapshot map (the map is replaced on each mutation so collectors
-// see updates). The sheet UI reads `boards`; the race feeds it via
-// `onBoardEntry` (see raceGroup).
-enum class BoardEntryState { CHECKING, KNOWN, UNKNOWN, NO_FILE }
-
-data class BoardEntry(
-    val serverNumber: Int,
-    val state: BoardEntryState,
-    val sizeLabel: String? = null, // from ResolvedLink.sizeLabel(), e.g. "~369 MB" or "131 MB"
-    val sizeBytes: Long? = null,
-    val isDirect: Boolean = false, // link is ResolvedLink.DirectMp4
-    val offeredHeight: Int? = null, // link.offeredHeight()
-    val seq: Long = 0, // arrival order, assigned by the store (monotonic counter)
-)
-
-data class BoardState(
-    val entries: Map<Int, BoardEntry>,
-    val complete: Boolean,
-    val winnerServer: Int?,
-    val updatedAtMs: Long,
-)
-
-object ServerSizeBoard {
-    // 2.0-dev2.13: board TTL — same 90 s as the Pahe link TTL, the
-    // shortest-lived link; a complete board older than this is stale.
-    private const val BOARD_TTL_MS = 90_000L
-
-    private val seqCounter = AtomicLong(0)
-    private val store = ConcurrentHashMap<String, BoardState>()
-    private val _boards = MutableStateFlow<Map<String, BoardState>>(emptyMap())
-    val boards: StateFlow<Map<String, BoardState>> = _boards.asStateFlow()
-
-    // Key shape mirrors ResolveCache.cacheKey
-    // (title|ep|audio|quality|mode, mode = s/f + d/h).
-    fun key(titleId: Long, number: Int, audio: String, quality: String, preferSmaller: Boolean, preferDirect: Boolean): String =
-        "$titleId|$number|${audioCode(audio)}|$quality|${if (preferSmaller) "s" else "f"}${if (preferDirect) "d" else "h"}"
-
-    // (Re)initialises all entries to CHECKING, complete=false,
-    // winnerServer=null. Any previous board under this key is
-    // discarded — a re-collect starts clean, never merges with
-    // stale rows from an earlier collect.
-    fun start(key: String, serverNumbers: List<Int>) {
-        val now = System.currentTimeMillis()
-        val entries = serverNumbers.distinct().associateWith { BoardEntry(it, BoardEntryState.CHECKING) }
-        store[key] = BoardState(entries, complete = false, winnerServer = null, updatedAtMs = now)
-        publish()
-    }
-
-    // Assigns seq from a monotonic counter; updates updatedAtMs.
-    // Replaces (never merges into) the entry for this server, so a
-    // later arrival for the same server overwrites the earlier one
-    // with a newer seq.
-    fun putEntry(key: String, entry: BoardEntry) {
-        val now = System.currentTimeMillis()
-        val stamped = entry.copy(seq = seqCounter.incrementAndGet())
-        store.compute(key) { _, cur ->
-            val base = cur ?: BoardState(emptyMap(), complete = false, winnerServer = null, updatedAtMs = now)
-            base.copy(entries = base.entries + (stamped.serverNumber to stamped), updatedAtMs = now)
-        }
-        publish()
-    }
-
-    // Entry -> NO_FILE, only if not already KNOWN/UNKNOWN (a known
-    // file must never be overwritten by a later no-file verdict for
-    // the same server). A missing entry is created as NO_FILE.
-    // The verdict gets a fresh seq, like any other arrival.
-    fun markNoFile(key: String, serverNumber: Int) {
-        val now = System.currentTimeMillis()
-        store.compute(key) { _, cur ->
-            val base = cur ?: BoardState(emptyMap(), complete = false, winnerServer = null, updatedAtMs = now)
-            val existing = base.entries[serverNumber]
-            if (existing != null && (existing.state == BoardEntryState.KNOWN || existing.state == BoardEntryState.UNKNOWN)) base
-            else base.copy(
-                entries = base.entries + (serverNumber to BoardEntry(serverNumber, BoardEntryState.NO_FILE, seq = seqCounter.incrementAndGet())),
-                updatedAtMs = now,
-            )
-        }
-        publish()
-    }
-
-    // complete=true, winnerServer set, updatedAtMs. Entries are
-    // left exactly as they landed — completing never rewrites a row.
-    fun setWinnerAndComplete(key: String, winnerServer: Int?) {
-        val now = System.currentTimeMillis()
-        store.compute(key) { _, cur ->
-            val base = cur ?: BoardState(emptyMap(), complete = false, winnerServer = null, updatedAtMs = now)
-            base.copy(complete = true, winnerServer = winnerServer, updatedAtMs = now)
-        }
-        publish()
-    }
-
-    // True when a COMPLETE board exists and age < 90_000 ms. An
-    // incomplete (still collecting) board is never fresh, however
-    // recent — the sheet must keep streaming, not serve a partial
-    // board as final.
-    fun fresh(key: String): Boolean {
-        val board = store[key] ?: return false
-        if (!board.complete) return false
-        val ageMs = System.currentTimeMillis() - board.updatedAtMs
-        return ageMs >= 0 && ageMs < BOARD_TTL_MS
-    }
-
-    fun clear(key: String) {
-        store.remove(key)
-        publish()
-    }
-
-    // Replace the flow's map with a fresh immutable snapshot so
-    // collectors see every mutation.
-    private fun publish() {
-        _boards.value = store.toMap()
-    }
-}
-
 // Try candidates in priority order. 2.0-dev2.7: the win tier is
 // the REQUESTED height, not the floor — a link that merely meets
 // the floor (one step down, e.g. 720p for a 1080p request) is
@@ -439,6 +309,23 @@ object ServerSizeBoard {
 // mode never touches the quality floor or the exact-tier rules.
 // OFF (default) is byte-for-byte the old behaviour: first proven-
 // exact arrival crowns immediately, zero added latency.
+//
+// 2.0-dev2.14: the subs + size TRI-STATES, same uniform model.
+// Subs: Hard = preferDirect (DDL-first phased race, HLS fallback);
+// Soft = preferSoft (HLS-first phased race, DDL fallback); Both =
+// neither (one parallel race, today's behaviour). Size: Best =
+// preferLargest (mirror of preferSmaller — biggest known-size
+// exact wins); Smallest = preferSmaller; Fastest = neither (first
+// arrival wins). Two booleans each, mutually exclusive in the UI
+// (a race defensively treats preferDirect as winning if both subs
+// flags are somehow on). Phase 1 races only the preferred-kind
+// servers (Hard: {2, 10}; Soft: all but 10) with a BOUNDED wait
+// (RESOLVE_PHASE_WAIT_MS); phase 2 races the rest only when phase 1
+// holds no preferred-kind exact. The size compare happens inside
+// the winning subs phase's pool first. Quality-tier guardrail
+// UNCHANGED: only exact-tier (offered >= requested) links ever
+// compete, so a below-quality DDL can never beat a
+// quality-meeting HLS.
 object MultiSourceResolver {
     // 2.0-dev2.9: was 3 — batch [7,8,9] could not start until
     // batches 1-2 fully ended, so Server 8 waited up to ~30 s
@@ -449,6 +336,15 @@ object MultiSourceResolver {
     // race at once now.
     private const val RESOLVE_RACE_BATCH = 10
     private const val RESOLVE_ATTEMPT_TIMEOUT_MS = 15_000L
+    // 2.0-dev2.14: BOUNDED wait for a phased race's first phase.
+    // A phase must not hold the fallback hostage: if no
+    // preferred-kind exact has arrived within this long, the
+    // phase ends with what it has and the fallback phase runs.
+    // 8 s covers Server 10's gate fetch + one retry and
+    // Server 2's legs; the typical phase answers in 1–3 s, so
+    // the no-match case pays ~1–3 s extra, never the full 15 s
+    // attempt cap on top of the fallback race.
+    private const val RESOLVE_PHASE_WAIT_MS = 8_000L
 
     suspend fun resolveWithFailover(
         candidates: List<EpisodeSource>,
@@ -467,17 +363,15 @@ object MultiSourceResolver {
         // exact-tier (offered >= requested) links compete, so a
         // 360p DDL can never beat a 1080p HLS.
         preferDirect: Boolean = false,
-        // 2.0-dev2.13: collect-all mode (per-server size board) —
-        // exact-tier arrivals PARK instead of crowning and the race
-        // runs until every racer has arrived, so the caller gets
-        // the full per-server outcome list (see raceGroup). The
-        // winner is then the first exact candidate in arrival
-        // order (fastest) unless preferSmaller/preferDirect pick
-        // otherwise — winner precedence is unchanged. onBoardEntry
-        // fires once per racer arrival (see raceGroup); Worker B
-        // feeds it into ServerSizeBoard.
-        collectAll: Boolean = false,
-        onBoardEntry: ((BoardEntry) -> Unit)? = null,
+        // 2.0-dev2.14: soft-subs mode — the mirror of
+        // preferDirect. Among exact-tier links, an HLS master
+        // (separate soft subs) wins over a direct MP4. Same
+        // quality rules: only exact-tier links compete.
+        preferSoft: Boolean = false,
+        // 2.0-dev2.14: largest-file mode — the mirror of
+        // preferSmaller. The race waits, compares sizes, and the
+        // biggest known-size exact wins. Same parking rules.
+        preferLargest: Boolean = false,
     ): ResolvedDownload {
         // 2.0-dev1.9 TEMPORARY download diagnostics: every resolve
         // attempt is logged (server number, result/error, latency)
@@ -487,8 +381,9 @@ object MultiSourceResolver {
             "RESOLVE",
             "start: ep $number ${audio.lowercase()} $quality, candidates=${candidates.map { it.serverNumber }}" +
                 (if (preferSmaller) ", prefer-smaller" else "") +
+                (if (preferLargest) ", prefer-largest" else "") +
                 (if (preferDirect) ", prefer-direct" else "") +
-                (if (collectAll) ", collect-all" else ""),
+                (if (preferSoft) ", prefer-soft" else ""),
         )
         if (candidates.isEmpty()) {
             DownloadLogs.log("RESOLVE", "no candidates — nothing to try")
@@ -531,11 +426,58 @@ object MultiSourceResolver {
         // smallest-file comparison (see raceGroup) — collected
         // across ALL batches, picked only after the last one.
         val exactCandidates = mutableListOf<ResolvedDownload>()
-        for (group in candidates.chunked(RESOLVE_RACE_BATCH)) {
-            val result = raceGroup(group, title, anilistId, number, audio, quality, onAttempt, preferSmaller, preferDirect, collectAll, onBoardEntry)
+        // 2.0-dev2.14: uniform phased race for the subs tri-state.
+        // Hard (preferDirect) races DDL-capable servers first
+        // (Server 2's DDL leg + Server 10), then the HLS rest;
+        // Soft (preferSoft) races the HLS servers first (every
+        // server except 10), then Server 10 alone. Both (neither
+        // on) keeps today's single parallel race over all 10.
+        // Defensive: if both flags are somehow on, Hard wins
+        // (preferDirect is the older, user-visible toggle). Only
+        // phase 1 gets a deadline (RESOLVE_PHASE_WAIT_MS) — the
+        // fallback phase always runs to completion. After phase 1,
+        // if preferred-kind exacts already exist, phase 2 can add
+        // nothing to the preferred pool (its servers only return
+        // the other kind), so the loop stops there and the pool
+        // pick below decides.
+        val preferDirectMode = preferDirect && !preferSoft
+        val preferSoftMode = preferSoft && !preferDirect
+        val phased = preferDirectMode || preferSoftMode
+        val groups: List<List<EpisodeSource>> = when {
+            preferDirectMode -> listOf(
+                candidates.filter { it.serverNumber == 2 || it.serverNumber == 10 },
+                candidates.filter { it.serverNumber != 2 && it.serverNumber != 10 },
+            ).filter { it.isNotEmpty() }
+            preferSoftMode -> listOf(
+                candidates.filter { it.serverNumber != 10 },
+                candidates.filter { it.serverNumber == 10 },
+            ).filter { it.isNotEmpty() }
+            else -> candidates.chunked(RESOLVE_RACE_BATCH)
+        }
+        for ((groupIndex, group) in groups.withIndex()) {
+            val isPhase1 = phased && groupIndex == 0
+            val phaseDeadlineMs = if (isPhase1) System.currentTimeMillis() + RESOLVE_PHASE_WAIT_MS else null
+            if (isPhase1) DownloadLogs.log(
+                "RESOLVE",
+                "phased race: phase 1 = servers ${group.map { it.serverNumber }} (${if (preferDirectMode) "DDL first" else "HLS first"}), " +
+                    "phase 2 = ${if (groups.size > 1) "servers ${groups[1].map { it.serverNumber }}" else "none"}",
+            )
+            val result = raceGroup(group, title, anilistId, number, audio, quality, onAttempt, preferSmaller, preferDirectMode, preferSoftMode, preferLargest, phaseDeadlineMs)
             last = result.last
             if (result.winner != null) return result.winner
             exactCandidates += result.exactCandidates
+            if (isPhase1) {
+                val hasPreferred = exactCandidates.any {
+                    if (preferDirectMode) it.link is ResolvedLink.DirectMp4 else it.link is ResolvedLink.Hls
+                }
+                if (hasPreferred) {
+                    DownloadLogs.log(
+                        "RESOLVE",
+                        "phase 1 already holds preferred-kind exacts — skipping phase 2",
+                    )
+                    break
+                }
+            }
             if (result.downgrade != null) {
                 val offered = result.downgrade.link.offeredHeight() ?: 0
                 val bestOffered = bestDowngrade?.link?.offeredHeight() ?: 0
@@ -563,36 +505,29 @@ object MultiSourceResolver {
         // (offered >= requested), so a sub-request DDL — e.g.
         // JustAnime's 360p-only gigi file for a 1080p request —
         // can never reach this pick, let alone beat a 1080p HLS.
-        if (preferSmaller || preferDirect) {
-            val pool = if (preferDirect) {
-                val ddls = exactCandidates.filter { it.link is ResolvedLink.DirectMp4 }
-                if (ddls.isNotEmpty()) ddls else exactCandidates
-            } else exactCandidates
-            val best = if (preferSmaller) pickSmallestExact(pool) else pool.firstOrNull()
+        if (preferSmaller || preferLargest || preferDirect || preferSoft) {
+            // 2.0-dev2.14: the pool is built from the PREFERRED
+            // kind first (DDL for Hard, HLS for Soft, any for
+            // Both) and the size mode compares inside that pool —
+            // size never pulls the pick across subs kinds, and a
+            // fallback-kind exact only wins when the preferred
+            // kind has no exact at all.
+            val pool = when {
+                preferDirect -> exactCandidates.filter { it.link is ResolvedLink.DirectMp4 }.takeIf { it.isNotEmpty() } ?: exactCandidates
+                preferSoft -> exactCandidates.filter { it.link is ResolvedLink.Hls }.takeIf { it.isNotEmpty() } ?: exactCandidates
+                else -> exactCandidates
+            }
+            val best = when {
+                preferSmaller -> pickSmallestExact(pool)
+                preferLargest -> pickLargestExact(pool)
+                else -> pool.firstOrNull()
+            }
             best?.let {
                 DownloadLogs.log(
                     "RESOLVE",
                     (if (preferDirect && it.link is ResolvedLink.DirectMp4) "direct-download mode: winner Server ${it.serverNumber} (direct file) — " else "") +
-                        (if (preferSmaller) "smallest-file mode: winner Server ${it.serverNumber} — " else "winner Server ${it.serverNumber} — ") +
-                        "${it.link.sizeLabel() ?: "size unknown"} at ${it.link.offeredHeight() ?: "?"}p for $quality; " +
-                        "exact candidates: ${exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${if (it.link is ResolvedLink.DirectMp4) "direct" else "stream"}, ${it.link.sizeLabel() ?: "size unknown"})" }}",
-                )
-                return it
-            }
-        }
-        // 2.0-dev2.13: collect-all mode with neither toggle
-        // picking — the race parked every exact candidate and ran
-        // to completion, so the winner is the FIRST exact
-        // candidate in arrival order (fastest), exactly as the
-        // fastest-first path would have crowned it. When a toggle
-        // IS on, the pool block above already returned, so this
-        // only runs for the plain collect-all case. One log line
-        // per board collect completion: server outcomes + winner.
-        if (collectAll) {
-            exactCandidates.firstOrNull()?.let {
-                DownloadLogs.log(
-                    "RESOLVE",
-                    "board collect: winner Server ${it.serverNumber} — " +
+                        (if (preferSoft && it.link is ResolvedLink.Hls) "soft-subs mode: winner Server ${it.serverNumber} (stream) — " else "") +
+                        (if (preferSmaller) "smallest-file mode: winner Server ${it.serverNumber} — " else if (preferLargest) "largest-file mode: winner Server ${it.serverNumber} — " else "winner Server ${it.serverNumber} — ") +
                         "${it.link.sizeLabel() ?: "size unknown"} at ${it.link.offeredHeight() ?: "?"}p for $quality; " +
                         "exact candidates: ${exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${if (it.link is ResolvedLink.DirectMp4) "direct" else "stream"}, ${it.link.sizeLabel() ?: "size unknown"})" }}",
                 )
@@ -691,6 +626,13 @@ object MultiSourceResolver {
     // earlier arrival.
     private fun pickSmallestExact(candidates: List<ResolvedDownload>): ResolvedDownload? =
         candidates.minByOrNull { it.link.sizeBytes() ?: Long.MAX_VALUE }
+
+    // 2.0-dev2.14: largest-file mode — the mirror of
+    // pickSmallestExact. Unknown-size candidates sort last (a
+    // known size always beats an unknown one); ties keep the
+    // first arrival (maxByOrNull returns the first max).
+    private fun pickLargestExact(candidates: List<ResolvedDownload>): ResolvedDownload? =
+        candidates.maxByOrNull { it.link.sizeBytes() ?: Long.MIN_VALUE }
 
     // 2.0-dev2.8: smallest-file mode only. An HLS link that proved
     // the EXACT requested height gets its size attached from its
@@ -843,25 +785,6 @@ object MultiSourceResolver {
         }
     }
 
-    // 2.0-dev2.13: map one racer's outcome to a BoardEntry. The
-    // size fields always come from THIS server's link, never
-    // another server's data. For NO_FILE (downgrade / below-floor
-    // / Failed) the link's own size/offered values are still
-    // carried — the state is what tells the sheet the server has
-    // no file at the SELECTED quality (a downgrade file is not
-    // offered here); a Failed link carries nulls naturally.
-    // seq is NOT set here — ServerSizeBoard.putEntry assigns it
-    // from its monotonic counter on arrival.
-    private fun boardEntryFor(serverNumber: Int, link: ResolvedLink, state: BoardEntryState): BoardEntry =
-        BoardEntry(
-            serverNumber = serverNumber,
-            state = state,
-            sizeLabel = link.sizeLabel(),
-            sizeBytes = link.sizeBytes(),
-            isDirect = link is ResolvedLink.DirectMp4,
-            offeredHeight = link.offeredHeight(),
-        )
-
     // 2.0-dev2.8: with preferSmaller, an EXACT win parks exactly
     // the same way — the batch runs until ALL its racers arrive,
     // and the caller picks the smallest across ALL batches. The
@@ -878,11 +801,16 @@ object MultiSourceResolver {
         preferSmaller: Boolean = false,
         // 2.0-dev2.10: direct-download mode — see resolveWithFailover.
         preferDirect: Boolean = false,
-        // 2.0-dev2.13: collect-all mode + board feed — see
-        // resolveWithFailover. Both default off, so existing
-        // callers are byte-for-byte today's behaviour.
-        collectAll: Boolean = false,
-        onBoardEntry: ((BoardEntry) -> Unit)? = null,
+        // 2.0-dev2.14: soft-subs mode — see resolveWithFailover.
+        preferSoft: Boolean = false,
+        // 2.0-dev2.14: largest-file mode — see resolveWithFailover.
+        preferLargest: Boolean = false,
+        // 2.0-dev2.14: phase deadline (epoch ms) — null means this
+        // group runs to completion (phase 2 / unphased race).
+        // When set, the wait loop ends at the deadline with
+        // whatever arrived; the caller then runs the next phase
+        // or picks from the parked pools.
+        phaseDeadlineMs: Long? = null,
     ): RaceResult {
         val requestedHeight = qualityHeight(quality)
         val floor = qualityFloorFor(requestedHeight)
@@ -910,15 +838,7 @@ object MultiSourceResolver {
                     // free; a failed estimate just leaves the size
                     // unknown.
                     val enriched = enrichLink(raw)
-                    // 2.0-dev2.13: the attach step runs when
-                    // preferSmaller OR preferDirect OR collectAll
-                    // is on — this closes the dev2.8 gap (parked
-                    // HLS exacts under preferDirect, and all
-                    // parked exacts under collectAll, get sizes
-                    // attached). DDL links pass through untouched
-                    // as before; a failed estimate leaves the size
-                    // unknown.
-                    val r = if (preferSmaller || preferDirect || collectAll) attachExactHlsSizeIfNeeded(enriched, quality, audio, requestedHeight) else enriched
+                    val r = if (preferSmaller || preferLargest) attachExactHlsSizeIfNeeded(enriched, quality, audio, requestedHeight) else enriched
                     val tookMs = System.currentTimeMillis() - startedMs
                     when (r) {
                         is ResolvedLink.DirectMp4 -> {
@@ -959,12 +879,11 @@ object MultiSourceResolver {
         val outcomes = mutableListOf<String>()
         val arrivedNumbers = mutableSetOf<Int>()
         val pending = deferreds.toMutableList()
-        // 2.0-dev2.13: collect-all runs until pending is empty —
-        // exact arrivals park (below) instead of crowning, so
-        // `winner` stays null and the loop already runs to
-        // completion; the explicit collectAll term states the
-        // intent and guards it if a winner were ever set.
-        while (pending.isNotEmpty() && (collectAll || winner == null)) {
+        // 2.0-dev2.14: phase deadline — when set, the wait ends at
+        // the deadline with whatever arrived (parked pools and
+        // fallback tiers are still honoured by the caller).
+        var phaseTimedOut = false
+        while (pending.isNotEmpty() && winner == null && !phaseTimedOut) {
             select<Unit> {
                 pending.forEach { d ->
                     d.onAwait { (src, r, tookMs) ->
@@ -990,10 +909,6 @@ object MultiSourceResolver {
                                             "Server ${src.serverNumber}: master fetched, no RESOLUTION (single-variant) — parked as unprovable, above downgrade but below proven-exact",
                                         )
                                         if (unprovableFallback == null) unprovableFallback = download
-                                        // 2.0-dev2.13: board — the file
-                                        // exists but its quality is
-                                        // unprovable, so UNKNOWN.
-                                        onBoardEntry?.invoke(boardEntryFor(src.serverNumber, r, BoardEntryState.UNKNOWN))
                                     } else {
                                         // 2.0-dev2.6: still unknown after
                                         // the probe (fetch failed — the
@@ -1008,46 +923,43 @@ object MultiSourceResolver {
                                             "Server ${src.serverNumber}: quality still unknown after probing — parked, a known-quality link wins first",
                                         )
                                         if (unknownFallback == null) unknownFallback = download
-                                        // 2.0-dev2.13: board — file
-                                        // exists, quality/size
-                                        // unproven, so UNKNOWN.
-                                        onBoardEntry?.invoke(boardEntryFor(src.serverNumber, r, BoardEntryState.UNKNOWN))
                                     }
                                 } else if (offered >= requestedHeight) {
-                                    // 2.0-dev2.10: direct-download mode —
-                                    // a direct-file (DirectMp4) exact
+                                    // 2.0-dev2.10/2.14: subs-preference
+                                    // crowning. A preferred-kind exact
                                     // arrival crowns IMMEDIATELY when
-                                    // only preferDirect is ON: it is
-                                    // the fastest direct exact, and no
-                                    // size comparison waits on it.
-                                    // An HLS exact parks instead — a
-                                    // slower direct exact must still
-                                    // get its chance. When
-                                    // preferSmaller is ALSO on, the
-                                    // direct exact parks too (smallest
-                                    // among direct exacts wins).
-                                    // 2.0-dev2.13: collect-all parks
-                                    // a direct exact too — the board
-                                    // needs every server, so nothing
-                                    // crowns early in this mode.
-                                    val directExactCrownsNow = preferDirect && !preferSmaller && !collectAll && r is ResolvedLink.DirectMp4
-                                    if ((preferSmaller || preferDirect || collectAll) && !directExactCrownsNow) {
-                                        // 2.0-dev2.8: smallest-file
+                                    // only its subs mode is ON: a
+                                    // DirectMp4 for Hard, an HLS for
+                                    // Soft — it is the fastest
+                                    // preferred-kind exact, and no
+                                    // size comparison waits on it. The
+                                    // other kind parks instead — a
+                                    // slower preferred-kind exact must
+                                    // still get its chance. When a
+                                    // size mode is ALSO on, the
+                                    // preferred exact parks too
+                                    // (smallest/largest among
+                                    // preferred-kind exacts wins).
+                                    val directExactCrownsNow = preferDirect && !preferSmaller && !preferLargest && r is ResolvedLink.DirectMp4
+                                    val hlsExactCrownsNow = preferSoft && !preferSmaller && !preferLargest && r is ResolvedLink.Hls
+                                    if ((preferSmaller || preferLargest || preferDirect || preferSoft) && !directExactCrownsNow && !hlsExactCrownsNow) {
+                                        // 2.0-dev2.8/2.14: size/subs
                                         // mode — an exact arrival is
                                         // PARKED, not crowned. The
                                         // batch runs until ALL its
-                                        // racers arrive and the caller
-                                        // picks the smallest across
-                                        // ALL batches (see
-                                        // pickSmallestExact); an
+                                        // racers arrive (or the phase
+                                        // deadline hits) and the caller
+                                        // picks across ALL batches (see
+                                        // pickSmallestExact /
+                                        // pickLargestExact); an
                                         // unknown-size exact only wins
                                         // when no exact candidate has
                                         // a known size.
                                         val sizeText = r.sizeLabel() ?: "size unknown"
                                         val parkReason = when {
-                                            preferSmaller -> "parked for size compare"
-                                            collectAll -> "parked for board collect"
-                                            else -> "parked — waiting for a direct file"
+                                            preferSmaller || preferLargest -> "parked for size compare"
+                                            preferDirect -> "parked — waiting for a direct file"
+                                            else -> "parked — waiting for a stream"
                                         }
                                         outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — exact, $parkReason ($sizeText)"
                                         DownloadLogs.log(
@@ -1055,15 +967,6 @@ object MultiSourceResolver {
                                             "Server ${src.serverNumber}: exact ${offered}p for $quality in ${tookMs}ms — $parkReason ($sizeText), still racing",
                                         )
                                         exactCandidates += download
-                                        // 2.0-dev2.13: board — exact
-                                        // file: KNOWN when it carries
-                                        // a size, else UNKNOWN.
-                                        onBoardEntry?.invoke(
-                                            boardEntryFor(
-                                                src.serverNumber, r,
-                                                if (r.sizeLabel() != null) BoardEntryState.KNOWN else BoardEntryState.UNKNOWN,
-                                            ),
-                                        )
                                     } else {
                                         // 2.0-dev2.7: EXACT win — the only
                                         // tier that ends the batch. First
@@ -1076,16 +979,6 @@ object MultiSourceResolver {
                                         // other racer's outcome so far.
                                         outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — WINNER"
                                         winner = download
-                                        // 2.0-dev2.13: board — the
-                                        // winning exact file, same
-                                        // KNOWN/UNKNOWN mapping as a
-                                        // parked exact.
-                                        onBoardEntry?.invoke(
-                                            boardEntryFor(
-                                                src.serverNumber, r,
-                                                if (r.sizeLabel() != null) BoardEntryState.KNOWN else BoardEntryState.UNKNOWN,
-                                            ),
-                                        )
                                         val stillRacing = group.map { it.serverNumber } - arrivedNumbers
                                         DownloadLogs.log(
                                             "RESOLVE",
@@ -1111,10 +1004,6 @@ object MultiSourceResolver {
                                     )
                                     val downgradeOffered = downgrade?.link?.offeredHeight() ?: 0
                                     if (downgrade == null || offered > downgradeOffered) downgrade = download
-                                    // 2.0-dev2.13: board — a downgrade
-                                    // is not a file at the SELECTED
-                                    // quality, so NO_FILE.
-                                    onBoardEntry?.invoke(boardEntryFor(src.serverNumber, r, BoardEntryState.NO_FILE))
                                 } else {
                                     outcomes += "Server ${src.serverNumber}: ${offered}p in ${tookMs}ms — parked, below floor ${floor}p"
                                     DownloadLogs.log(
@@ -1124,39 +1013,51 @@ object MultiSourceResolver {
                                     )
                                     val fallbackOffered = fallback?.link?.offeredHeight() ?: 0
                                     if (fallback == null || offered > fallbackOffered) fallback = download
-                                    // 2.0-dev2.13: board — below the
-                                    // floor, so no file at the
-                                    // SELECTED quality: NO_FILE.
-                                    onBoardEntry?.invoke(boardEntryFor(src.serverNumber, r, BoardEntryState.NO_FILE))
                                 }
                             }
                             is ResolvedLink.Failed -> {
                                 outcomes += "Server ${src.serverNumber}: FAILED in ${tookMs}ms"
                                 last = r
-                                // 2.0-dev2.13: board — no file.
-                                onBoardEntry?.invoke(boardEntryFor(src.serverNumber, r, BoardEntryState.NO_FILE))
                             }
                         }
+                    }
+                }
+                // 2.0-dev2.14: bounded phase wait (see above). The
+                // timeout clause only exists when a deadline was
+                // passed; without one the race waits for every
+                // racer, as before.
+                phaseDeadlineMs?.let { deadline ->
+                    onTimeout(maxOf(1L, deadline - System.currentTimeMillis())) {
+                        phaseTimedOut = true
+                        DownloadLogs.log(
+                            "RESOLVE",
+                            "phase wait expired after ${RESOLVE_PHASE_WAIT_MS}ms — moving on with ${exactCandidates.size} exact candidate(s) parked, ${pending.size} racer(s) still out",
+                        )
                     }
                 }
             }
         }
         if (winner == null) {
-            if ((preferSmaller || preferDirect || collectAll) && exactCandidates.isNotEmpty()) {
+            if ((preferSmaller || preferLargest || preferDirect || preferSoft) && exactCandidates.isNotEmpty()) {
                 // 2.0-dev2.8: this batch parked exact candidates
                 // instead of crowning one — one line naming the
-                // batch's smallest, so the phone log shows the
+                // batch's best, so the phone log shows the
                 // comparison happening instead of going quiet
                 // between batches. The caller picks the global
-                // smallest across ALL batches. 2.0-dev2.10: same
-                // parking happens in direct-download mode (an HLS
-                // exact waiting for a direct one).
-                val batchBest = if (preferSmaller) pickSmallestExact(exactCandidates) else exactCandidates.firstOrNull()
+                // best across ALL batches. 2.0-dev2.10/2.14: same
+                // parking happens in the subs modes (a
+                // fallback-kind exact waiting for a preferred
+                // one) and the largest-file mode.
+                val batchBest = when {
+                    preferSmaller -> pickSmallestExact(exactCandidates)
+                    preferLargest -> pickLargestExact(exactCandidates)
+                    else -> exactCandidates.firstOrNull()
+                }
                 DownloadLogs.log(
                     "RESOLVE",
-                    "batch ${group.map { it.serverNumber }} ended with ${exactCandidates.size} exact candidate(s) for $quality (parked-exact mode: prefer-smaller / prefer-direct / collect-all) — " +
+                    "batch ${group.map { it.serverNumber }} ended with ${exactCandidates.size} exact candidate(s) for $quality (subs/size-preference mode) — " +
                         exactCandidates.joinToString("; ") { "Server ${it.serverNumber} (${if (it.link is ResolvedLink.DirectMp4) "direct" else "stream"}, ${it.link.sizeLabel() ?: "size unknown"})" } +
-                        "; batch smallest: ${batchBest?.let { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" } ?: "none"}; " +
+                        "; batch best: ${batchBest?.let { "Server ${it.serverNumber} (${it.link.sizeLabel() ?: "size unknown"})" } ?: "none"}; " +
                         "best downgrade: ${downgrade?.let { "Server ${it.serverNumber} (${it.link.offeredHeight() ?: "?"}p)" } ?: "none"}; " +
                         "unprovable parked: ${unprovableFallback?.serverNumber?.let { "Server $it" } ?: "none"}; " +
                         "unknown parked: ${unknownFallback?.serverNumber?.let { "Server $it" } ?: "none"}",

@@ -53,8 +53,13 @@ object ResolveCache {
     // (d = prefer direct, h = HLS may win). A win decided under
     // one combination of the two toggles is never served under
     // another; pre-change keys are orphaned, never matched.
-    private fun cacheKey(titleId: Long, number: Int, audio: String, quality: String, preferSmaller: Boolean, preferDirect: Boolean = false): String =
-        "$titleId|$number|${audioCode(audio)}|$quality|${if (preferSmaller) "s" else "f"}${if (preferDirect) "d" else "h"}"
+    // 2.0-dev2.14: the key is now two letters for the two
+    // TRI-STATES — size letter "s" (smaller) / "L" (largest) /
+    // "f" (fastest), subs letter "d" (direct/Hard) / "S" (soft) /
+    // "h" (both). Old keys stay valid and correctly interpreted
+    // (the default combination is still "fh"), so no migration.
+    private fun cacheKey(titleId: Long, number: Int, audio: String, quality: String, preferSmaller: Boolean, preferDirect: Boolean = false, preferSoft: Boolean = false, preferLargest: Boolean = false): String =
+        "$titleId|$number|${audioCode(audio)}|$quality|${when { preferSmaller -> "s"; preferLargest -> "L"; else -> "f" }}${when { preferDirect -> "d"; preferSoft -> "S"; else -> "h" }}"
 
     @Synchronized
     fun lookup(
@@ -71,12 +76,15 @@ object ResolveCache {
         preferSmaller: Boolean = false,
         // 2.0-dev2.10: same for the direct-download mode.
         preferDirect: Boolean = false,
+        // 2.0-dev2.14: same for soft-subs and largest-file modes.
+        preferSoft: Boolean = false,
+        preferLargest: Boolean = false,
     ): ResolvedDownload? {
         loadLocked(context)
-        val entry = mem[cacheKey(titleId, number, audio, quality, preferSmaller, preferDirect)] ?: return null
+        val entry = mem[cacheKey(titleId, number, audio, quality, preferSmaller, preferDirect, preferSoft, preferLargest)] ?: return null
         val ageMs = System.currentTimeMillis() - entry.resolvedAtMs
         if (ageMs < 0 || ageMs > ttlMs(entry.serverNumber)) {
-            mem.remove(cacheKey(titleId, number, audio, quality, preferSmaller, preferDirect))
+            mem.remove(cacheKey(titleId, number, audio, quality, preferSmaller, preferDirect, preferSoft, preferLargest))
             persistLocked(context)
             return null
         }
@@ -110,6 +118,9 @@ object ResolveCache {
         preferSmaller: Boolean = false,
         // 2.0-dev2.10: same for the direct-download mode.
         preferDirect: Boolean = false,
+        // 2.0-dev2.14: same for soft-subs and largest-file modes.
+        preferSoft: Boolean = false,
+        preferLargest: Boolean = false,
     ) {
         val link = resolved.link
         val server = resolved.serverNumber ?: return
@@ -122,7 +133,7 @@ object ResolveCache {
         // loop. Unknown DDLs re-resolve (and re-probe) every time.
         if (link is ResolvedLink.DirectMp4 && link.actualQuality == null) return
         loadLocked(context)
-        val key = cacheKey(titleId, number, audio, quality, preferSmaller, preferDirect)
+        val key = cacheKey(titleId, number, audio, quality, preferSmaller, preferDirect, preferSoft, preferLargest)
         mem[key] = Entry(link, server, System.currentTimeMillis())
         // Cap: drop the oldest entries first.
         while (mem.size > MAX_ENTRIES) {

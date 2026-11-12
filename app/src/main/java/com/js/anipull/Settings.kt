@@ -73,6 +73,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     "Appearance" -> AppearancePage()
                     "Layout" -> LayoutPage()
                     "Downloads" -> DownloadsSettingsPage()
+                    "Sources" -> SourcesSettingsPage()
                     "Notifications" -> NotificationsPage()
                     "Storage" -> StoragePage()
                     "About" -> AboutPage()
@@ -107,7 +108,9 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             SettingsCard {
-                SettingsRow(R.drawable.ic_download, "Downloads", "Parallel, speed, folder, and quality", { onOpen("Downloads") })
+                SettingsRow(R.drawable.ic_download, "Downloads", "Parallel, speed, and folder", { onOpen("Downloads") })
+                SettingsDivider()
+                SettingsRow(R.drawable.ic_share, "Sources", "Quality, language, subs, and size", { onOpen("Sources") })
                 SettingsDivider()
                 SettingsRow(R.drawable.ic_bell, "Notifications", "Download progress and completion pings", { onOpen("Notifications") })
             }
@@ -159,7 +162,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("2.0-dev2.4 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("2.0-dev2.14 · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -454,31 +457,35 @@ fun LayoutPage() {
     }
 }
 
-// ---- Downloads --------------------------------------------------------
+// ---- Sources ----------------------------------------------------------
+// 2.0-dev2.14: the four preference controls that decide WHAT a
+// download is — quality default, language default, subs
+// tri-state, size tri-state — plus the server order and the
+// auto-test, LAST. Moved out of Downloads (which keeps only
+// mechanics: queue, folder, behaviour). These are the SAME prefs
+// the Before You Start onboarding screen writes — one source of
+// truth, no duplicate keys. Quality/language take an "ask" value
+// (no chip pre-selected in the sheets); subs and size are two
+// mutually-exclusive booleans each (Hard/Soft/Both, Best/
+// Smallest/Fastest).
 @Composable
-fun DownloadsSettingsPage() {
+fun SourcesSettingsPage() {
     val ctx = LocalContext.current
     val prefs = SettingsPrefs()
-    var parallel by remember { mutableStateOf(prefs.getInt("parallel", 2)) }
-    var speedLimit by remember { mutableStateOf(prefs.getInt("speed_mbps", 0)) }
-    var folder by remember { mutableStateOf(prefs.getString("folder", "Downloads/Anipull") ?: "Downloads/Anipull") }
     var quality by remember { mutableStateOf(prefs.getString("quality", "1080p") ?: "1080p") }
     var language by remember { mutableStateOf(prefs.getString("language", "Sub") ?: "Sub") }
-    var wifiOnly by remember { mutableStateOf(prefs.getBoolean("wifi_only", true)) }
-    var askSeason by remember { mutableStateOf(prefs.getBoolean("ask_season", true)) }
-    var subs by remember { mutableStateOf(prefs.getBoolean("subs", true)) }
-    var autoRetry by remember { mutableStateOf(prefs.getBoolean("auto_retry", true)) }
-    var keepScreenOn by remember { mutableStateOf(prefs.getBoolean("keep_screen_on", false)) }
-    // 2.0-dev2.8: "Prefer smaller files" — at the chosen quality,
-    // the race picks the smallest file instead of the fastest
-    // server. Default OFF (fastest first, current behaviour).
-    var preferSmaller by remember { mutableStateOf(prefs.getBoolean("prefer_smaller_files", false)) }
-    // 2.0-dev2.10: "Prefer direct downloads" — at the chosen
-    // quality, the race prefers a direct file (subtitles burned
-    // in) over a stream. Default OFF (fastest first, current
-    // behaviour). User-facing text says "direct" / "burned in"
-    // only — no DDL/HLS jargon, most people don't know it.
+    // 2.0-dev2.10/2.14: subs tri-state as two booleans — Hard =
+    // prefer_direct_downloads, Soft = prefer_soft_subs, Both =
+    // neither. The UI keeps them mutually exclusive; the race
+    // defensively treats preferDirect as winning if both are
+    // somehow on.
     var preferDirect by remember { mutableStateOf(prefs.getBoolean("prefer_direct_downloads", false)) }
+    var preferSoft by remember { mutableStateOf(prefs.getBoolean("prefer_soft_subs", false)) }
+    // 2.0-dev2.8/2.14: size tri-state as two booleans — Best =
+    // prefer_largest_files, Smallest = prefer_smaller_files,
+    // Fastest = neither. Same mutual exclusion as subs.
+    var preferSmaller by remember { mutableStateOf(prefs.getBoolean("prefer_smaller_files", false)) }
+    var preferLargest by remember { mutableStateOf(prefs.getBoolean("prefer_largest_files", false)) }
     // 2.0-dev1.6: default download server — 0 = Auto (try servers in
     // priority order 1..10), 1..10 = always try that server first (the
     // rest still back it up if it fails). Same key the sheet reads.
@@ -521,53 +528,20 @@ fun DownloadsSettingsPage() {
         ServerRegistry.saveOrder(ctx, next)
     }
     fun save() {
-        prefs.edit().putInt("parallel", parallel).putInt("speed_mbps", speedLimit).putString("folder", folder).putString("quality", quality).putString("language", language).putBoolean("wifi_only", wifiOnly).putBoolean("ask_season", askSeason).putBoolean("subs", subs).putBoolean("auto_retry", autoRetry).putBoolean("keep_screen_on", keepScreenOn).putBoolean("prefer_smaller_files", preferSmaller).putBoolean("prefer_direct_downloads", preferDirect).putInt("preferred_server", preferredServer).apply()
+        prefs.edit().putString("quality", quality).putString("language", language).putBoolean("prefer_direct_downloads", preferDirect).putBoolean("prefer_soft_subs", preferSoft).putBoolean("prefer_smaller_files", preferSmaller).putBoolean("prefer_largest_files", preferLargest).putInt("preferred_server", preferredServer).apply()
     }
-    val folderPicker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) {
-            try { ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) } catch (_: Exception) { }
-            val raw = java.net.URLDecoder.decode(uri.toString(), "UTF-8")
-            val display = raw.substringAfter(":", raw).removePrefix("/tree/").replace("primary:", "").trim()
-            if (display.isNotBlank()) { folder = display; prefs.edit().putString("folder", display).putString("folder_uri", uri.toString()).apply() }
-        }
-    }
-    Text("Saved on this phone. Downloads use the real engine — these settings apply to every pull.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
-    Spacer(Modifier.height(20.dp))
-    SettingsSectionLabel("QUEUE")
-    SettingsCard {
-        Column(modifier = Modifier.padding(vertical = 8.dp)) {
-            Text("Parallel downloads", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(if (parallel <= 1) "1 episode at a time" else "$parallel episodes at once", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Slider(value = parallel.toFloat(), onValueChange = { parallel = it.toInt(); save() }, valueRange = 1f..5f, steps = 3)
-            Spacer(Modifier.height(8.dp))
-            Text("Download speed limit", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Text(if (speedLimit == 0) "Unlimited" else "$speedLimit MB/s", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-            Slider(value = speedLimit.toFloat(), onValueChange = { speedLimit = it.toInt(); save() }, valueRange = 0f..10f, steps = 9)
-        }
-    }
-    Spacer(Modifier.height(20.dp))
-    SettingsSectionLabel("DESTINATION")
-    SettingsCard {
-        Column(modifier = Modifier.padding(vertical = 12.dp)) {
-            Text("Download folder", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.height(8.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Box(modifier = Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).padding(horizontal = 12.dp, vertical = 11.dp)) {
-                    androidx.compose.foundation.text.BasicTextField(value = folder, onValueChange = { folder = it; save() }, singleLine = true, textStyle = androidx.compose.ui.text.TextStyle(color = TextMain, fontSize = 14.sp), cursorBrush = androidx.compose.ui.graphics.SolidColor(Pink))
-                }
-                Spacer(Modifier.width(8.dp))
-                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink).clickable { folderPicker.launch(null) }.padding(horizontal = 14.dp, vertical = 11.dp), contentAlignment = Alignment.Center) {
-                    Text("Browse", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
-                }
-            }
-            Text("Default is the public Downloads/Anipull folder — finished videos show in Gallery and in Files › Downloads › Anipull. Tap Browse to pick a custom folder instead.", color = Faint, fontSize = 12.sp)
-        }
-    }
+    val subsMode = when { preferDirect -> "hard"; preferSoft -> "soft"; else -> "both" }
+    val sizeMode = when { preferSmaller -> "smallest"; preferLargest -> "best"; else -> "fastest" }
+    Text("What every download should be — quality, language, subs, and size. The same file comes in different sizes from 10 sources, so these pick what the race grabs first.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("QUALITY & LANGUAGE")
     SettingsCard {
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
-            Text("Preferred quality", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text("Default quality", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, if (quality == "ask") Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp)).background(if (quality == "ask") Pink.copy(alpha = 0.2f) else Card).clickable { quality = "ask"; save() }.padding(horizontal = 14.dp, vertical = 8.dp), contentAlignment = Alignment.Center) { Text("Ask each time", color = if (quality == "ask") Color.White else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+            }
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("360p", "480p", "720p", "1080p").forEach { q ->
@@ -575,32 +549,55 @@ fun DownloadsSettingsPage() {
                 }
             }
             Spacer(Modifier.height(16.dp))
-            Text("Preferred language", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text("Default language", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf("Sub", "Dub").forEach { lang ->
-                    Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, if (language == lang) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp)).background(if (language == lang) Pink.copy(alpha = 0.2f) else Card).clickable { language = lang; save() }.padding(horizontal = 18.dp, vertical = 8.dp), contentAlignment = Alignment.Center) { Text(lang, color = if (language == lang) Color.White else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
+                listOf("Sub", "Dub", "ask").forEach { lang ->
+                    val label = if (lang == "ask") "Ask each time" else lang
+                    Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, if (language == lang) Pink else Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp)).background(if (language == lang) Pink.copy(alpha = 0.2f) else Card).clickable { language = lang; save() }.padding(horizontal = 14.dp, vertical = 8.dp), contentAlignment = Alignment.Center) { Text(label, color = if (language == lang) Color.White else Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold) }
                 }
             }
-            Text("Sub = Japanese audio with subtitles. Dub = English audio.", color = Faint, fontSize = 12.sp)
-            Spacer(Modifier.height(16.dp))
-            // 2.0-dev2.8: "Prefer smaller files" — at the chosen
-            // quality, the race picks the smallest file instead of
-            // the fastest server. Default OFF (fastest first).
-            SettingsToggle(
-                "Prefer smaller files",
-                "At your chosen quality, pick the smallest file instead of the fastest server. May take longer — finding the smallest file means waiting to compare servers instead of taking the first one.",
-                preferSmaller,
-            ) { preferSmaller = it; save() }
-            Spacer(Modifier.height(16.dp))
-            // 2.0-dev2.10: "Prefer direct downloads" — same
-            // section, right below "Prefer smaller files".
-            // Plain words only: hard subs, no DDL/HLS jargon.
-            SettingsToggle(
-                "Prefer direct downloads",
-                "Prefer files with subtitles burned in, so they play anywhere. Falls back to other sources when no direct file is available.",
-                preferDirect,
-            ) { preferDirect = it; save() }
+            Text("Sub = Japanese audio with subtitles. Dub = English audio. Ask each time leaves the sheet with nothing picked, so you choose every download.", color = Faint, fontSize = 12.sp)
+        }
+    }
+    Spacer(Modifier.height(20.dp))
+    SettingsSectionLabel("SUBTITLES")
+    SettingsCard {
+        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+            SettingsRadioRow(
+                "Hard subs", "Burned into the video. Always there, plays anywhere. Direct files first, streams as fallback.",
+                selected = subsMode == "hard",
+            ) { preferDirect = true; preferSoft = false; save() }
+            SettingsDivider()
+            SettingsRadioRow(
+                "Soft subs", "Separate from the video. Turn them on or off whenever. Streams first, direct files as fallback.",
+                selected = subsMode == "soft",
+            ) { preferDirect = false; preferSoft = true; save() }
+            SettingsDivider()
+            SettingsRadioRow(
+                "Both works", "Hard or soft — either is fine by me.",
+                selected = subsMode == "both", badge = "Recommended",
+            ) { preferDirect = false; preferSoft = false; save() }
+        }
+    }
+    Spacer(Modifier.height(20.dp))
+    SettingsSectionLabel("SIZE")
+    SettingsCard {
+        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+            SettingsRadioRow(
+                "Best quality", "Biggest file, sharpest picture. May take longer — finding the biggest file means waiting to compare servers instead of taking the first one.",
+                selected = sizeMode == "best",
+            ) { preferLargest = true; preferSmaller = false; save() }
+            SettingsDivider()
+            SettingsRadioRow(
+                "Smallest file", "At your chosen quality, pick the smallest file instead of the fastest server. May take longer — finding the smallest file means waiting to compare servers instead of taking the first one.",
+                selected = sizeMode == "smallest",
+            ) { preferLargest = false; preferSmaller = true; save() }
+            SettingsDivider()
+            SettingsRadioRow(
+                "Fastest first", "The first server to answer wins. A smaller file can still win by arriving first.",
+                selected = sizeMode == "fastest",
+            ) { preferLargest = false; preferSmaller = false; save() }
         }
     }
     Spacer(Modifier.height(20.dp))
@@ -669,6 +666,100 @@ fun DownloadsSettingsPage() {
                 )
                 if (index < serverOrder.size - 1) SettingsDivider()
             }
+        }
+    }
+}
+
+// 2.0-dev2.14: one tri-state radio row — a pink-ringed circle
+// (filled when selected) + title, optional Recommended badge,
+// and a plain-words description. The whole row is tappable.
+@Composable
+private fun SettingsRadioRow(title: String, description: String, selected: Boolean, badge: String? = null, onSelect: () -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onSelect).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier.size(20.dp).clip(RoundedCornerShape(999.dp)).border(2.dp, if (selected) Pink else Color.White.copy(alpha = 0.25f), RoundedCornerShape(999.dp)).background(if (selected) Pink else Color.Transparent),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (selected) Box(modifier = Modifier.size(8.dp).clip(RoundedCornerShape(999.dp)).background(Color.White))
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(title, color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                if (badge != null) {
+                    Spacer(Modifier.width(8.dp))
+                    Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink).padding(horizontal = 8.dp, vertical = 2.dp)) {
+                        Text(badge, color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+            Spacer(Modifier.height(2.dp))
+            Text(description, color = Muted, fontSize = 13.sp, lineHeight = 18.sp)
+        }
+    }
+}
+
+// ---- Downloads --------------------------------------------------------
+@Composable
+fun DownloadsSettingsPage() {
+    val ctx = LocalContext.current
+    val prefs = SettingsPrefs()
+    var parallel by remember { mutableStateOf(prefs.getInt("parallel", 2)) }
+    var speedLimit by remember { mutableStateOf(prefs.getInt("speed_mbps", 0)) }
+    var folder by remember { mutableStateOf(prefs.getString("folder", "Downloads/Anipull") ?: "Downloads/Anipull") }
+    var wifiOnly by remember { mutableStateOf(prefs.getBoolean("wifi_only", true)) }
+    var askSeason by remember { mutableStateOf(prefs.getBoolean("ask_season", true)) }
+    var subs by remember { mutableStateOf(prefs.getBoolean("subs", true)) }
+    var autoRetry by remember { mutableStateOf(prefs.getBoolean("auto_retry", true)) }
+    var keepScreenOn by remember { mutableStateOf(prefs.getBoolean("keep_screen_on", false)) }
+    // 2.0-dev2.14: quality, language, subs/size modes, preferred
+    // server, sources order and auto-test live in the Sources
+    // page now (same prefs, one source of truth) — Downloads
+    // keeps only mechanics: queue, folder, behaviour.
+    fun save() {
+        prefs.edit().putInt("parallel", parallel).putInt("speed_mbps", speedLimit).putString("folder", folder).putBoolean("wifi_only", wifiOnly).putBoolean("ask_season", askSeason).putBoolean("subs", subs).putBoolean("auto_retry", autoRetry).putBoolean("keep_screen_on", keepScreenOn).apply()
+    }
+    val folderPicker = androidx.activity.compose.rememberLauncherForActivityResult(androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            try { ctx.contentResolver.takePersistableUriPermission(uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION) } catch (_: Exception) { }
+            val raw = java.net.URLDecoder.decode(uri.toString(), "UTF-8")
+            val display = raw.substringAfter(":", raw).removePrefix("/tree/").replace("primary:", "").trim()
+            if (display.isNotBlank()) { folder = display; prefs.edit().putString("folder", display).putString("folder_uri", uri.toString()).apply() }
+        }
+    }
+    Text("Saved on this phone. Downloads use the real engine — these settings apply to every pull.", color = Muted, fontSize = 13.sp, lineHeight = 19.sp)
+    Spacer(Modifier.height(20.dp))
+    SettingsSectionLabel("QUEUE")
+    SettingsCard {
+        Column(modifier = Modifier.padding(vertical = 8.dp)) {
+            Text("Parallel downloads", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(if (parallel <= 1) "1 episode at a time" else "$parallel episodes at once", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Slider(value = parallel.toFloat(), onValueChange = { parallel = it.toInt(); save() }, valueRange = 1f..5f, steps = 3)
+            Spacer(Modifier.height(8.dp))
+            Text("Download speed limit", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(if (speedLimit == 0) "Unlimited" else "$speedLimit MB/s", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+            Slider(value = speedLimit.toFloat(), onValueChange = { speedLimit = it.toInt(); save() }, valueRange = 0f..10f, steps = 9)
+        }
+    }
+    Spacer(Modifier.height(20.dp))
+    SettingsSectionLabel("DESTINATION")
+    SettingsCard {
+        Column(modifier = Modifier.padding(vertical = 12.dp)) {
+            Text("Download folder", color = TextMain, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(modifier = Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(12.dp)).background(Bg).padding(horizontal = 12.dp, vertical = 11.dp)) {
+                    androidx.compose.foundation.text.BasicTextField(value = folder, onValueChange = { folder = it; save() }, singleLine = true, textStyle = androidx.compose.ui.text.TextStyle(color = TextMain, fontSize = 14.sp), cursorBrush = androidx.compose.ui.graphics.SolidColor(Pink))
+                }
+                Spacer(Modifier.width(8.dp))
+                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink).clickable { folderPicker.launch(null) }.padding(horizontal = 14.dp, vertical = 11.dp), contentAlignment = Alignment.Center) {
+                    Text("Browse", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+            Text("Default is the public Downloads/Anipull folder — finished videos show in Gallery and in Files › Downloads › Anipull. Tap Browse to pick a custom folder instead.", color = Faint, fontSize = 12.sp)
         }
     }
     Spacer(Modifier.height(20.dp))
@@ -971,7 +1062,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("2.0-dev2.4 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("2.0-dev2.14 · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")
@@ -1069,7 +1160,7 @@ fun AboutPage() {
     SettingsSectionLabel("DATA")
     SettingsCard {
         Column(modifier = Modifier.padding(vertical = 12.dp)) {
-            Text("Metadata: AniLab (no key, live feed).", color = TextMain, fontSize = 14.sp)
+            Text("Metadata: AniLab (titles, posters, search, home) and AniList (episode counts) — no keys, live feeds.", color = TextMain, fontSize = 14.sp)
             Spacer(Modifier.height(4.dp))
             Text("Downloads run on 10 servers, picked automatically.", color = Muted, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
