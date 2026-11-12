@@ -69,13 +69,13 @@
     ]
   },
   "dev": {
-    "versionCode": 76,
-    "versionName": "2.0-dev2.15",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.15/anipull-2.0-dev2.15.apk",
-    "sha256": "d873411c868c7cae2d43739073fbddfd68ab232166919aedd94fd0b43c5e13f4",
+    "versionCode": 77,
+    "versionName": "2.0-dev2.16",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.16/anipull-2.0-dev2.16.apk",
+    "sha256": "bdb4ecdaadc677c8deb8d7c529ee4a59272f75771f2db56b7ae2ef821bc52d6b",
     "features": [],
     "fixes": [
-      "Rebuilt the Before You Start onboarding as a pixel-exact replica of the polished mockup \u2014 the heading now opens big and centred and glides up to its docked spot as one block, the Frieren background pans from Frieren to Fern to Stark (starting and ending on the characters, not empty field), tapping an option selects it and moves on, and \"You're all set\" is now the full animated badge (spring pop, self-drawing check, rotating ring, sparkles) with a summary of your picks. The end screen stays until you tap Let's go."
+      "Fixed three Before You Start nits from the dev2.15 phone test \u2014 the pink \"Question N of 4\" line now sits at the mockup's exact distance below the description, no option is highlighted until you tap it, and options stay tappable while the question card is still sliding in (a mid-flight tap fast-forwards the slide smoothly instead of snapping)."
     ]
   }
 }
