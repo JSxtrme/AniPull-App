@@ -151,9 +151,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -169,6 +167,30 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.async
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+// 2.0-dev2.15: imports for the pixel-exact Before You Start replica.
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.PathMeasure
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.StrokeJoin
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.text.rememberTextMeasurer
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.IntOffset
+import kotlin.math.roundToInt
 
 // Colours taken from the web mockup's CSS variables.
 private val OutfitFont = FontFamily(
@@ -3466,301 +3488,1033 @@ private fun rememberFrierenBitmap(context: android.content.Context): androidx.co
     }
 }
 
-// 2.0-dev2.14: "Before You Start" — the third onboarding
-// screen (after Welcome + Notifications). Four questions that
-// just set the existing Settings prefs (one source of truth);
-// skippable, today's defaults kept. Frieren art pans
-// left→right as the questions advance (Frieren → Fern →
-// Stark), ending on Stark with the "You're all set" badge.
-// Settled motion: screen slides 1.4 s, question slides
-// 1.35 s, heading glides up 1.7 s, background pans 2.6 s — all
-// cubic-bezier(.25,1,.5,1) ease-out with crossfade.
+// 2.0-dev2.15: "Before You Start" — PIXEL-EXACT replica of the
+// polished mockup ('onboarding-animation-polish'). JS's phone
+// verdict on dev2.14 (2026-11-12 20:31 + 20:37 IST): "Terrible
+// animation... not at all like the mockup... make it ditto same,
+// every pixel adjustment need to be exact." The four dev2.14
+// defects were: (1) the intro only nudged the already-docked
+// heading up 200dp — the mockup opens the heading BIG and
+// CENTRED, then glides it up as ONE block via scale + translate
+// (FLIP, transform-only); (2) the pan ran BiasAlignment -1..+1,
+// the full overflow, so it started on empty field left of
+// Frieren and ended on empty field right of Stark; (3) taps
+// only selected instead of selecting AND advancing; (4) the
+// "You're all set" badge was a plain pill instead of the
+// mockup's spring-pop / self-drawing check / rotating ring /
+// sparkles badge with a picks summary. Every value below is
+// MEASURED from the mockup source (px == dp at the mockup's
+// 390px-wide phone frame) — do not "improve" these values,
+// they ARE the spec. Known deviation: Compose has no backdrop
+// blur, so option/summary cards use the exact bg color + alpha
+// with no blur. The demo-only replay ghost button is omitted;
+// progress therefore spans the full width (mockup's right:76px
+// only clears that button).
+//
+// Mockup measurements (onboarding-animation-polish):
+//   ease cubic-bezier(.25,1,.5,1); spring cubic-bezier(.34,1.3,.44,1);
+//   screen 1.4s; question slide 1.35s; heading FLIP 1.7s; pan 2.6s;
+//   INTRO_HOLD 1600ms; PICK_HOLD 480ms; pan stops (translateX % of
+//   image width) [-14.7, -23.5, -32.2, -39.7, -47.2] for steps 0-4,
+//   i.e. character fractions [0.312, 0.406, 0.50, 0.5835, 0.667]
+//   (Frieren, mid, Fern, mid, Stark) of the 1920px-wide image.
+private val bysEase = androidx.compose.animation.core.CubicBezierEasing(0.25f, 1f, 0.5f, 1f)
+private val bysSpring = androidx.compose.animation.core.CubicBezierEasing(0.34f, 1.3f, 0.44f, 1f)
+private val bysDrawEase = androidx.compose.animation.core.CubicBezierEasing(0.25f, 0.1f, 0.25f, 1f)
+private val bysEaseOut = androidx.compose.animation.core.CubicBezierEasing(0f, 0f, 0.58f, 1f)
+private val bysLinear = androidx.compose.animation.core.LinearEasing
+private val BysPanFractions = floatArrayOf(0.312f, 0.406f, 0.50f, 0.5835f, 0.667f)
+private const val BysDescText = "Four quick picks so downloads just work your way. Change any of this later in Settings."
+
+private fun bysLerp(a: Float, b: Float, t: Float): Float = a + (b - a) * t
+
+// BiasAlignment bias that centres the given fraction of the
+// 1920x1080 (16:9) Frieren image in a container of the given
+// size, under ContentScale.Crop. The image is scaled to cover
+// the container height; the overflow is horizontal only.
+private fun bysPanBias(fraction: Float, containerW: Float, containerH: Float): Float {
+    val scaledW = containerH * 16f / 9f
+    val overflow = scaledW - containerW
+    if (overflow <= 0f) return 0f
+    val offset = fraction * scaledW - containerW / 2f
+    return (2f * (offset / overflow) - 1f).coerceIn(-1f, 1f)
+}
+
+private data class BysOption(val value: String, val title: String, val desc: String)
+
 @Composable
 private fun BeforeYouStartPage(
     onFinish: () -> Unit,
     onBackToNotif: (() -> Unit)?,
 ) {
     val context = LocalContext.current
-    val prefs = context.getSharedPreferences("anipull_settings", android.content.Context.MODE_PRIVATE)
-    // Current prefs pre-selected (existing users see their own
-    // defaults; new users see today's defaults). Every tap
-    // writes the pref immediately — the screen never holds a
-    // separate copy that could drift from Settings.
-    var quality by remember { mutableStateOf(prefs.getString("quality", "1080p") ?: "1080p") }
-    var language by remember { mutableStateOf(prefs.getString("language", "Sub") ?: "Sub") }
-    var subsMode by remember {
-        mutableStateOf(
-            when {
-                prefs.getBoolean("prefer_direct_downloads", false) -> "hard"
-                prefs.getBoolean("prefer_soft_subs", false) -> "soft"
-                else -> "both"
-            }
-        )
-    }
-    var sizeMode by remember {
-        mutableStateOf(
-            when {
-                prefs.getBoolean("prefer_largest_files", false) -> "best"
-                prefs.getBoolean("prefer_smaller_files", false) -> "smallest"
-                else -> "fastest"
-            }
-        )
-    }
-    var step by remember { mutableStateOf(0) } // 0..3 = Q1..Q4, 4 = done
-    fun saveQuality(v: String) { quality = v; prefs.edit().putString("quality", v).apply() }
-    fun saveLanguage(v: String) { language = v; prefs.edit().putString("language", v).apply() }
-    fun saveSubs(v: String) {
-        subsMode = v
-        prefs.edit()
-            .putBoolean("prefer_direct_downloads", v == "hard")
-            .putBoolean("prefer_soft_subs", v == "soft")
-            .apply()
-    }
+    val prefs = remember { context.getSharedPreferences("anipull_prefs", android.content.Context.MODE_PRIVATE) }
+    var quality by remember { mutableStateOf(prefs.getString("pref_quality", "ask") ?: "ask") }
+    var language by remember { mutableStateOf(prefs.getString("pref_language", "ask") ?: "ask") }
+    var subs by remember { mutableStateOf(prefs.getString("pref_subs", "both") ?: "both") }
+    var sizePref by remember { mutableStateOf(prefs.getString("pref_size", "fastest") ?: "fastest") }
+    fun saveQuality(v: String) { prefs.edit().putString("pref_quality", v).apply(); quality = v }
+    fun saveLanguage(v: String) { prefs.edit().putString("pref_language", v).apply(); language = v }
+    fun saveSubs(v: String) { prefs.edit().putString("pref_subs", v).apply(); subs = v }
+    // Tri-state size: best -> prefer_largest on, smallest -> prefer_smaller_files on,
+    // fastest -> both off (first arrival wins, honestly).
     fun saveSize(v: String) {
-        sizeMode = v
-        prefs.edit()
-            .putBoolean("prefer_largest_files", v == "best")
-            .putBoolean("prefer_smaller_files", v == "smallest")
-            .apply()
+        when (v) {
+            "best" -> prefs.edit().putBoolean("prefer_largest", true).putBoolean("prefer_smaller_files", false).apply()
+            "smallest" -> prefs.edit().putBoolean("prefer_largest", false).putBoolean("prefer_smaller_files", true).apply()
+            else -> prefs.edit().putBoolean("prefer_largest", false).putBoolean("prefer_smaller_files", false).apply()
+        }
+        sizePref = v
     }
-    val ease = androidx.compose.animation.core.CubicBezierEasing(0.25f, 1f, 0.5f, 1f)
-    // Background pan: one third of the frame per question, 2.6 s.
+
+    var step by remember { mutableStateOf(0) }
+    var advancing by remember { mutableStateOf(false) }
+    var skipped by remember { mutableStateOf(false) }
+    val answered = remember { mutableStateListOf(false, false, false, false) }
+    val scope = rememberCoroutineScope()
+    val density = LocalDensity.current
+
+    var containerSize by remember { mutableStateOf(IntSize.Zero) }
+    val statusBarPx = WindowInsets.statusBars.getTop(density)
+    val navBarPx = WindowInsets.navigationBars.getBottom(density)
+
+    // ---- background pan: per-step bias from the character
+    // fraction + actual container size, 2.6s, same ease.
+    // Never the full -1..+1 range (that was the dev2.14 bug).
     val panBias by animateFloatAsState(
-        targetValue = when (step) { 0 -> -1f; 1 -> -0.33f; 2 -> 0.33f; else -> 1f },
-        animationSpec = tween(2600, easing = ease),
+        targetValue = if (containerSize.width > 0 && containerSize.height > 0)
+            bysPanBias(BysPanFractions[step.coerceIn(0, 4)], containerSize.width.toFloat(), containerSize.height.toFloat())
+        else -0.5f,
+        animationSpec = tween(2600, easing = bysEase),
         label = "bysPan",
     )
-    // Heading glide: opens centred, moves up as one block with
-    // its description — transform-only, no layout reflow.
-    var entered by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) { entered = true }
-    val headingLift by animateDpAsState(
-        targetValue = if (entered) 0.dp else 200.dp,
-        animationSpec = tween(1700, easing = ease),
-        label = "bysHeading",
-    )
-    val frieren = rememberFrierenBitmap(context)
-    // "You're all set" badge pop-in on the done step.
-    var badgeIn by remember { mutableStateOf(false) }
-    LaunchedEffect(step) { if (step == 4) badgeIn = true }
-    val badgeScale by animateFloatAsState(
-        targetValue = if (badgeIn) 1f else 0.8f,
-        animationSpec = tween(600, easing = ease),
-        label = "bysBadge",
-    )
-    // Auto-finish a beat after the badge lands; the Done button
-    // below is the same finish, for anyone who doesn't wait.
-    LaunchedEffect(step) {
-        if (step == 4) {
-            kotlinx.coroutines.delay(1600)
-            onFinish()
+
+    // ---- hero FLIP state ----
+    // First rects: measured live in the CENTRED layout (window px).
+    // Last rects: computed analytically from the docked layout's
+    // styles (same TextStyles the docked Texts render with).
+    var docked by remember { mutableStateOf(false) }
+    var flipping by remember { mutableStateOf(false) }
+    var introLive by remember { mutableStateOf(false) }
+    val firstRects = remember { mutableStateMapOf<String, Rect>() }
+    val flipTargets = remember { mutableStateOf<Pair<Map<String, Rect>, Map<String, Rect>>?>(null) }
+    val flipAnim = remember { Animatable(0f) }
+    var heroH by remember { mutableStateOf(0) }
+    var pillW by remember { mutableStateOf(0) }
+    var pillH by remember { mutableStateOf(0) }
+    val textMeasurer = rememberTextMeasurer()
+    val dockedH1Style = TextStyle(fontFamily = SFProDisplaySemibold, fontSize = 27.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.54).sp, lineHeight = 30.24.sp)
+    val dockedDescStyle = TextStyle(fontFamily = SFProDisplaySemibold, fontSize = 13.5.sp, fontWeight = FontWeight.SemiBold, lineHeight = 20.25.sp)
+    val heroLeftPx = with(density) { 26.dp.toPx() }
+    val dockedTopPx = statusBarPx + with(density) { 44.dp.toPx() }
+
+    // Intro: 1600ms hold on the big centred heading, then the
+    // 1.7s FLIP glide up to the docked heading. The trackwrap,
+    // Next/Previous and Skip fade in as the heading rises.
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(1600)
+        val first = firstRects.toMap()
+        if (first.size < 4) {
+            // Measurements missing (should not happen) — fall back
+            // to the docked layout with no glide rather than a snap.
+            docked = true; introLive = true; return@LaunchedEffect
         }
+        val w1 = textMeasurer.measure("Before you", dockedH1Style).size
+        val sp = textMeasurer.measure(" ", dockedH1Style).size
+        val w2 = textMeasurer.measure("start", dockedH1Style).size
+        val desc = textMeasurer.measure(
+            BysDescText, dockedDescStyle,
+            constraints = Constraints(maxWidth = with(density) { 320.dp.toPx() }.toInt()),
+        )
+        val h1H = maxOf(w1.height, w2.height).toFloat()
+        val descTop = dockedTopPx + h1H + with(density) { 6.dp.toPx() }
+        val last = mapOf(
+            "w1" to Rect(heroLeftPx, dockedTopPx, heroLeftPx + w1.width, dockedTopPx + h1H),
+            "w2" to Rect(heroLeftPx + w1.width + sp.width, dockedTopPx, heroLeftPx + w1.width + sp.width + w2.width, dockedTopPx + h1H),
+            "desc" to Rect(heroLeftPx, descTop, heroLeftPx + desc.size.width, descTop + desc.size.height),
+            "pill" to Rect(heroLeftPx, dockedTopPx, heroLeftPx + pillW, dockedTopPx + pillH),
+        )
+        flipTargets.value = first to last
+        flipping = true
+        docked = true
+        introLive = true
+        flipAnim.snapTo(0f)
+        flipAnim.animateTo(1f, tween(1700, easing = bysEase))
+        flipping = false
+        flipTargets.value = null
     }
-    Box(modifier = Modifier.fillMaxSize()) {
-        if (frieren != null) {
+
+    fun goToStep(next: Int) {
+        if (advancing || !introLive) return
+        advancing = true
+        step = next
+        scope.launch { kotlinx.coroutines.delay(1350); advancing = false }
+    }
+    fun onPick(value: String) {
+        if (advancing || !introLive) return
+        when (step) {
+            0 -> saveQuality(value)
+            1 -> saveLanguage(value)
+            2 -> saveSubs(value)
+            3 -> saveSize(value)
+        }
+        answered[step] = true
+        advancing = true
+        scope.launch { kotlinx.coroutines.delay(480); step++; kotlinx.coroutines.delay(1350); advancing = false }
+    }
+    fun onNext() {
+        if (advancing || !introLive) return
+        if (step < 3) goToStep(step + 1)
+    }
+    fun onPrev() {
+        if (advancing || !introLive) return
+        if (step > 0) goToStep(step - 1) else onBackToNotif?.invoke()
+    }
+    fun onSkip() {
+        if (advancing || !introLive) return
+        // Mockup: Skip goes to the done panel with the defaults
+        // summary (it does NOT finish straight away).
+        skipped = true
+        goToStep(4)
+    }
+
+    // FLIP transform for one hero element, applied while the
+    // 1.7s glide runs. Scale + translate about the top-left
+    // corner; the pill only fades + drifts (no scale).
+    fun Modifier.bysFlip(key: String, noScale: Boolean = false): Modifier = this.graphicsLayer {
+        val ft = flipTargets.value
+        if (!flipping || ft == null) return@graphicsLayer
+        val first = ft.first[key] ?: return@graphicsLayer
+        val last = ft.second[key] ?: return@graphicsLayer
+        val p = flipAnim.value
+        if (!noScale) {
+            scaleX = bysLerp(first.width / last.width, 1f, p)
+            scaleY = bysLerp(first.height / last.height, 1f, p)
+            transformOrigin = TransformOrigin(0f, 0f)
+        }
+        translationX = (first.left - last.left) * (1f - p)
+        translationY = (first.top - last.top) * (1f - p)
+        if (noScale) alpha = 1f - p
+    }
+    // Description opacity dip mid-glide: 1 -> .15 at 45% -> 1.
+    fun Modifier.bysDescAlpha(): Modifier = this.graphicsLayer {
+        val ft = flipTargets.value
+        if (!flipping || ft == null) return@graphicsLayer
+        val p = flipAnim.value
+        alpha = if (p < 0.45f) 1f - 0.85f * (p / 0.45f) else 0.15f + 0.85f * ((p - 0.45f) / 0.55f)
+    }
+
+    // Hero vertical position: centred (top 50%, shifted up 56%
+    // of its own height) until the flip, then docked at
+    // safe-area + 44px.
+    val heroTopPx = if (!docked) {
+        if (containerSize.height > 0 && heroH > 0) containerSize.height / 2f - 0.56f * heroH else 0f
+    } else dockedTopPx
+
+    // Trackwrap + Next/Previous fade/slide in with the flip:
+    // opacity 1.2s ease .35s delay, translateY 10px->0 1.2s
+    // same ease .35s delay.
+    val trackAlpha by animateFloatAsState(
+        targetValue = if (introLive) 1f else 0f,
+        animationSpec = tween(1200, delayMillis = 350, easing = bysDrawEase),
+        label = "bysTrackAlpha",
+    )
+    val trackOffsetY by animateFloatAsState(
+        targetValue = if (introLive) 0f else 10f,
+        animationSpec = tween(1200, delayMillis = 350, easing = bysEase),
+        label = "bysTrackOffset",
+    )
+    // Skip: opacity .9s ease .5s delay, translateY 6px->0 .9s
+    // same ease .5s delay.
+    val skipAlpha by animateFloatAsState(
+        targetValue = if (introLive) 1f else 0f,
+        animationSpec = tween(900, delayMillis = 500, easing = bysDrawEase),
+        label = "bysSkipAlpha",
+    )
+    val skipOffsetY by animateFloatAsState(
+        targetValue = if (introLive) 0f else 6f,
+        animationSpec = tween(900, delayMillis = 500, easing = bysEase),
+        label = "bysSkipOffset",
+    )
+    // Progress bar fades in on entry (.9s).
+    var progressIn by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) { progressIn = true }
+    val progressAlpha by animateFloatAsState(
+        targetValue = if (progressIn) 1f else 0f,
+        animationSpec = tween(900),
+        label = "bysProgressAlpha",
+    )
+
+    Box(
+        modifier = Modifier.fillMaxSize().background(Color(0xFF060609)).onSizeChanged { containerSize = it },
+    ) {
+        // ---- background: Frieren 1920x1080, cropped 9:16,
+        // panning left->right across the character stops.
+        val frierenBitmap = rememberFrierenBitmap(context)
+        if (frierenBitmap != null) {
             androidx.compose.foundation.Image(
-                bitmap = frieren,
+                bitmap = frierenBitmap,
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = androidx.compose.ui.layout.ContentScale.Crop,
                 alignment = androidx.compose.ui.BiasAlignment(horizontalBias = panBias, verticalBias = 0f),
             )
         }
-        // Dark fade/scrim for readability — same 62% fade as the
-        // other onboarding screens, a touch darker up top over
-        // the bright Frieren art.
+        // ---- scrims (mockup, 3 layers).
         Box(
             Modifier.matchParentSize().background(
                 Brush.verticalGradient(
-                    colorStops = arrayOf(
-                        0.0f to Color(0xFF07070C).copy(alpha = 0.55f),
-                        0.30f to Color.Transparent,
-                        0.50f to Color(0xFF07070C).copy(alpha = 0.60f),
-                        0.62f to Color(0xFF07070C),
-                        1.0f to Color(0xFF07070C),
-                    ),
-                    startY = 0f, endY = Float.POSITIVE_INFINITY,
-                )
-            )
+                    0f to Color(0xFF07070B).copy(alpha = 0.62f),
+                    0.26f to Color(0xFF07070B).copy(alpha = 0.30f),
+                    0.46f to Color(0xFF07070B).copy(alpha = 0.18f),
+                    0.72f to Color(0xFF07070B).copy(alpha = 0.55f),
+                    1f to Color(0xFF07070B).copy(alpha = 0.93f),
+                ),
+            ),
         )
-        Column(
-            modifier = Modifier.fillMaxSize().statusBarsPadding()
-                .navigationBarsPadding().padding(horizontal = 22.dp, vertical = 28.dp),
+        Box(
+            Modifier.matchParentSize().background(
+                Brush.horizontalGradient(
+                    0f to Color(0xFF07070B).copy(alpha = 0.28f),
+                    0.55f to Color.Transparent,
+                ),
+            ),
+        )
+        Box(
+            Modifier.matchParentSize().background(
+                Brush.verticalGradient(
+                    0.66f to Color.Transparent,
+                    0.66f + 0.34f * 0.78f to Color(0xFF060609).copy(alpha = 0.88f),
+                    1f to Color(0xFF060609),
+                ),
+            ),
+        )
+        // ---- progress: 4 segments, top safe-area + 16px,
+        // left/right 22px, gap 6px, height 4px.
+        Box(
+            Modifier
+                .align(Alignment.TopStart)
+                .fillMaxWidth()
+                .padding(start = 22.dp, end = 22.dp)
+                .offset { IntOffset(0, statusBarPx + with(density) { 16.dp.roundToPx() }) }
+                .alpha(progressAlpha),
         ) {
-            Spacer(Modifier.weight(1f))
-            // Heading + description glide up as one block.
-            Column(modifier = Modifier.offset(y = headingLift)) {
-                Text("Before you", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.SemiBold)
-                Text("start", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(10.dp))
-                Text(
-                    "Four quick questions — your answers become the defaults for every download.",
-                    color = Color(0xFFC9C9D6), fontSize = 17.sp, lineHeight = 24.sp,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-            Spacer(Modifier.height(24.dp))
-            if (step < 4) {
-                AnimatedContent(
-                    targetState = step,
-                    transitionSpec = {
-                        if (targetState > initialState) {
-                            slideInHorizontally(animationSpec = tween(1350, easing = ease), initialOffsetX = { it }) + fadeIn(animationSpec = tween(1350, easing = ease)) togetherWith
-                                slideOutHorizontally(animationSpec = tween(1350, easing = ease), targetOffsetX = { -it }) + fadeOut(animationSpec = tween(1350, easing = ease))
-                        } else {
-                            slideInHorizontally(animationSpec = tween(1350, easing = ease), initialOffsetX = { -it }) + fadeIn(animationSpec = tween(1350, easing = ease)) togetherWith
-                                slideOutHorizontally(animationSpec = tween(1350, easing = ease), targetOffsetX = { it }) + fadeOut(animationSpec = tween(1350, easing = ease))
-                        }
-                    },
-                    label = "bysQuestion",
-                ) { q ->
-                    when (q) {
-                        0 -> BysQuestion(
-                            question = "What quality do you usually download?",
-                            options = listOf(
-                                "ask" to ("Ask each time" to "I'll pick every time"),
-                                "1080p" to ("1080p" to "Sharpest picture, biggest files"),
-                                "720p" to ("720p" to "The sweet spot between looks and size"),
-                                "480p" to ("480p" to "Easy on space, still looks fine"),
-                                "360p" to ("360p" to "Tiny files, downloads in a snap"),
-                            ),
-                            selected = quality,
-                            onSelect = { saveQuality(it) },
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                repeat(4) { i ->
+                    Box(
+                        Modifier
+                            .weight(1f)
+                            .height(4.dp)
+                            .clip(RoundedCornerShape(99.dp))
+                            .background(Color.White.copy(alpha = 0.28f)),
+                    ) {
+                        val filled = i < step
+                        val fillScale by animateFloatAsState(
+                            targetValue = if (filled) 1f else 0f,
+                            animationSpec = tween(1200, easing = bysEase),
+                            label = "bysSegFill",
                         )
-                        1 -> BysQuestion(
-                            question = "Sub or Dub?",
-                            options = listOf(
-                                "Sub" to ("Sub" to "Original Japanese audio, English subtitles"),
-                                "Dub" to ("Dub" to "English voices instead of Japanese"),
-                                "ask" to ("Ask each time" to "I'll pick every time"),
-                            ),
-                            selected = language,
-                            onSelect = { saveLanguage(it) },
-                        )
-                        2 -> BysQuestion(
-                            question = "How do you want your subs?",
-                            options = listOf(
-                                "hard" to ("Hard subs" to "Burned into the video. Always there, plays anywhere."),
-                                "soft" to ("Soft subs" to "Separate from the video. Turn them on or off whenever."),
-                                "both" to ("Both works" to "Hard or soft — either is fine by me"),
-                            ),
-                            selected = subsMode,
-                            recommended = "both",
-                            onSelect = { saveSubs(it) },
-                        )
-                        else -> BysQuestion(
-                            question = "We pull from 10 sources, so the same file comes in different sizes. Bigger usually looks sharper, smaller saves space. What should we grab first?",
-                            options = listOf(
-                                "best" to ("Best quality" to "Biggest file, sharpest picture"),
-                                "smallest" to ("Smallest file" to "Smallest file at your chosen quality"),
-                                "fastest" to ("Fastest first" to "The first server to answer wins"),
-                            ),
-                            selected = sizeMode,
-                            onSelect = { saveSize(it) },
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .graphicsLayer {
+                                    scaleX = fillScale
+                                    transformOrigin = TransformOrigin(0f, 0.5f)
+                                }
+                                .background(Pink),
                         )
                     }
                 }
-                Spacer(Modifier.height(20.dp))
-                // Next / Previous above Skip. Next moves on
-                // without answering (keeps the current default);
-                // Previous goes back to change a pick. On the
-                // last question Next becomes Done.
+            }
+        }
+        // ---- hero: absolute, left/right 26px. Centred until the
+        // flip, docked after. No clickable anywhere, so taps pass
+        // through to the trackwrap below (mockup: pointer-events
+        // none on .hero).
+        Box(
+            Modifier
+                .offset { IntOffset(0, heroTopPx.roundToInt()) }
+                .fillMaxWidth()
+                .padding(horizontal = 26.dp)
+                .onGloballyPositioned { heroH = it.size.height },
+        ) {
+            // Pill overlay: centred on top while centred; at the
+            // docked top-left while flipping (fade + drift only);
+            // gone once docked.
+            if (!docked || flipping) {
+                Box(
+                    Modifier
+                        .then(if (!docked) Modifier.align(Alignment.TopCenter) else Modifier.align(Alignment.TopStart))
+                        .onGloballyPositioned {
+                            if (!flipping) {
+                                firstRects["pill"] = it.boundsInWindow()
+                                pillW = it.size.width
+                                pillH = it.size.height
+                            }
+                        }
+                        .bysFlip("pill", noScale = true),
+                ) {
+                    Row(
+                        Modifier
+                            .clip(RoundedCornerShape(99.dp))
+                            .background(Color(0xFFFF4D8D).copy(alpha = 0.22f))
+                            .border(1.dp, Color(0xFFFF4D8D).copy(alpha = 0.5f), RoundedCornerShape(99.dp))
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Box(
+                            Modifier
+                                .size(6.dp)
+                                .shadow(4.dp, CircleShape, ambientColor = Pink, spotColor = Pink)
+                                .background(Pink, CircleShape),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "Step 3 of 3",
+                            fontSize = 11.5.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = 1.61.sp,
+                            color = Color(0xFFFFD3E2),
+                        )
+                    }
+                }
+            }
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = if (!docked) with(density) { pillH.toDp() } + 16.dp else 0.dp),
+                horizontalAlignment = if (!docked) Alignment.CenterHorizontally else Alignment.Start,
+            ) {
+                // h1: two stacked centred words until the flip,
+                // one docked line after (two word Texts + a space
+                // Text, so each word keeps its own FLIP rect).
+                if (!docked) {
+                    Text(
+                        "Before you",
+                        fontSize = 40.sp, fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = (-0.8).sp, lineHeight = 44.8.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .onGloballyPositioned { if (!flipping) firstRects["w1"] = it.boundsInWindow() }
+                            .bysFlip("w1"),
+                    )
+                    Text(
+                        "start",
+                        fontSize = 40.sp, fontWeight = FontWeight.ExtraBold,
+                        letterSpacing = (-0.8).sp, lineHeight = 44.8.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .onGloballyPositioned { if (!flipping) firstRects["w2"] = it.boundsInWindow() }
+                            .bysFlip("w2"),
+                    )
+                } else {
+                    Row {
+                        Text(
+                            "Before you",
+                            fontSize = 27.sp, fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = (-0.54).sp, lineHeight = 30.24.sp,
+                            modifier = Modifier.bysFlip("w1"),
+                        )
+                        Text(
+                            " ",
+                            fontSize = 27.sp, fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = (-0.54).sp, lineHeight = 30.24.sp,
+                        )
+                        Text(
+                            "start",
+                            fontSize = 27.sp, fontWeight = FontWeight.ExtraBold,
+                            letterSpacing = (-0.54).sp, lineHeight = 30.24.sp,
+                            modifier = Modifier.bysFlip("w2"),
+                        )
+                    }
+                }
+                Spacer(Modifier.height(if (!docked) 24.dp else 6.dp))
+                Text(
+                    BysDescText,
+                    fontSize = if (!docked) 15.5.sp else 13.5.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = if (!docked) 23.25.sp else 20.25.sp,
+                    color = Color.White.copy(alpha = 0.78f),
+                    textAlign = if (!docked) TextAlign.Center else TextAlign.Start,
+                    modifier = Modifier
+                        .widthIn(max = if (!docked) 300.dp else 320.dp)
+                        .onGloballyPositioned { if (!flipping) firstRects["desc"] = it.boundsInWindow() }
+                        .bysFlip("desc")
+                        .bysDescAlpha(),
+                )
+            }
+        }
+        // ---- trackwrap: absolute inset 0, padding-top 158px,
+        // padding-bottom 86px (+56px Next/Previous row = 142px).
+        // Fades/slides in with the flip (1.2s, .35s delay).
+        Box(
+            Modifier
+                .fillMaxSize()
+                .padding(top = 158.dp, bottom = 142.dp)
+                .graphicsLayer { alpha = trackAlpha; translationY = trackOffsetY },
+        ) {
+            AnimatedContent(
+                targetState = step,
+                modifier = Modifier.fillMaxSize(),
+                transitionSpec = {
+                    val dir = if (targetState > initialState) 1 else -1
+                    (slideInHorizontally(animationSpec = tween(1350, easing = bysEase)) { it * dir } + fadeIn(animationSpec = tween(1350, easing = bysEase))) togetherWith
+                        (slideOutHorizontally(animationSpec = tween(1350, easing = bysEase)) { -it * dir } + fadeOut(animationSpec = tween(1350, easing = bysEase)))
+                },
+                label = "bysTrack",
+            ) { s ->
+                if (s < 4) {
+                    when (s) {
+                        0 -> BysQuestion(
+                            qnum = "Question 1 of 4",
+                            question = "What quality do you usually download?",
+                            longQuestion = false,
+                            options = listOf(
+                                BysOption("ask", "Ask each time", "I'll pick every time"),
+                                BysOption("1080p", "1080p", "Sharpest picture, biggest files"),
+                                BysOption("720p", "720p", "The sweet spot between looks and size"),
+                                BysOption("480p", "480p", "Easy on space, still looks fine"),
+                                BysOption("360p", "360p", "Tiny files, downloads in a snap"),
+                            ),
+                            selected = quality, recommended = null,
+                            enabled = introLive && !advancing, onSelect = { onPick(it) },
+                        )
+                        1 -> BysQuestion(
+                            qnum = "Question 2 of 4",
+                            question = "Sub or Dub?",
+                            longQuestion = false,
+                            options = listOf(
+                                BysOption("sub", "Sub", "Original Japanese audio, English subtitles"),
+                                BysOption("dub", "Dub", "English voices instead of Japanese"),
+                                BysOption("ask", "Ask each time", "Depends on the show — I'll pick per title"),
+                            ),
+                            selected = language, recommended = null,
+                            enabled = introLive && !advancing, onSelect = { onPick(it) },
+                        )
+                        2 -> BysQuestion(
+                            qnum = "Question 3 of 4",
+                            question = "How do you want your subs?",
+                            longQuestion = false,
+                            options = listOf(
+                                BysOption("hard", "Hard subs", "Burned into the video. Always there, plays anywhere."),
+                                BysOption("soft", "Soft subs", "Separate from the video. Turn them on or off whenever."),
+                                BysOption("both", "Both works", "Hard or soft — either is fine by me"),
+                            ),
+                            selected = subs, recommended = "both",
+                            enabled = introLive && !advancing, onSelect = { onPick(it) },
+                        )
+                        else -> BysQuestion(
+                            qnum = "Question 4 of 4",
+                            question = "We pull from 10 sources, so the same file comes in different sizes. Bigger usually looks sharper, smaller saves space. What should we grab first?",
+                            longQuestion = true,
+                            options = listOf(
+                                BysOption("best", "Best quality", "Biggest file, sharpest picture"),
+                                BysOption("smallest", "Smallest file", "Saves space and data"),
+                                BysOption("fastest", "Fastest first", "Whatever gets here quickest"),
+                            ),
+                            selected = sizePref, recommended = null,
+                            enabled = introLive && !advancing, onSelect = { onPick(it) },
+                        )
+                    }
+                } else {
+                    BysDonePanel(
+                        qualityLabel = when (quality) { "ask" -> "Ask each time"; else -> quality },
+                        languageLabel = when (language) { "ask" -> "Ask each time"; "sub" -> "Sub"; else -> "Dub" },
+                        subsLabel = when (subs) { "hard" -> "Hard subs"; "soft" -> "Soft subs"; else -> "Both works" },
+                        sizeLabel = when (sizePref) { "best" -> "Best quality"; "smallest" -> "Smallest file"; else -> "Fastest first" },
+                        answered = answered.toList(),
+                        skipped = skipped,
+                        onFinish = onFinish,
+                    )
+                }
+            }
+        }
+        // ---- bottom: Next/Previous above Skip. (App-only
+        // buttons — the mockup has none; no new mockup, just
+        // build them in.) Skip hides on the done step, like the
+        // mockup. Bottom = safe-area + 18px.
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(
+                    start = 20.dp, end = 20.dp,
+                    bottom = with(density) { navBarPx.toDp() } + 18.dp,
+                )
+                .graphicsLayer { alpha = trackAlpha; translationY = trackOffsetY },
+        ) {
+            if (step < 4) {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     if (step > 0 || onBackToNotif != null) {
                         Box(
-                            modifier = Modifier.weight(1f).height(56.dp)
+                            Modifier
+                                .weight(1f)
+                                .height(56.dp)
                                 .clip(RoundedCornerShape(999.dp))
                                 .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(999.dp))
-                                .clickable {
-                                    if (step > 0) step-- else onBackToNotif?.invoke()
-                                },
+                                .clickable { onPrev() },
                             contentAlignment = Alignment.Center,
-                        ) { Text("Previous", color = Muted, fontSize = 17.sp, fontWeight = FontWeight.Bold) }
+                        ) {
+                            Text("Previous", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color(0xFFC9C9D6))
+                        }
                     }
                     Box(
-                        modifier = Modifier.weight(1f).height(56.dp)
-                            .clip(RoundedCornerShape(999.dp)).background(Pink)
-                            .clickable { if (step == 3) step = 4 else step++ },
+                        Modifier
+                            .weight(1f)
+                            .height(56.dp)
+                            .clip(RoundedCornerShape(999.dp))
+                            .background(Pink)
+                            .clickable { onNext() },
                         contentAlignment = Alignment.Center,
-                    ) { Text(if (step == 3) "Done" else "Next", color = OnAccent, fontSize = 17.sp, fontWeight = FontWeight.Bold) }
+                    ) {
+                        Text(if (step == 3) "Done" else "Next", fontSize = 17.sp, fontWeight = FontWeight.Bold, color = Color.White)
+                    }
                 }
                 Spacer(Modifier.height(12.dp))
-                Text(
-                    "Skip",
-                    color = Muted, fontSize = 16.sp, fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth().clickable { onFinish() },
-                )
-            } else {
-                // Done: the badge over the Stark end-frame.
-                Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                    Box(
-                        modifier = Modifier.graphicsLayer(scaleX = badgeScale, scaleY = badgeScale, alpha = badgeScale)
-                            .clip(RoundedCornerShape(999.dp)).background(Pink)
-                            .padding(horizontal = 20.dp, vertical = 12.dp),
-                        contentAlignment = Alignment.Center,
-                    ) { Text("You're all set", color = OnAccent, fontSize = 18.sp, fontWeight = FontWeight.Bold) }
-                    Spacer(Modifier.height(20.dp))
-                    Box(
-                        modifier = Modifier.fillMaxWidth().height(56.dp)
-                            .clip(RoundedCornerShape(999.dp)).background(Pink)
-                            .clickable { onFinish() },
-                        contentAlignment = Alignment.Center,
-                    ) { Text("Done", color = OnAccent, fontSize = 17.sp, fontWeight = FontWeight.Bold) }
+            }
+            if (step < 4) {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 44.dp)
+                        .graphicsLayer { alpha = skipAlpha; translationY = skipOffsetY }
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onSkip() }
+                        .padding(horizontal = 8.dp, vertical = 12.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        buildAnnotatedString {
+                            pushStyle(SpanStyle(textDecoration = TextDecoration.Underline))
+                            append("Skip for now")
+                            pop()
+                            append(" — you can change all of this later.")
+                        },
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White.copy(alpha = 0.85f),
+                    )
                 }
             }
-            Spacer(Modifier.height(16.dp))
-            Text(
-                "You can change these anytime in Settings → Sources",
-                color = Faint, fontSize = 13.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth(),
-            )
         }
     }
 }
 
-// 2.0-dev2.14: one Before You Start question — the question
-// text plus tappable option rows (pink radio circle, title,
-// plain-words description, optional Recommended badge).
-// Tapping an option selects it AND writes the pref at once.
+// "You're all set" end state — the mockup's animated badge:
+// spring pop, self-drawing check, rotating dashed ring, two
+// expanding pulses, 5 sparks, then heading, sub, picks summary
+// and Let's go rising in. One 8s clock (seconds) drives every
+// keyframe; the ring spins on its own infinite 18s driver. The
+// panel lingers — no auto-finish (dev2.14 cut it short at
+// 1600ms; the mockup never auto-finishes).
 @Composable
-private fun BysQuestion(
-    question: String,
-    options: List<Pair<String, Pair<String, String>>>,
-    selected: String,
-    recommended: String? = null,
-    onSelect: (String) -> Unit,
+private fun BysDonePanel(
+    qualityLabel: String,
+    languageLabel: String,
+    subsLabel: String,
+    sizeLabel: String,
+    answered: List<Boolean>,
+    skipped: Boolean,
+    onFinish: () -> Unit,
 ) {
-    Column {
-        Text(question, color = Color.White, fontSize = 20.sp, lineHeight = 28.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(14.dp))
-        options.forEach { (value, titleDesc) ->
-            val (title, desc) = titleDesc
-            val isSelected = selected == value
-            Row(
-                modifier = Modifier.fillMaxWidth().clickable { onSelect(value) }.padding(vertical = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
+    val density = LocalDensity.current
+    val badgeClock = remember { Animatable(0f) }
+    val ringTransition = rememberInfiniteTransition(label = "bysRing")
+    val ringAngle by ringTransition.animateFloat(
+        initialValue = 0f, targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(18000, easing = bysLinear), RepeatMode.Restart),
+        label = "bysRingAngle",
+    )
+    // .done.show triggers 350ms after reaching step 4.
+    LaunchedEffect(Unit) {
+        kotlinx.coroutines.delay(350)
+        badgeClock.animateTo(1f, tween(8000, easing = bysLinear))
+    }
+    val t = badgeClock.value * 8f
+
+    // Badge pop (badgePop 1.1s spring, .45s delay):
+    // scale(0) rotate(-24) -> scale(1.1) rotate(4) at 60% -> scale(1) rotate(0).
+    val badgeQ = ((t - 0.45f) / 1.1f).coerceIn(0f, 1f)
+    val badgeScale: Float
+    val badgeRot: Float
+    if (badgeQ < 0.6f) {
+        val e = bysSpring.transform(badgeQ / 0.6f)
+        badgeScale = 1.1f * e
+        badgeRot = -24f + 28f * e
+    } else {
+        val e = bysSpring.transform((badgeQ - 0.6f) / 0.4f)
+        badgeScale = 1.1f - 0.1f * e
+        badgeRot = 4f - 4f * e
+    }
+    // Check draw (.65s ease, 1.15s delay).
+    val checkQ = ((t - 1.15f) / 0.65f).coerceIn(0f, 1f)
+    val checkE = bysDrawEase.transform(checkQ)
+
+    // Rise-ins (.9s ease): h2 1.3s, sub 1.5s, summary 1.7s, actions 1.9s.
+    fun riseE(delay: Float): Float {
+        val q = ((t - delay) / 0.9f).coerceIn(0f, 1f)
+        return bysEase.transform(q)
+    }
+    val h2Rise = riseE(1.3f)
+    val subRise = riseE(1.5f)
+    val sumRise = riseE(1.7f)
+    val actRise = riseE(1.9f)
+
+    // Mockup summary: labels Quality / Audio / Subs / Grab first;
+    // value = the picked option's title, "—" if unanswered,
+    // "Default" (pink) for every row when skipped.
+    val rows: List<Pair<String, String?>> = listOf(
+        "Quality" to if (skipped) null else if (answered.getOrElse(0) { false }) qualityLabel else "—",
+        "Audio" to if (skipped) null else if (answered.getOrElse(1) { false }) languageLabel else "—",
+        "Subs" to if (skipped) null else if (answered.getOrElse(2) { false }) subsLabel else "—",
+        "Grab first" to if (skipped) null else if (answered.getOrElse(3) { false }) sizeLabel else "—",
+    )
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(top = 26.dp, start = 24.dp, end = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Spacer(Modifier.height(8.dp))
+        // ---- badge zone: 170x170px.
+        Box(Modifier.size(170.dp), contentAlignment = Alignment.Center) {
+            // Badge circle, inset 22px -> 126px. Radial gradient
+            // circle at 32% 28%: #ff7dab -> pink 55% -> #E93A7B.
+            // Outer shadow 0 18px 44px pink .5; inner top highlight
+            // and bottom shade approximated with gradients.
+            Box(
+                Modifier
+                    .size(126.dp)
+                    .graphicsLayer { scaleX = badgeScale; scaleY = badgeScale; rotationZ = badgeRot }
+                    .shadow(18.dp, CircleShape, ambientColor = Pink.copy(alpha = 0.5f), spotColor = Pink.copy(alpha = 0.5f))
+                    .clip(CircleShape)
+                    .background(
+                        Brush.radialGradient(
+                            0f to Color(0xFFFF7DAB),
+                            0.55f to Pink,
+                            1f to Color(0xFFE93A7B),
+                            center = with(density) { Offset(126.dp.toPx() * 0.32f, 126.dp.toPx() * 0.28f) },
+                            radius = with(density) { 126.dp.toPx() },
+                        ),
+                    ),
+                contentAlignment = Alignment.Center,
             ) {
+                // Inset top highlight + bottom shade.
                 Box(
-                    modifier = Modifier.size(20.dp).clip(RoundedCornerShape(999.dp)).border(2.dp, if (isSelected) Pink else Color.White.copy(alpha = 0.25f), RoundedCornerShape(999.dp)).background(if (isSelected) Pink else Color.Transparent),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    if (isSelected) Box(modifier = Modifier.size(8.dp).clip(RoundedCornerShape(999.dp)).background(Color.White))
+                    Modifier.matchParentSize().background(
+                        Brush.verticalGradient(0f to Color.White.copy(alpha = 0.45f), 0.3f to Color.Transparent),
+                    ),
+                )
+                Box(
+                    Modifier.matchParentSize().background(
+                        Brush.verticalGradient(0.7f to Color.Transparent, 1f to Color(0xFFA0003C).copy(alpha = 0.35f)),
+                    ),
+                )
+                // Check, 56px, path M4.5 12.5 9.8 17.8 19.5 6.8,
+                // stroke white 3.4, round caps/joins, dasharray 30.
+                Canvas(Modifier.size(56.dp)) {
+                    val s = size.minDimension / 24f
+                    val path = Path().apply {
+                        moveTo(4.5f * s, 12.5f * s)
+                        lineTo(9.8f * s, 17.8f * s)
+                        lineTo(19.5f * s, 6.8f * s)
+                    }
+                    val measure = PathMeasure()
+                    measure.setPath(path, false)
+                    val seg = Path()
+                    measure.getSegment(0f, measure.length * checkE, seg, true)
+                    drawPath(
+                        seg, Color.White,
+                        style = Stroke(width = 3.4.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
+                    )
                 }
-                Spacer(Modifier.width(12.dp))
-                Column(modifier = Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(title, color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                        if (recommended == value) {
-                            Spacer(Modifier.width(8.dp))
-                            Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Pink).padding(horizontal = 8.dp, vertical = 2.dp)) {
-                                Text("Recommended", color = Color.White, fontSize = 11.sp, fontWeight = FontWeight.Bold)
+            }
+            // Rotating dashed ring, inset 6px -> 158px, 2px dashed
+            // white .5, spins 18s linear infinite.
+            Canvas(
+                Modifier.size(158.dp).graphicsLayer { rotationZ = ringAngle },
+            ) {
+                drawCircle(
+                    color = Color.White.copy(alpha = 0.5f),
+                    radius = (size.minDimension - 2.dp.toPx()) / 2f,
+                    style = Stroke(
+                        width = 2.dp.toPx(),
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 6.dp.toPx()), 0f),
+                    ),
+                )
+            }
+            // Pulses: inset 22px -> 126px, 2px solid pink .65,
+            // 2s ease-out, 2 iterations, delays 1s and 3s.
+            listOf(1f, 3f).forEach { delay ->
+                val q = if (t < delay || t > delay + 4f) -1f else ((t - delay) / 2f) % 1f
+                if (q >= 0f) {
+                    val e = bysEaseOut.transform(q)
+                    Box(
+                        Modifier
+                            .size(126.dp)
+                            .graphicsLayer {
+                                scaleX = 1f + 0.65f * e
+                                scaleY = 1f + 0.65f * e
+                                alpha = 0.8f * (1f - q)
                             }
+                            .border(2.dp, Pink.copy(alpha = 0.65f), CircleShape),
+                    )
+                }
+            }
+            // Sparks: 5 dots, 7px #FFD3E2, 1.1s ease-out.
+            listOf(
+                Triple(-38f, -30f, 1.05f),
+                Triple(40f, -24f, 1.12f),
+                Triple(-34f, 22f, 1.18f),
+                Triple(36f, 26f, 1.10f),
+                Triple(4f, -36f, 1.22f),
+            ).forEach { (dx, dy, delay) ->
+                val q = ((t - delay) / 1.1f).coerceIn(0f, 1f)
+                val e = bysEaseOut.transform(q)
+                val sparkAlpha = if (t < delay) 0f else if (q < 0.25f) q / 0.25f else 1f - (q - 0.25f) / 0.75f
+                Box(
+                    Modifier
+                        .size(7.dp)
+                        .graphicsLayer {
+                            translationX = dx.dp.toPx() * e
+                            translationY = dy.dp.toPx() * e
+                            scaleX = 0.4f + 0.6f * q
+                            scaleY = 0.4f + 0.6f * q
+                            alpha = sparkAlpha
+                        }
+                        .background(Color(0xFFFFD3E2), CircleShape),
+                )
+            }
+        }
+        // ---- "You're all set" 31px/800, margin-top 20px.
+        Text(
+            "You're all set",
+            fontSize = 31.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = (-0.62).sp,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .padding(top = 20.dp)
+                .graphicsLayer { alpha = h2Rise; translationY = 12.dp.toPx() * (1f - h2Rise) },
+        )
+        // ---- sub 14.5px/600, line-height 1.5, max-width 290px.
+        Text(
+            if (skipped) "No worries — you're on the defaults for now. Change any of this whenever in Settings."
+            else "These are now your download defaults — every episode, every time. Tweak them whenever in Settings.",
+            fontSize = 14.5.sp, fontWeight = FontWeight.SemiBold, lineHeight = 21.75.sp,
+            color = Color.White.copy(alpha = 0.78f),
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .padding(top = 8.dp)
+                .widthIn(max = 290.dp)
+                .graphicsLayer { alpha = subRise; translationY = 12.dp.toPx() * (1f - subRise) },
+        )
+        // ---- summary card: margin-top 22px, radius 18px,
+        // padding 6px 16px, rows 10px vertical, divider 1px
+        // white .09, label 13px/600 faint, value 14.5px/800.
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 22.dp)
+                .graphicsLayer { alpha = sumRise; translationY = 12.dp.toPx() * (1f - sumRise) }
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF0D0D13).copy(alpha = 0.72f))
+                .border(1.5.dp, Color.White.copy(alpha = 0.16f), RoundedCornerShape(18.dp))
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+        ) {
+            Column {
+                rows.forEachIndexed { idx, (label, value) ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(label, fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = Color.White.copy(alpha = 0.55f))
+                        if (value == null) {
+                            Text("Default", fontSize = 14.5.sp, fontWeight = FontWeight.ExtraBold, color = Pink)
+                        } else {
+                            Text(value, fontSize = 14.5.sp, fontWeight = FontWeight.ExtraBold, color = Color.White, textAlign = TextAlign.End)
                         }
                     }
-                    Spacer(Modifier.height(2.dp))
-                    Text(desc, color = Color(0xFFC9C9D6), fontSize = 13.sp, lineHeight = 18.sp)
+                    if (idx < rows.lastIndex) {
+                        Box(Modifier.fillMaxWidth().height(1.dp).background(Color.White.copy(alpha = 0.09f)))
+                    }
                 }
             }
         }
+        // ---- actions: margin-top 20px. Primary "Let's go":
+        // min-height 54px, radius 16px, 16.5px/800, shadow
+        // 0 12px 30px pink .4. Finishes immediately (the app
+        // has no demo replay step).
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 20.dp)
+                .graphicsLayer { alpha = actRise; translationY = 12.dp.toPx() * (1f - actRise) },
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(54.dp)
+                    .shadow(12.dp, RoundedCornerShape(16.dp), ambientColor = Pink.copy(alpha = 0.4f), spotColor = Pink.copy(alpha = 0.4f))
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(Pink)
+                    .clickable { onFinish() },
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("Let's go", fontSize = 16.5.sp, fontWeight = FontWeight.ExtraBold, letterSpacing = 0.17.sp, color = Color.White)
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+@Composable
+private fun BysQuestion(
+    qnum: String,
+    question: String,
+    longQuestion: Boolean,
+    options: List<BysOption>,
+    selected: String,
+    recommended: String?,
+    enabled: Boolean,
+    onSelect: (String) -> Unit,
+) {
+    Column(
+        Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(top = 10.dp, start = 24.dp, end = 24.dp),
+    ) {
+        Text(
+            qnum,
+            fontSize = 12.sp, fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 1.56.sp, color = Pink,
+        )
+        Spacer(Modifier.height(10.dp))
+        Text(
+            question,
+            fontSize = if (longQuestion) 20.5.sp else 25.sp,
+            fontWeight = if (longQuestion) FontWeight.Bold else FontWeight.ExtraBold,
+            lineHeight = if (longQuestion) 29.11.sp else 32.sp,
+            letterSpacing = if (longQuestion) (-0.21).sp else (-0.25).sp,
+        )
+        Spacer(Modifier.height(20.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            options.forEach { opt ->
+                BysOptionRow(
+                    opt = opt,
+                    isSelected = opt.value == selected,
+                    isRecommended = opt.value == recommended,
+                    enabled = enabled,
+                    onSelect = onSelect,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BysOptionRow(
+    opt: BysOption,
+    isSelected: Boolean,
+    isRecommended: Boolean,
+    enabled: Boolean,
+    onSelect: (String) -> Unit,
+) {
+    // animateColorAsState is gone from animation-core 1.10.5, so
+    // the .3s picked transition is a 0..1 progress + Color.lerp.
+    val pickProgress by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0f,
+        animationSpec = tween(300),
+        label = "bysOptPick",
+    )
+    val bg = lerp(Color(0xFF0D0D13).copy(alpha = 0.72f), Pink.copy(alpha = 0.26f), pickProgress)
+    val border = lerp(Color.White.copy(alpha = 0.16f), Pink, pickProgress)
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val pressScale by animateFloatAsState(
+        targetValue = if (pressed) 0.985f else 1f,
+        animationSpec = tween(250),
+        label = "bysOptPress",
+    )
+    val dotScale by animateFloatAsState(
+        targetValue = if (isSelected) 1f else 0f,
+        animationSpec = tween(350, easing = bysSpring),
+        label = "bysOptDot",
+    )
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .defaultMinSize(minHeight = 58.dp)
+            .graphicsLayer { scaleX = pressScale; scaleY = pressScale }
+            .then(
+                if (isSelected) Modifier.shadow(
+                    8.dp, RoundedCornerShape(16.dp),
+                    ambientColor = Pink.copy(alpha = 0.28f), spotColor = Pink.copy(alpha = 0.28f),
+                ) else Modifier,
+            )
+            .clip(RoundedCornerShape(16.dp))
+            .background(bg)
+            .border(1.5.dp, border, RoundedCornerShape(16.dp))
+            .clickable(interactionSource = interactionSource, indication = null) { if (enabled) onSelect(opt.value) }
+            .padding(horizontal = 16.dp, vertical = 13.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier
+                    .size(21.dp)
+                    .clip(CircleShape)
+                    .border(2.dp, if (isSelected) Pink else Color.White.copy(alpha = 0.45f), CircleShape),
+                contentAlignment = Alignment.Center,
+            ) {
+                Box(
+                    Modifier
+                        .size(11.dp)
+                        .graphicsLayer { scaleX = dotScale; scaleY = dotScale }
+                        .background(Pink, CircleShape),
+                )
+            }
+            Spacer(Modifier.width(13.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        opt.title,
+                        fontSize = 16.5.sp, fontWeight = FontWeight.ExtraBold, lineHeight = 20.6.sp,
+                    )
+                    if (isRecommended) {
+                        Spacer(Modifier.width(9.dp))
+                        BysRecTag()
+                    }
+                }
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    opt.desc,
+                    fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                    lineHeight = 18.2.sp, color = Color.White.copy(alpha = 0.78f),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BysRecTag() {
+    Box(
+        Modifier
+            .shadow(4.dp, RoundedCornerShape(99.dp), ambientColor = Pink.copy(alpha = 0.55f), spotColor = Pink.copy(alpha = 0.55f))
+            .clip(RoundedCornerShape(99.dp))
+            .background(Pink)
+            .border(1.dp, Color.White.copy(alpha = 0.45f), RoundedCornerShape(99.dp))
+            .padding(horizontal = 9.dp, vertical = 5.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            "RECOMMENDED",
+            fontSize = 10.5.sp, fontWeight = FontWeight.ExtraBold,
+            letterSpacing = 1.05.sp, color = Color.White,
+        )
     }
 }
 

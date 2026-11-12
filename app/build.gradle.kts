@@ -13,8 +13,8 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 75
-        versionName = "2.0-dev2.14"
+        versionCode = 76
+        versionName = "2.0-dev2.15"
         // 2.0-dev1.5: Cronet ships a native lib per ABI (~7 MB for
         // arm64, ~4 MB for armv7, ~7 MB each for x86/x86_64). Only
         // real-phone ABIs are packaged — x86/x86_64 are emulators
