@@ -3568,9 +3568,32 @@ private fun BeforeYouStartPage(
     }
 
     var step by remember { mutableStateOf(0) }
-    var advancing by remember { mutableStateOf(false) }
+    // dev2.16: the question slide is DRIVEN, not a plain
+    // AnimatedContent transition — a plain transition cannot be
+    // sped up mid-flight, and the options must stay tappable
+    // while the card is still sliding in. slideProgress (0 =
+    // just entered, 1 = settled) drives both cards' offset +
+    // fade; a tap mid-flight re-animates it to 1 with a short
+    // 250ms tween (same easing) from wherever it is — a smooth
+    // fast finish, never a snap. Animatable restarts from the
+    // current value, so the in-flight animation is cancelled
+    // cleanly. sliding = a slide is running (nav locked);
+    // pickLock = a pick is being processed (everything locked
+    // until the next question settles).
+    val slideProgress = remember { Animatable(1f) }
+    var slideDir by remember { mutableStateOf(1) }
+    var prevStep by remember { mutableStateOf<Int?>(null) }
+    var trackW by remember { mutableStateOf(0) }
+    var sliding by remember { mutableStateOf(false) }
+    var pickLock by remember { mutableStateOf(false) }
     var skipped by remember { mutableStateOf(false) }
     val answered = remember { mutableStateListOf(false, false, false, false) }
+    // dev2.16: display selection starts EMPTY per question — no
+    // pink highlight until the user taps an option. The tap
+    // state is remembered per question so going back shows the
+    // earlier pick; the pref itself is only written on tap
+    // (Next without answering keeps the existing default).
+    val picked = remember { mutableStateListOf<String?>(null, null, null, null) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
 
@@ -3644,34 +3667,72 @@ private fun BeforeYouStartPage(
         flipTargets.value = null
     }
 
+    // Runs the slide for the just-swapped step: snap to the entry
+    // offset, then 1.35s to settled, same easing. Called from a
+    // coroutine on the main thread; the swap + snap land in the
+    // same frame (Main.immediate runs the launch synchronously
+    // until the first real suspension), so the new card never
+    // flashes settled. If a mid-flight tap fast-forwards, this
+    // animation is cancelled and the finally leaves prevStep in
+    // place — the fast-forward drives it out instead.
+    suspend fun runSlide(durationMs: Int) {
+        sliding = true
+        slideProgress.snapTo(0f)
+        try {
+            slideProgress.animateTo(1f, tween(durationMs, easing = bysEase))
+        } finally {
+            if (slideProgress.value >= 1f) prevStep = null
+            sliding = false
+        }
+    }
     fun goToStep(next: Int) {
-        if (advancing || !introLive) return
-        advancing = true
-        step = next
-        scope.launch { kotlinx.coroutines.delay(1350); advancing = false }
+        if (sliding || pickLock || !introLive) return
+        val dir = if (next > step) 1 else -1
+        scope.launch {
+            slideDir = dir
+            prevStep = step
+            step = next
+            runSlide(1350)
+        }
     }
     fun onPick(value: String) {
-        if (advancing || !introLive) return
-        when (step) {
-            0 -> saveQuality(value)
-            1 -> saveLanguage(value)
-            2 -> saveSubs(value)
-            3 -> saveSize(value)
+        if (pickLock || !introLive) return
+        pickLock = true
+        scope.launch {
+            // Fast-forward any in-flight slide: same easing, 250ms,
+            // from the current value — a smooth fast finish, never
+            // a snap. No-op when the card is already settled.
+            slideProgress.animateTo(1f, tween(250, easing = bysEase))
+            when (step) {
+                0 -> saveQuality(value)
+                1 -> saveLanguage(value)
+                2 -> saveSubs(value)
+                3 -> saveSize(value)
+            }
+            picked[step] = value
+            answered[step] = true
+            kotlinx.coroutines.delay(480) // mockup's pick hold
+            // The pick is done — unlock BEFORE the next question
+            // slides in, so its options are tappable mid-flight.
+            // (A second tap on THIS question is already impossible:
+            // the card is leaving.)
+            pickLock = false
+            slideDir = 1
+            prevStep = step
+            step++
+            runSlide(1350)
         }
-        answered[step] = true
-        advancing = true
-        scope.launch { kotlinx.coroutines.delay(480); step++; kotlinx.coroutines.delay(1350); advancing = false }
     }
     fun onNext() {
-        if (advancing || !introLive) return
+        if (sliding || pickLock || !introLive) return
         if (step < 3) goToStep(step + 1)
     }
     fun onPrev() {
-        if (advancing || !introLive) return
+        if (sliding || pickLock || !introLive) return
         if (step > 0) goToStep(step - 1) else onBackToNotif?.invoke()
     }
     fun onSkip() {
-        if (advancing || !introLive) return
+        if (sliding || pickLock || !introLive) return
         // Mockup: Skip goes to the done panel with the defaults
         // summary (it does NOT finish straight away).
         skipped = true
@@ -3944,87 +4005,69 @@ private fun BeforeYouStartPage(
                 )
             }
         }
-        // ---- trackwrap: absolute inset 0, padding-top 158px,
-        // padding-bottom 86px (+56px Next/Previous row = 142px).
-        // Fades/slides in with the flip (1.2s, .35s delay).
+        // ---- trackwrap: absolute inset 0. Mockup padding-top is
+        // 158px — but the mockup's hero sits at 44px from the
+        // frame top (safe-area 0 in the browser) while the app's
+        // hero is pushed down by the real status bar, so the
+        // trackwrap must carry the same inset or the gap between
+        // the description and "Question N of 4" shrinks by exactly
+        // the status bar (~48dp on JS's phone: the dev2.15 gap was
+        // ~0). Top = status bar + 158dp restores the mockup's
+        // 47dp gap on any device. Bottom 86px (+56px
+        // Next/Previous row = 142px). Fades/slides in with the
+        // flip (1.2s, .35s delay).
         Box(
             Modifier
                 .fillMaxSize()
-                .padding(top = 158.dp, bottom = 142.dp)
+                .padding(top = with(density) { statusBarPx.toDp() } + 158.dp, bottom = 142.dp)
                 .graphicsLayer { alpha = trackAlpha; translationY = trackOffsetY },
         ) {
-            AnimatedContent(
-                targetState = step,
-                modifier = Modifier.fillMaxSize(),
-                transitionSpec = {
-                    val dir = if (targetState > initialState) 1 else -1
-                    (slideInHorizontally(animationSpec = tween(1350, easing = bysEase)) { it * dir } + fadeIn(animationSpec = tween(1350, easing = bysEase))) togetherWith
-                        (slideOutHorizontally(animationSpec = tween(1350, easing = bysEase)) { -it * dir } + fadeOut(animationSpec = tween(1350, easing = bysEase)))
-                },
-                label = "bysTrack",
-            ) { s ->
-                if (s < 4) {
-                    when (s) {
-                        0 -> BysQuestion(
-                            qnum = "Question 1 of 4",
-                            question = "What quality do you usually download?",
-                            longQuestion = false,
-                            options = listOf(
-                                BysOption("ask", "Ask each time", "I'll pick every time"),
-                                BysOption("1080p", "1080p", "Sharpest picture, biggest files"),
-                                BysOption("720p", "720p", "The sweet spot between looks and size"),
-                                BysOption("480p", "480p", "Easy on space, still looks fine"),
-                                BysOption("360p", "360p", "Tiny files, downloads in a snap"),
-                            ),
-                            selected = quality, recommended = null,
-                            enabled = introLive && !advancing, onSelect = { onPick(it) },
-                        )
-                        1 -> BysQuestion(
-                            qnum = "Question 2 of 4",
-                            question = "Sub or Dub?",
-                            longQuestion = false,
-                            options = listOf(
-                                BysOption("sub", "Sub", "Original Japanese audio, English subtitles"),
-                                BysOption("dub", "Dub", "English voices instead of Japanese"),
-                                BysOption("ask", "Ask each time", "Depends on the show — I'll pick per title"),
-                            ),
-                            selected = language, recommended = null,
-                            enabled = introLive && !advancing, onSelect = { onPick(it) },
-                        )
-                        2 -> BysQuestion(
-                            qnum = "Question 3 of 4",
-                            question = "How do you want your subs?",
-                            longQuestion = false,
-                            options = listOf(
-                                BysOption("hard", "Hard subs", "Burned into the video. Always there, plays anywhere."),
-                                BysOption("soft", "Soft subs", "Separate from the video. Turn them on or off whenever."),
-                                BysOption("both", "Both works", "Hard or soft — either is fine by me"),
-                            ),
-                            selected = subs, recommended = "both",
-                            enabled = introLive && !advancing, onSelect = { onPick(it) },
-                        )
-                        else -> BysQuestion(
-                            qnum = "Question 4 of 4",
-                            question = "We pull from 10 sources, so the same file comes in different sizes. Bigger usually looks sharper, smaller saves space. What should we grab first?",
-                            longQuestion = true,
-                            options = listOf(
-                                BysOption("best", "Best quality", "Biggest file, sharpest picture"),
-                                BysOption("smallest", "Smallest file", "Saves space and data"),
-                                BysOption("fastest", "Fastest first", "Whatever gets here quickest"),
-                            ),
-                            selected = sizePref, recommended = null,
-                            enabled = introLive && !advancing, onSelect = { onPick(it) },
+            // Driven slide (dev2.16): the incoming card slides in
+            // from the entry edge + fades, the outgoing card slides
+            // out the far side + fades — both from slideProgress,
+            // so a mid-flight tap fast-forwards both together.
+            // Outgoing taps are swallowed (enabled=false + a no-op
+            // clickable over it); only the incoming card's options
+            // are live, from the moment they appear.
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .onSizeChanged { trackW = it.width },
+            ) {
+                prevStep?.let { ps ->
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                translationX = -slideProgress.value * trackW * slideDir
+                                alpha = 1f - slideProgress.value
+                            }
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) { },
+                    ) {
+                        BysStepContent(
+                            s = ps, quality = quality, language = language, subs = subs,
+                            sizePref = sizePref, picked = picked, answered = answered,
+                            skipped = skipped, enabled = false,
+                            onPick = { onPick(it) }, onFinish = onFinish,
                         )
                     }
-                } else {
-                    BysDonePanel(
-                        qualityLabel = when (quality) { "ask" -> "Ask each time"; else -> quality },
-                        languageLabel = when (language) { "ask" -> "Ask each time"; "sub" -> "Sub"; else -> "Dub" },
-                        subsLabel = when (subs) { "hard" -> "Hard subs"; "soft" -> "Soft subs"; else -> "Both works" },
-                        sizeLabel = when (sizePref) { "best" -> "Best quality"; "smallest" -> "Smallest file"; else -> "Fastest first" },
-                        answered = answered.toList(),
-                        skipped = skipped,
-                        onFinish = onFinish,
+                }
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            translationX = (1f - slideProgress.value) * trackW * slideDir
+                            alpha = slideProgress.value
+                        },
+                ) {
+                    BysStepContent(
+                        s = step, quality = quality, language = language, subs = subs,
+                        sizePref = sizePref, picked = picked, answered = answered,
+                        skipped = skipped, enabled = introLive && !pickLock,
+                        onPick = { onPick(it) }, onFinish = onFinish,
                     )
                 }
             }
@@ -4097,6 +4140,91 @@ private fun BeforeYouStartPage(
                 }
             }
         }
+    }
+}
+
+// One Before You Start step — a question or the done panel.
+// Extracted from the old AnimatedContent body (dev2.16) so the
+// driven slide can render the incoming AND outgoing cards.
+// `enabled` gates the option rows: the outgoing card passes
+// false (its taps are swallowed by the overlay clickable).
+@Composable
+private fun BysStepContent(
+    s: Int,
+    quality: String,
+    language: String,
+    subs: String,
+    sizePref: String,
+    picked: List<String?>,
+    answered: List<Boolean>,
+    skipped: Boolean,
+    enabled: Boolean,
+    onPick: (String) -> Unit,
+    onFinish: () -> Unit,
+) {
+    if (s < 4) {
+        when (s) {
+            0 -> BysQuestion(
+                qnum = "Question 1 of 4",
+                question = "What quality do you usually download?",
+                longQuestion = false,
+                options = listOf(
+                    BysOption("ask", "Ask each time", "I'll pick every time"),
+                    BysOption("1080p", "1080p", "Sharpest picture, biggest files"),
+                    BysOption("720p", "720p", "The sweet spot between looks and size"),
+                    BysOption("480p", "480p", "Easy on space, still looks fine"),
+                    BysOption("360p", "360p", "Tiny files, downloads in a snap"),
+                ),
+                selected = picked[0], recommended = null,
+                enabled = enabled, onSelect = { onPick(it) },
+            )
+            1 -> BysQuestion(
+                qnum = "Question 2 of 4",
+                question = "Sub or Dub?",
+                longQuestion = false,
+                options = listOf(
+                    BysOption("sub", "Sub", "Original Japanese audio, English subtitles"),
+                    BysOption("dub", "Dub", "English voices instead of Japanese"),
+                    BysOption("ask", "Ask each time", "Depends on the show — I'll pick per title"),
+                ),
+                selected = picked[1], recommended = null,
+                enabled = enabled, onSelect = { onPick(it) },
+            )
+            2 -> BysQuestion(
+                qnum = "Question 3 of 4",
+                question = "How do you want your subs?",
+                longQuestion = false,
+                options = listOf(
+                    BysOption("hard", "Hard subs", "Burned into the video. Always there, plays anywhere."),
+                    BysOption("soft", "Soft subs", "Separate from the video. Turn them on or off whenever."),
+                    BysOption("both", "Both works", "Hard or soft — either is fine by me"),
+                ),
+                selected = picked[2], recommended = "both",
+                enabled = enabled, onSelect = { onPick(it) },
+            )
+            else -> BysQuestion(
+                qnum = "Question 4 of 4",
+                question = "We pull from 10 sources, so the same file comes in different sizes. Bigger usually looks sharper, smaller saves space. What should we grab first?",
+                longQuestion = true,
+                options = listOf(
+                    BysOption("best", "Best quality", "Biggest file, sharpest picture"),
+                    BysOption("smallest", "Smallest file", "Saves space and data"),
+                    BysOption("fastest", "Fastest first", "Whatever gets here quickest"),
+                ),
+                selected = picked[3], recommended = null,
+                enabled = enabled, onSelect = { onPick(it) },
+            )
+        }
+    } else {
+        BysDonePanel(
+            qualityLabel = when (quality) { "ask" -> "Ask each time"; else -> quality },
+            languageLabel = when (language) { "ask" -> "Ask each time"; "sub" -> "Sub"; else -> "Dub" },
+            subsLabel = when (subs) { "hard" -> "Hard subs"; "soft" -> "Soft subs"; else -> "Both works" },
+            sizeLabel = when (sizePref) { "best" -> "Best quality"; "smallest" -> "Smallest file"; else -> "Fastest first" },
+            answered = answered.toList(),
+            skipped = skipped,
+            onFinish = onFinish,
+        )
     }
 }
 
@@ -4376,7 +4504,7 @@ private fun BysQuestion(
     question: String,
     longQuestion: Boolean,
     options: List<BysOption>,
-    selected: String,
+    selected: String?,
     recommended: String?,
     enabled: Boolean,
     onSelect: (String) -> Unit,
