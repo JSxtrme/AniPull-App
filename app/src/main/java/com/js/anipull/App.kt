@@ -5563,10 +5563,12 @@ private fun showToast(context: android.content.Context, message: String) {
 
 // 2.0-dev2.8: live sheet-size state machine for the per-episode
 // confirm sheet. Unknown = the size could not be determined (or
-// no fetch has finished) — the sheet shows NO size line, exactly
-// like the old behaviour. Checking = a fetch is in flight — the
-// sheet shows "Size: checking…". Known = a label for THIS combo.
-// The Download button is never disabled or blocked by this state.
+// no fetch has finished) — 2.0-dev2.18: the sheet now shows an
+// honest "Size: couldn't check" line instead of showing nothing
+// at all, so the line never just vanishes. Checking = a fetch is
+// in flight — the sheet shows "Size: checking…". Known = a label
+// for THIS combo. The Download button is never disabled or blocked
+// by this state.
 private sealed class SheetSizeState {
     object Unknown : SheetSizeState()
     object Checking : SheetSizeState()
@@ -5581,7 +5583,8 @@ private sealed class SheetSizeState {
 // HLS link is estimated from its OWN master playlist (summed
 // byte-ranges when present, else AVERAGE-BANDWIDTH x duration,
 // "~"). Null = this link's size genuinely cannot be determined —
-// the caller shows nothing, never a number from elsewhere.
+// the caller shows the honest "couldn't check" line, never a
+// number from elsewhere.
 private suspend fun sheetSizeLabelForLink(link: ResolvedLink, quality: String, audio: String): String? {
     link.sizeLabel()?.let { return it }
     return when (link) {
@@ -5651,8 +5654,8 @@ private fun EpisodeDownloadSheet(
     // sheetSizeLabelForLink); (iii) no cached link -> warm a
     // resolve for THIS combo in the background, await the
     // coalesced in-flight resolve, then re-run (i)/(ii) on what
-    // landed. A fetch that yields nothing leaves Unknown (no
-    // size line). The effect re-runs on every chip tap; a
+    // landed. A fetch that yields nothing leaves Unknown (the
+    // honest "couldn't check" line). The effect re-runs on every chip tap; a
     // previously computed combo answers from ResolveCache +
     // the probe/size caches with no re-fetch. 2.0-dev2.9: sheet-open
     // warms every chip combo (see warmAllSheetCombos), so step
@@ -5738,21 +5741,28 @@ private fun EpisodeDownloadSheet(
             }
             // 2.0-dev2.8: live size (see the LaunchedEffect above
             // the Dialog). Known -> the label; Checking -> the
-            // "checking…" line; Unknown -> NO size line at all
-            // (never an invented or borrowed size). The Download
+            // "checking…" line; Unknown -> the honest
+            // "couldn't check" line (never an invented or borrowed
+            // size). 2.0-dev2.18: all three states render white
+            // 14sp Bold, matching the Quality / Audio / Server
+            // headings — the size line is now as noticeable as
+            // they are, and it never vanishes. The Download
             // button below is never gated on this state.
             // NOTE: the season DownloadSheet has no single-episode
             // size, so it deliberately shows none there.
             when (val sizeState = sheetSize) {
                 is SheetSizeState.Known -> {
                     Spacer(Modifier.height(6.dp))
-                    Text("Size: ${sizeState.label}", color = Muted, fontSize = 12.sp)
+                    Text("Size: ${sizeState.label}", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                 }
                 is SheetSizeState.Checking -> {
                     Spacer(Modifier.height(6.dp))
-                    Text("Size: checking…", color = Muted, fontSize = 12.sp)
+                    Text("Size: checking…", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
                 }
-                is SheetSizeState.Unknown -> Unit
+                is SheetSizeState.Unknown -> {
+                    Spacer(Modifier.height(6.dp))
+                    Text("Size: couldn't check", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
             }
             Spacer(Modifier.height(10.dp))
             Text("Audio", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
@@ -6123,15 +6133,17 @@ private class EpisodeListState(
     // the resolve path reads episode.audio.
     fun pull(row: EpisodeRow, qualityOverride: String? = null, audioOverride: String? = null, serverChoiceOverride: Int? = null) {
         scope.launch {
-            // 2.0-dev2.5 Defect 5 feedback: instant feedback on
-            // confirm — the snackbar fires BEFORE resolving, so a
-            // multi-second resolve no longer looks like nothing
-            // happened. No second snackbar on Enqueued (the job is
-            // already announced); errors still toast. A real QUEUED
-            // job in the Downloads tab needs an engine-side
-            // placeholder API, since enqueue() requires a
-            // ResolvedLink — TODO(COORDINATOR), see the report.
-            notifyDownloadStarted("Download queued — Episode ${row.number}")
+            // 2.0-dev2.18: honest feedback. The old code announced
+            // "Download queued" BEFORE resolving, so a failed
+            // resolve still left the user believing the download
+            // existed — JS's phone showed the toast but no job ever
+            // appeared in Downloads (the log's per-job summary was
+            // empty). The interim toast only says we're looking;
+            // "queued" fires only after runPull actually enqueues
+            // a job. A real placeholder QUEUED job in Downloads
+            // still needs an engine-side API, since enqueue()
+            // requires a ResolvedLink — TODO(COORDINATOR).
+            showToast(context, "Finding the file…")
             val ep = if (audioOverride != null) row.info.copy(audio = audioCode(audioOverride)) else row.info
             val outcome = runPull(
                 ep, row.anilistId, row.fromMediaIndex,
@@ -6141,7 +6153,7 @@ private class EpisodeListState(
                 wifiOverride = true,
             )
             when (outcome) {
-                is ResolveOutcome.Enqueued -> Unit
+                is ResolveOutcome.Enqueued -> notifyDownloadStarted("Download queued — Episode ${row.number}")
                 is ResolveOutcome.Error -> showToast(context, outcome.message)
                 ResolveOutcome.NeedsClearance -> Unit
             }
@@ -6387,17 +6399,17 @@ private class EpisodeListState(
         pendingPull = null
         if (retry != null) {
             scope.launch {
-                // 2.0-dev2.5 Defect 5 feedback: same instant
-                // snackbar as a fresh confirm — the re-resolve
-                // after Done can still take seconds.
-                notifyDownloadStarted("Download queued — Episode ${retry.episode.number}")
+                // 2.0-dev2.18: same honest feedback as pull() —
+                // "queued" only after the retry actually enqueues
+                // a job; the interim toast only says we're looking.
+                showToast(context, "Finding the file…")
                 val outcome = runPull(
                     retry.episode, retry.anilistId, retry.fromMediaIndex,
                     retry.listServer, retry.quality, retry.serverOverride,
                     retry.wifiOverride, showDialogOnClearance = false,
                 )
                 when (outcome) {
-                    is ResolveOutcome.Enqueued -> Unit
+                    is ResolveOutcome.Enqueued -> notifyDownloadStarted("Download queued — Episode ${retry.episode.number}")
                     is ResolveOutcome.Error -> showToast(context, outcome.message)
                     ResolveOutcome.NeedsClearance -> Unit
                 }
