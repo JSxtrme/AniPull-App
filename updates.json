@@ -69,14 +69,15 @@
     ]
   },
   "dev": {
-    "versionCode": 78,
-    "versionName": "2.0-dev2.17",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.17/anipull-2.0-dev2.17.apk",
-    "sha256": "1e0fc73ebff2815f23f95f7a19f07204933f192e0cd414f1e6bb9c8b621d3498",
+    "versionCode": 79,
+    "versionName": "2.0-dev2.18",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.18/anipull-2.0-dev2.18.apk",
+    "sha256": "4ccfc862c85f503d7806f7e8ac71ac2afa4b02402c565fa619305d6274df4d99",
     "features": [],
     "fixes": [
-      "Settings icons: Sources is now the layers icon, Update channel is the branch icon, Downloads is the cloud-download icon (the same Material icon Nuvio uses for Check for updates), and the About / GitHub info icon has its \"i\" recentered. Check for updates and Share keep their icons.",
-      "Fixed the version number under the logo in Settings still saying dev2.14 \u2014 it now reads the real installed version, so it can never go stale again."
+      "The Size line in the episode sheet is now white and the same size as the Quality / Audio / Server headings (14sp Bold) \u2014 it was small grey text and easy to miss.",
+      "When the size can't be checked, the sheet now says so honestly (\"Size: couldn't check\") instead of the line just vanishing.",
+      "Tapping Download no longer claims \"Download queued\" before the file is actually found \u2014 you see \"Finding the file\u2026\" first, and \"queued\" only appears once the download really exists in the Downloads tab."
     ]
   }
 }
