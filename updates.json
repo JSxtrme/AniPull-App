@@ -69,13 +69,14 @@
     ]
   },
   "dev": {
-    "versionCode": 77,
-    "versionName": "2.0-dev2.16",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.16/anipull-2.0-dev2.16.apk",
-    "sha256": "bdb4ecdaadc677c8deb8d7c529ee4a59272f75771f2db56b7ae2ef821bc52d6b",
+    "versionCode": 78,
+    "versionName": "2.0-dev2.17",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.17/anipull-2.0-dev2.17.apk",
+    "sha256": "1e0fc73ebff2815f23f95f7a19f07204933f192e0cd414f1e6bb9c8b621d3498",
     "features": [],
     "fixes": [
-      "Fixed three Before You Start nits from the dev2.15 phone test \u2014 the pink \"Question N of 4\" line now sits at the mockup's exact distance below the description, no option is highlighted until you tap it, and options stay tappable while the question card is still sliding in (a mid-flight tap fast-forwards the slide smoothly instead of snapping)."
+      "Settings icons: Sources is now the layers icon, Update channel is the branch icon, Downloads is the cloud-download icon (the same Material icon Nuvio uses for Check for updates), and the About / GitHub info icon has its \"i\" recentered. Check for updates and Share keep their icons.",
+      "Fixed the version number under the logo in Settings still saying dev2.14 \u2014 it now reads the real installed version, so it can never go stale again."
     ]
   }
 }
