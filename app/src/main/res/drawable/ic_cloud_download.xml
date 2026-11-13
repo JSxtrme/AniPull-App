@@ -1,0 +1,24 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Downloads row: the ACTUAL icon, pulled from the source — it is
+         Google's Material Icons "Filled.CloudDownload", the exact icon
+         Nuvio uses for its Check for updates row
+         (NuvioMobile SettingsSearch.kt: CheckForUpdates ->
+         Icons.Default.CloudDownload).
+         Path data below is verbatim from androidx compose material-icons-
+         extended 1.7.8, filled/CloudDownload.kt (Apache 2.0). The arrow
+         subpath is a hole in the cloud: the two subpaths wind opposite,
+         so it knocks out under nonZero — fillType evenOdd is set as well
+         so the hole is guaranteed in a VectorDrawable. Do NOT "fix" the
+         arrow from the screenshot measurements again: the screenshot's
+         dark core measured ~1px narrower per side than the real glyph
+         because of anti-aliasing; this pulled path is the real one.
+         Shaft x 10..14, top y 9, head x 7..17 at y 13, tip (12, 18). -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:fillType="evenOdd"
+        android:pathData="M19.35,10.04C18.67,6.59 15.64,4 12,4 9.11,4 6.6,5.64 5.35,8.04 2.34,8.36 0,10.91 0,14c0,3.31 2.69,6 6,6h13c2.76,0 5,-2.24 5,-5 0,-2.64 -2.05,-4.78 -4.65,-4.96zM17,13L12,18L7,13H10V9H14V13H17z" />
+</vector>

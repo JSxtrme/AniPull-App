@@ -108,9 +108,9 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
             }
             Spacer(Modifier.height(16.dp))
             SettingsCard {
-                SettingsRow(R.drawable.ic_download, "Downloads", "Parallel, speed, and folder", { onOpen("Downloads") })
+                SettingsRow(R.drawable.ic_cloud_download, "Downloads", "Parallel, speed, and folder", { onOpen("Downloads") })
                 SettingsDivider()
-                SettingsRow(R.drawable.ic_share, "Sources", "Quality, language, subs, and size", { onOpen("Sources") })
+                SettingsRow(R.drawable.ic_layers, "Sources", "Quality, language, subs, and size", { onOpen("Sources") })
                 SettingsDivider()
                 SettingsRow(R.drawable.ic_bell, "Notifications", "Download progress and completion pings", { onOpen("Notifications") })
             }
@@ -162,7 +162,7 @@ fun SettingsHub(onBack: () -> Unit, onOpen: (String) -> Unit) {
                 Spacer(Modifier.height(8.dp))
                 Text("Anipull", color = TextMain, fontSize = 20.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
                 Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-                Text("2.0-dev2.14 · com.js.anipull", color = Faint, fontSize = 12.sp)
+                Text("${BuildConfig.VERSION_NAME} · com.js.anipull", color = Faint, fontSize = 12.sp)
             }
             Spacer(Modifier.height(100.dp))
         }
@@ -1062,7 +1062,7 @@ fun AboutPage() {
         Spacer(Modifier.height(12.dp))
         Text("Anipull", color = TextMain, fontSize = 28.sp, fontWeight = FontWeight.ExtraBold, fontFamily = HeadingFont)
         Text("Download-only anime. No streaming, no tracking.", color = Muted, fontSize = 13.sp)
-        Text("2.0-dev2.14 · com.js.anipull", color = Faint, fontSize = 12.sp)
+        Text("${BuildConfig.VERSION_NAME} · com.js.anipull", color = Faint, fontSize = 12.sp)
     }
     Spacer(Modifier.height(20.dp))
     SettingsSectionLabel("PROJECT")
@@ -1086,7 +1086,7 @@ fun AboutPage() {
         // Manual check ignores the Later snooze — it always shows
         // the sheet when an update exists for this channel.
         var manualUpdate by remember { mutableStateOf<UpdateInfo?>(null) }
-        SettingsRow(R.drawable.ic_download, "Update channel", if (channel == "dev") "Dev" else "Stable", { showChannelDialog = true })
+        SettingsRow(R.drawable.ic_branch, "Update channel", if (channel == "dev") "Dev" else "Stable", { showChannelDialog = true })
         SettingsDivider()
         SettingsRow(R.drawable.ic_download, "Check for updates", "See if a newer build is out", {
             if (checking) return@SettingsRow

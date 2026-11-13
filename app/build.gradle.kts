@@ -13,8 +13,8 @@ android {
         applicationId = "com.js.anipull"
         minSdk = 26
         targetSdk = 36
-        versionCode = 77
-        versionName = "2.0-dev2.16"
+        versionCode = 78
+        versionName = "2.0-dev2.17"
         // 2.0-dev1.5: Cronet ships a native lib per ABI (~7 MB for
         // arm64, ~4 MB for armv7, ~7 MB each for x86/x86_64). Only
         // real-phone ABIs are packaged — x86/x86_64 are emulators
@@ -94,6 +94,10 @@ android {
     }
     buildFeatures {
         compose = true
+        // 2.0-dev2.17: BuildConfig so the Settings version label
+        // reads the real versionName instead of a hardcoded string
+        // that goes stale (it still said dev2.14 on dev2.16).
+        buildConfig = true
     }
 }
 

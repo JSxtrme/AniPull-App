@@ -1,0 +1,30 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Update channel row: Stable vs Dev are branches off one line.
+         Custom glyph, white so SettingsRow tint works.
+         Stem left with two nodes, one branch curving out to the right node. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M8.2,6a2.2,2.2 0 1,1 -4.4,0a2.2,2.2 0 1,1 4.4,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M8.2,18a2.2,2.2 0 1,1 -4.4,0a2.2,2.2 0 1,1 4.4,0z" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M20.2,11a2.2,2.2 0 1,1 -4.4,0a2.2,2.2 0 1,1 4.4,0z" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M6,8.2L6,15.8" />
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M8.2,6C12.5,6.8 14.2,8.5 15.8,11" />
+</vector>

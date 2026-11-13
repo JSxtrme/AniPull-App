@@ -8,7 +8,10 @@
         android:strokeColor="#FF000000"
         android:strokeWidth="2"
         android:pathData="M12,2a10,10 0,1 0,0.01 0z" />
+    <!-- The "i" was drawn at x 12..14 (centre 13) while the circle is
+         centred at x 12 — a full unit right of centre, visible at 20dp.
+         Shifted left by 1: x 11..13, centre 12. Circle untouched. -->
     <path
         android:fillColor="#FF000000"
-        android:pathData="M12,10h2v7h-2zM12,7h2v2h-2z" />
+        android:pathData="M11,10h2v7h-2zM11,7h2v2h-2z" />
 </vector>
