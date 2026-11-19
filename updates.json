@@ -69,15 +69,17 @@
     ]
   },
   "dev": {
-    "versionCode": 79,
-    "versionName": "2.0-dev2.18",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.18/anipull-2.0-dev2.18.apk",
-    "sha256": "4ccfc862c85f503d7806f7e8ac71ac2afa4b02402c565fa619305d6274df4d99",
-    "features": [],
+    "versionCode": 80,
+    "versionName": "2.0-dev2.19",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.19/anipull-2.0-dev2.19.apk",
+    "sha256": "f3e9c745ba52a2d4ced00aafb2cff736bc90bb8a6f6a5d1df9b32187edfda975",
+    "features": [
+      "Subtitles are now embedded inside the video itself \u2014 VLC lists them as subtitle tracks and no extra files sit in the folder. English, Spanish, Russian, German and Hindi are embedded when the source offers them; English is always included for Sub downloads."
+    ],
     "fixes": [
-      "The Size line in the episode sheet is now white and the same size as the Quality / Audio / Server headings (14sp Bold) \u2014 it was small grey text and easy to miss.",
-      "When the size can't be checked, the sheet now says so honestly (\"Size: couldn't check\") instead of the line just vanishing.",
-      "Tapping Download no longer claims \"Download queued\" before the file is actually found \u2014 you see \"Finding the file\u2026\" first, and \"queued\" only appears once the download really exists in the Downloads tab."
+      "Downloads from streams with a separate audio track no longer come out silent \u2014 the audio is now fetched and mixed in with the video.",
+      "A downloaded file with no audio track now fails honestly with a clear message instead of completing silently.",
+      "The download percentage no longer freezes near the end and then jumps to Completed \u2014 it keeps moving through the final step."
     ]
   }
 }
