@@ -69,17 +69,16 @@
     ]
   },
   "dev": {
-    "versionCode": 80,
-    "versionName": "2.0-dev2.19",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.19/anipull-2.0-dev2.19.apk",
-    "sha256": "f3e9c745ba52a2d4ced00aafb2cff736bc90bb8a6f6a5d1df9b32187edfda975",
+    "versionCode": 81,
+    "versionName": "2.0-dev2.20",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.20/anipull-2.0-dev2.20.apk",
+    "sha256": "31e8b9d91b08c63629395ff6ef98d3bfa3389e1df949e115c4c51c023e709a15",
     "features": [
-      "Subtitles are now embedded inside the video itself \u2014 VLC lists them as subtitle tracks and no extra files sit in the folder. English, Spanish, Russian, German and Hindi are embedded when the source offers them; English is always included for Sub downloads."
+      "App icon now has black padding on all sides, like Geode \u2014 the pink star sits smaller inside the black icon."
     ],
     "fixes": [
-      "Downloads from streams with a separate audio track no longer come out silent \u2014 the audio is now fetched and mixed in with the video.",
-      "A downloaded file with no audio track now fails honestly with a clear message instead of completing silently.",
-      "The download percentage no longer freezes near the end and then jumps to Completed \u2014 it keeps moving through the final step."
+      "The Death Note E1 1080p Sub download that failed on dev2.19 now completes \u2014 subtitles are embedded as standard timed-text tracks instead of through the system muxer, which rejects subtitle tracks.",
+      "A subtitle problem can never fail a download anymore \u2014 if embedding fails, the download still completes with audio and video."
     ]
   }
 }
