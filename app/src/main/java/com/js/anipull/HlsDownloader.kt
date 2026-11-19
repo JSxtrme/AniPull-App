@@ -1,6 +1,7 @@
 package com.js.anipull
 
 import android.media.MediaExtractor
+import android.media.MediaFormat
 import android.media.MediaMuxer
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -93,6 +94,30 @@ object HlsDownloader {
         val initSegmentUri: String?,
     )
 
+    // 2.0-dev2.19 — a separate audio rendition (#EXT-X-MEDIA
+    // TYPE=AUDIO): the GROUP-ID it belongs to, its language, its
+    // playlist URI and whether it is the group's DEFAULT. When the
+    // picked variant declares an AUDIO group, its segments are
+    // video-only and the audio lives in this playlist — the
+    // downloader must fetch it too (the Death Note E1 no-audio bug
+    // was exactly this: the audio playlist was never fetched).
+    data class AudioRendition(val groupId: String, val language: String, val uri: String, val isDefault: Boolean)
+
+    // 2.0-dev2.19 — one subtitle cue, times in microseconds.
+    data class SubtitleCue(val startUs: Long, val endUs: Long, val text: String)
+
+    // 2.0-dev2.19 — a subtitle track's parsed cues, ready to be
+    // embedded as one text/vtt track in the mp4. Language is one
+    // of the five embedded languages (see EMBED_SUBTITLE_LANGUAGES).
+    data class SubtitleTrackCues(val language: String, val cues: List<SubtitleCue>)
+
+    // 2.0-dev2.19 — subtitle languages embedded into the mp4 (JS
+    // 2026-11-19: "Just some major languages — English, Spanish,
+    // Russian, German, Hindi. Enough"). No sidecar files are
+    // written anymore: VLC lists these as subtitle tracks inside
+    // the video itself.
+    private val EMBED_SUBTITLE_LANGUAGES = setOf("en", "es", "ru", "de", "hi")
+
     // Parse #EXT-X-MEDIA attribute lists: TYPE/GROUP-ID/LANGUAGE/
     // NAME/URI/DEFAULT/FORCED (quoted values may contain commas).
     private fun parseMediaAttrs(line: String): Map<String, String> {
@@ -143,6 +168,32 @@ object HlsDownloader {
         return groups
     }
 
+    // 2.0-dev2.19 — #EXT-X-MEDIA TYPE=AUDIO lines with their
+    // playlist URIs (resolved against the master URL), for fetching
+    // the separate audio rendition. parseAudioGroups above only
+    // keeps languages, which is enough for variant picking but not
+    // for fetching the audio playlist itself.
+    private fun parseAudioRenditions(text: String, baseUrl: String): List<AudioRendition> {
+        val out = mutableListOf<AudioRendition>()
+        for (raw in text.lineSequence()) {
+            val line = raw.trim()
+            if (!line.startsWith("#EXT-X-MEDIA")) continue
+            val attrs = parseMediaAttrs(line)
+            if (!attrs["TYPE"].equals("AUDIO", ignoreCase = true)) continue
+            val group = attrs["GROUP-ID"] ?: continue
+            val uri = attrs["URI"]?.takeIf { it.isNotBlank() } ?: continue
+            val lang = attrs["LANGUAGE"]?.takeIf { it.isNotBlank() }
+                ?: languageCodeFromLabel(attrs["NAME"])
+            out += AudioRendition(
+                groupId = group,
+                language = lang,
+                uri = resolveUrl(baseUrl, uri),
+                isDefault = attrs["DEFAULT"]?.equals("YES", ignoreCase = true) == true,
+            )
+        }
+        return out
+    }
+
     // Does an audio-track language loosely match the requested audio?
     // Sub -> ja/jpn, Dub -> en/eng; case-insensitive prefix match.
     private fun audioMatches(language: String, audio: String): Boolean {
@@ -165,7 +216,11 @@ object HlsDownloader {
     // still the pick, but it is no longer silent: download()
     // throws QualityMismatchException when the pick is below the
     // requested floor.
-    data class PickedVariant(val url: String, val height: Int?)
+    // 2.0-dev2.19: also returns the picked variant's AUDIO group
+    // (null when the variant has no AUDIO tag). The caller needs it
+    // to fetch the separate audio rendition — without it, a variant
+    // that declares AUDIO serves video-only segments.
+    data class PickedVariant(val url: String, val height: Int?, val audioGroup: String? = null)
 
     internal fun parseMasterPlaylist(
         text: String,
@@ -204,7 +259,7 @@ object HlsDownloader {
             .maxByOrNull { it.height * 1_000_000L + it.bandwidth }
             ?: pool.minByOrNull { it.height * 1_000_000L + it.bandwidth }
             ?: variants.last()
-        return PickedVariant(picked.uri, picked.height.takeIf { it > 0 })
+        return PickedVariant(picked.uri, picked.height.takeIf { it > 0 }, picked.audioGroup)
     }
 
     // Media playlist: segments in order, #EXT-X-KEY AES-128 state
@@ -273,15 +328,220 @@ object HlsDownloader {
         return cipher.doFinal(bytes)
     }
 
+    // --- Subtitles: fetch + parse, for embedding into the mp4 -----
+    // 2.0-dev2.19 — no sidecar files anymore (JS 2026-11-19): the
+    // real subtitle files are parsed into cues and muxed into the
+    // video as text/vtt tracks, so VLC lists them as subtitle
+    // tracks and nothing extra sits in the folder.
+
+    // Normalize a track's language/label to one of the five
+    // embedded languages, or null when it isn't one of them.
+    // Handles 2/3-letter codes ("en", "eng"), BCP-47 tags
+    // ("es-419", "pt-BR") and names ("English", "Español").
+    fun normalizeSubtitleLanguage(language: String?, label: String?): String? {
+        for (raw in listOfNotNull(language, label)) {
+            val lower = raw.trim().lowercase()
+            if (lower.isEmpty()) continue
+            val base = lower.split('-', '_').first()
+            val mapped = when (base) {
+                "en", "eng", "english" -> "en"
+                "es", "spa", "spanish", "espanol", "español" -> "es"
+                "ru", "rus", "russian" -> "ru"
+                "de", "ger", "deu", "german", "deutsch" -> "de"
+                "hi", "hin", "hindi" -> "hi"
+                else -> null
+            }
+            if (mapped != null) return mapped
+        }
+        return null
+    }
+
+    private fun parseTimestampToUs(ts: String): Long? {
+        val clean = ts.trim().replace(',', '.')
+        val parts = clean.split(":")
+        return try {
+            when (parts.size) {
+                3 -> {
+                    val h = parts[0].toLong()
+                    val m = parts[1].toLong()
+                    val s = parts[2].toDouble()
+                    (h * 3600 + m * 60) * 1_000_000L + (s * 1_000_000).toLong()
+                }
+                2 -> {
+                    val m = parts[0].toLong()
+                    val s = parts[1].toDouble()
+                    m * 60 * 1_000_000L + (s * 1_000_000).toLong()
+                }
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    // WebVTT and SRT share one shape once the header/index lines
+    // are ignored: blocks separated by blank lines, a "-->" line,
+    // then the cue text. Returns cues sorted by start time.
+    internal fun parseTimedText(text: String): List<SubtitleCue> {
+        val cues = mutableListOf<SubtitleCue>()
+        val blocks = text.replace("\r\n", "\n").split("\n\n")
+        for (block in blocks) {
+            val lines = block.lines().map { it.trimEnd() }.filter { it.isNotBlank() }
+            if (lines.isEmpty()) continue
+            val first = lines[0].trim()
+            if (first.startsWith("WEBVTT") || first.startsWith("NOTE") || first == "STYLE" || first == "REGION") continue
+            val tsIndex = lines.indexOfFirst { it.contains("-->") }
+            if (tsIndex < 0) continue
+            val arrow = lines[tsIndex].split("-->")
+            if (arrow.size < 2) continue
+            val start = parseTimestampToUs(arrow[0]) ?: continue
+            val end = parseTimestampToUs(arrow[1].trim().split(" ").first()) ?: continue
+            if (end <= start) continue
+            val cueText = lines.drop(tsIndex + 1).joinToString("\n").trim()
+            if (cueText.isEmpty()) continue
+            cues += SubtitleCue(start, end, cueText)
+        }
+        return cues.sortedBy { it.startUs }
+    }
+
+    // A subtitle media playlist (.m3u8), not a subtitle file: fetch
+    // its segments and build one WebVTT text from them. Later
+    // segments repeat the WEBVTT header — dropped, cues kept.
+    private suspend fun buildWebVttFromPlaylist(
+        playlistText: String,
+        playlistUrl: String,
+        headers: Map<String, String>,
+        isCancelled: () -> Boolean,
+        connectionHandle: HlsConnectionHandle?,
+    ): String? {
+        val segUris = playlistText.lineSequence()
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .map { resolveUrl(playlistUrl, it) }
+            .toList()
+        if (segUris.isEmpty()) return null
+        val parts = StringBuilder()
+        var first = true
+        for (uri in segUris) {
+            if (isCancelled()) return null
+            val resp = try {
+                EngineHttp.requestWithRetry(
+                    uri, headers = headers, timeoutMs = 15_000, followRedirects = true,
+                    maxAttempts = 1,
+                    totalDeadlineMs = HLS_PLAYLIST_TOTAL_MS,
+                    firstByteDeadlineMs = HLS_PLAYLIST_FIRST_BYTE_MS,
+                    isCancelled = { isCancelled() },
+                    connectionHandle = connectionHandle,
+                )
+            } catch (_: Exception) {
+                return null
+            }
+            if (resp.code != 200 || resp.bytes.isEmpty()) return null
+            var segText = String(resp.bytes, Charsets.UTF_8)
+            if (!first) {
+                segText = segText.lines()
+                    .dropWhile { it.trim().isEmpty() || it.trim().startsWith("WEBVTT") }
+                    .joinToString("\n")
+            }
+            first = false
+            if (parts.isNotEmpty()) parts.append("\n\n")
+            parts.append(segText)
+        }
+        return parts.toString().takeIf { it.contains("-->") }
+    }
+
+    // Fetch + parse one subtitle track's real content. Returns null
+    // when the track has no usable cues — never throws, so a dead
+    // subtitle track never kills the video.
+    private suspend fun fetchSubtitleCues(
+        track: SubtitleTrack,
+        headers: Map<String, String>,
+        isCancelled: () -> Boolean,
+        connectionHandle: HlsConnectionHandle?,
+    ): SubtitleTrackCues? {
+        val lang = normalizeSubtitleLanguage(track.language, track.label) ?: return null
+        return try {
+            val resp = EngineHttp.requestWithRetry(
+                track.url, headers = headers, timeoutMs = 15_000, followRedirects = true,
+                maxAttempts = 1,
+                totalDeadlineMs = HLS_PLAYLIST_TOTAL_MS,
+                firstByteDeadlineMs = HLS_PLAYLIST_FIRST_BYTE_MS,
+                isCancelled = { isCancelled() },
+                connectionHandle = connectionHandle,
+            )
+            if (resp.code != 200 || resp.bytes.isEmpty()) {
+                DownloadLogs.log("HLS", "subtitle $lang: HTTP ${resp.code} — skipped")
+                return null
+            }
+            val body = String(resp.bytes, Charsets.UTF_8)
+            val vttText = if (body.trimStart().startsWith("#EXTM3U")) {
+                // The Death Note E1 case: the "subtitle" URL was a
+                // media playlist, and saving it as .vtt was the
+                // junk that hung VLC. Build a real WebVTT instead.
+                buildWebVttFromPlaylist(body, track.url, headers, isCancelled, connectionHandle)
+            } else {
+                body
+            } ?: return null
+            val cues = parseTimedText(vttText)
+            if (cues.isEmpty()) {
+                DownloadLogs.log("HLS", "subtitle $lang: no usable cues — skipped")
+                return null
+            }
+            DownloadLogs.log("HLS", "subtitle $lang: ${cues.size} cues")
+            SubtitleTrackCues(lang, cues)
+        } catch (e: Exception) {
+            DownloadLogs.log("HLS", "subtitle $lang: fetch failed (${e.message ?: "error"}) — skipped")
+            null
+        }
+    }
+
+    // Fetch + parse every usable subtitle track from the list,
+    // filtered to the five embedded languages. Best-effort per
+    // track; distinct by URL; one track per language (first usable
+    // wins). Used by the HLS path (link + master tracks) and the
+    // DDL post-pass (link tracks only).
+    suspend fun fetchAndParseSubtitles(
+        tracks: List<SubtitleTrack>,
+        headers: Map<String, String>,
+        isCancelled: () -> Boolean,
+        connectionHandle: HlsConnectionHandle?,
+    ): List<SubtitleTrackCues> {
+        val out = mutableListOf<SubtitleTrackCues>()
+        val seenLang = mutableSetOf<String>()
+        for (track in tracks.distinctBy { it.url }) {
+            if (isCancelled()) break
+            val lang = normalizeSubtitleLanguage(track.language, track.label) ?: continue
+            if (lang in seenLang) continue
+            // .ass/.ssa need a full ASS parser — skip honestly.
+            if (track.url.lowercase().let { it.endsWith(".ass") || it.endsWith(".ssa") }) {
+                DownloadLogs.log("HLS", "subtitle $lang: .ass format not supported for embedding — skipped")
+                continue
+            }
+            val parsed = fetchSubtitleCues(track, headers, isCancelled, connectionHandle) ?: continue
+            seenLang += parsed.language
+            out += parsed
+        }
+        return out
+    }
+
     // Downloads + remuxes one episode. tempDir holds seg files + a
     // segment index so a retry/resume only fetches missing segments.
     // Throws IOException on failure, CancellationException on cancel.
     // onProgress is throttled to ~every 500ms.
     // Returns the subtitle tracks found in the master playlist's
-    // #EXT-X-MEDIA SUBTITLES groups (empty when none) — the caller
-    // downloads them as sidecars — plus the picked variant's height
-    // (null when the master was itself a media playlist). `audio`
-    // steers variant picking toward the requested language.
+    // #EXT-X-MEDIA SUBTITLES groups (empty when none) plus the
+    // picked variant's height (null when the master was itself a
+    // media playlist). `audio` steers variant picking toward the
+    // requested language.
+    // 2.0-dev2.19: `linkSubtitles` (the resolver's tracks) are
+    // merged with the master's subtitle tracks, parsed, and
+    // EMBEDDED into the mp4 as text/vtt tracks — no sidecar files
+    // are written anymore. When the picked variant declares an
+    // AUDIO group, the separate audio rendition is fetched and
+    // muxed with the video (the Death Note E1 no-audio fix).
+    // `onRemuxProgress` gets the remux fraction 0..1 so the bar
+    // keeps moving through the remux instead of freezing at the
+    // segment bytes (the 87% freeze).
     // `keyOverrideB64` / `ivOverrideB64` (base64 of 16 raw bytes)
     // replace segment-key fetching entirely when set: the decoded
     // key is used for ALL segment keys, and the decoded IV is used
@@ -324,6 +584,12 @@ object HlsDownloader {
         // callers keep compiling.
         connectionHandle: HlsConnectionHandle? = null,
         onPhase: ((HlsPhase, String?) -> Unit)? = null,
+        // 2.0-dev2.19: the resolver's subtitle tracks (the engine
+        // owns them; the master-advertised ones are found inside).
+        linkSubtitles: List<SubtitleTrack> = emptyList(),
+        // 2.0-dev2.19: remux fraction 0..1 (concat 0..0.5, mux
+        // 0.5..1) — the engine maps it onto the bar.
+        onRemuxProgress: ((Float) -> Unit)? = null,
     ): HlsDownloadResult = withContext(Dispatchers.IO) {
         val overrideKey: ByteArray? = keyOverrideB64?.let {
             runCatching { android.util.Base64.decode(it, android.util.Base64.DEFAULT) }.getOrNull()
@@ -339,18 +605,9 @@ object HlsDownloader {
         }
 
         tempDir.mkdirs()
-        val indexFile = File(tempDir, "segments.done")
-        val done = synchronized(indexFile) {
-            if (indexFile.exists()) indexFile.readLines().mapNotNull { it.toIntOrNull() }.toMutableSet()
-            else mutableSetOf<Int>()
-        }
-        fun markDone(idx: Int) = synchronized(indexFile) {
-            done += idx
-            try {
-                indexFile.appendText("$idx\n")
-            } catch (_: Exception) {
-            }
-        }
+        // 2.0-dev2.19: the per-playlist done index now lives inside
+        // downloadSegments (video + audio each get their own), so a
+        // retry resumes exactly where each one stopped.
 
         // 2.0-dev1.9 TEMPORARY download diagnostics: every HLS
         // stage is logged (playlist codes, variant pick, key
@@ -465,9 +722,93 @@ object HlsDownloader {
         }?.takeIf { it.isNotBlank() } ?: "unknown"
         DownloadLogs.log("HLS", "media playlist: ${playlist.segments.size} segments, init=${playlist.initSegmentUri != null}, subs=${subtitleTracks.size}, first segment host=$firstSegmentHost")
 
-        // Init segment (#EXT-X-MAP) first, if present.
-        val initFile = File(tempDir, "init.ts")
-        if (playlist.initSegmentUri != null && !initFile.exists()) {
+        // 2.0-dev2.19 — separate audio rendition: when the picked
+        // variant declares an AUDIO group, its segments are
+        // video-only (Death Note E1: the audio playlist was never
+        // fetched, so the remux produced a silent file). Fetch the
+        // rendition's media playlist now — a stalled fetch fails
+        // over to the next server (no segment has landed yet); a
+        // plain HTTP error just logs and continues, and the remux
+        // decides from the video file's own tracks whether the
+        // audio was actually needed.
+        var audioPlaylist: MediaPlaylist? = null
+        var audioFirstHost = "unknown"
+        val pickedAudioGroup = pickedVariant.audioGroup
+        if (pickedAudioGroup != null) {
+            val renditions = parseAudioRenditions(masterText, masterUrl)
+                .filter { it.groupId == pickedAudioGroup }
+            val rendition = renditions.firstOrNull { audioMatches(it.language, audio) }
+                ?: renditions.firstOrNull { it.isDefault }
+                ?: renditions.firstOrNull()
+            if (rendition == null) {
+                DownloadLogs.log("HLS", "audio group $pickedAudioGroup has no renditions — assuming muxed audio")
+            } else {
+                DownloadLogs.log("HLS", "audio rendition: lang=${rendition.language} default=${rendition.isDefault} ${DownloadLogs.sanitizeUrl(rendition.uri)}")
+                onPhase?.invoke(HlsPhase.FETCHING_PLAYLIST, null)
+                val audioText = try {
+                    EngineHttp.requestWithRetry(
+                        rendition.uri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true,
+                        maxAttempts = 1,
+                        totalDeadlineMs = HLS_PLAYLIST_TOTAL_MS,
+                        firstByteDeadlineMs = HLS_PLAYLIST_FIRST_BYTE_MS,
+                        isCancelled = fetchCancelled,
+                        connectionHandle = connectionHandle,
+                    )
+                } catch (e: java.net.SocketTimeoutException) {
+                    throw HlsStallException("Server stalled fetching the audio playlist (${e.message ?: "timed out"}) — trying the next server.")
+                }.let {
+                    DownloadLogs.log("HLS", "audio playlist: HTTP ${it.code}, ${it.bytes.size} bytes")
+                    if (it.code != 200) {
+                        DownloadLogs.log("HLS", "audio playlist HTTP ${it.code} — continuing without separate audio (remux decides)")
+                        null
+                    } else it.text
+                }
+                if (audioText != null) {
+                    if (isCancelled()) throw CancellationException("HLS download cancelled")
+                    val parsed = parseMediaPlaylist(audioText, rendition.uri)
+                    if (parsed.segments.isEmpty()) {
+                        DownloadLogs.log("HLS", "audio playlist has no segments — continuing without separate audio")
+                    } else {
+                        audioPlaylist = parsed
+                        audioFirstHost = parsed.segments.firstOrNull()?.uri?.let {
+                            try { java.net.URL(it).host } catch (_: Exception) { null }
+                        }?.takeIf { it.isNotBlank() } ?: "unknown"
+                        DownloadLogs.log("HLS", "audio playlist: ${parsed.segments.size} segments, init=${parsed.initSegmentUri != null}, first segment host=$audioFirstHost")
+                    }
+                }
+            }
+        }
+
+        // 2.0-dev2.19 — English subtitles are a MUST for Sub
+        // downloads (JS 2026-11-19: "English is no debate must"):
+        // if no usable English track exists, fail HERE, before a
+        // single segment is downloaded, instead of completing a
+        // video with no English subs. The other languages stay
+        // best-effort (fetched after the segments, below). Dub
+        // doesn't gate — its audio is already English. The parsed
+        // English cues are kept and embedded at the remux, not
+        // fetched twice.
+        var englishSubs: SubtitleTrackCues? = null
+        val needsEnglishSubs = audioCode(audio) != "eng"
+        if (needsEnglishSubs) {
+            val enTracks = (linkSubtitles + subtitleTracks).distinctBy { it.url }
+                .filter { normalizeSubtitleLanguage(it.language, it.label) == "en" }
+            for (track in enTracks) {
+                englishSubs = fetchSubtitleCues(track, fetchHeaders, fetchCancelled, connectionHandle)
+                if (englishSubs != null) break
+            }
+            if (englishSubs == null) {
+                DownloadLogs.log("HLS", "NO ENGLISH SUBTITLES: no usable English track for this stream — failing before any segment")
+                throw java.io.IOException("No English subtitles available from this server — try another server or a different quality.")
+            }
+            DownloadLogs.log("HLS", "English subtitles confirmed: ${englishSubs.cues.size} cues")
+        }
+
+        // Init segment (#EXT-X-MAP) first, if present. Factored
+        // (2.0-dev2.19) so the audio rendition's init uses the same
+        // fetch, timeouts and stall behaviour as the video init.
+        suspend fun fetchInitSegment(uri: String, file: File) {
+            if (file.exists()) return
             // 2.0-dev2.5 DEFECT 5: still connecting — keep the
             // phase callback going through init + key fetches.
             onProgress(0, -1, 0.0)
@@ -478,7 +819,7 @@ object HlsDownloader {
             DownloadLogs.log("HLS", "fetching init segment…")
             val initResp = try {
                 EngineHttp.requestWithRetry(
-                    playlist.initSegmentUri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true,
+                    uri, headers = fetchHeaders, timeoutMs = 15_000, followRedirects = true,
                     maxAttempts = 1,
                     totalDeadlineMs = HLS_PLAYLIST_TOTAL_MS,
                     firstByteDeadlineMs = HLS_PLAYLIST_FIRST_BYTE_MS,
@@ -490,11 +831,16 @@ object HlsDownloader {
             }
             DownloadLogs.log("HLS", "init segment: HTTP ${initResp.code}, ${initResp.bytes.size} bytes")
             if (initResp.code != 200) throw java.io.IOException("Init segment fetch failed (HTTP ${initResp.code}) — retry the download.")
-            initFile.writeBytes(initResp.bytes)
+            file.writeBytes(initResp.bytes)
             // 2.0-dev2.7 DEFECT 2: post-fetch cancel check (see
             // the master fetch above).
             if (isCancelled()) throw CancellationException("HLS download cancelled")
         }
+
+        val initFile = File(tempDir, "init.ts")
+        playlist.initSegmentUri?.let { fetchInitSegment(it, initFile) }
+        val audioInitFile = File(tempDir, "audio-init.ts")
+        audioPlaylist?.initSegmentUri?.let { fetchInitSegment(it, audioInitFile) }
 
         // Keys: fetched once per unique URI, cached. A key override
         // replaces fetching entirely (rotating per-URI keys still
@@ -531,12 +877,9 @@ object HlsDownloader {
             }.also { synchronized(keyCache) { keyCache[uri] = it } }
         }
 
-        val total = playlist.segments.size
-        var downloadedBytes = done.sumOf { idx ->
-            File(tempDir, "seg_%05d.ts".format(idx)).length()
-        }
+        var downloadedBytes = 0L
         var lastReportMs = 0L
-        var reportBytes = downloadedBytes
+        var reportBytes = 0L
         var reportTimeMs = System.currentTimeMillis()
         val lock = Any()
         val throttler = SpeedThrottler(speedLimitMBps * 1024L * 1024L)
@@ -550,6 +893,39 @@ object HlsDownloader {
             }
         }
 
+        // 2.0-dev2.19 — the segment loop, factored so the video AND
+        // the separate audio playlist run through the same code
+        // (same timeouts, fail-fast, resume, progress). Each
+        // playlist gets its own file prefix + done index, so a
+        // retry resumes exactly where each one stopped.
+        suspend fun downloadSegments(
+            list: MediaPlaylist,
+            prefix: String,
+            doneFileName: String,
+            label: String,
+            firstHost: String,
+        ) {
+            val indexFile = File(tempDir, doneFileName)
+            val done = synchronized(indexFile) {
+                if (indexFile.exists()) indexFile.readLines().mapNotNull { it.toIntOrNull() }.toMutableSet()
+                else mutableSetOf<Int>()
+            }
+            fun markDone(idx: Int) = synchronized(indexFile) {
+                done += idx
+                try {
+                    indexFile.appendText("$idx\n")
+                } catch (_: Exception) {
+                }
+            }
+            val count = list.segments.size
+            // This playlist's own bytes (resumed + new), for the
+            // per-playlist average in the progress estimate; the
+            // shared downloadedBytes carries the global total.
+            var playlistBytes = done.sumOf { idx ->
+                File(tempDir, "${prefix}_%05d.ts".format(idx)).length()
+            }
+            synchronized(lock) { downloadedBytes += playlistBytes }
+
         // 2.0-dev2.7 DEFECT 2: cancel can only land between the
         // blocking segment fetches (EngineHttp has no interrupt
         // handle — see the report), never inside one. The one log
@@ -559,16 +935,16 @@ object HlsDownloader {
         // cancel disconnects the connection out of its read at
         // once, and a stalled first segment fails over instead of
         // hanging (see HlsStallException below).
-        onPhase?.invoke(HlsPhase.DOWNLOADING_SEGMENTS, "Segment ${done.size}/$total")
-        DownloadLogs.log("HLS", "starting segment downloads: $total segments (${done.size} already done), $segmentWorkers workers, first segment host=$firstSegmentHost")
+        onPhase?.invoke(HlsPhase.DOWNLOADING_SEGMENTS, "$label ${done.size}/$count")
+        DownloadLogs.log("HLS", "starting $label downloads: $count segments (${done.size} already done), $segmentWorkers workers, first segment host=$firstHost")
         try {
             coroutineScope {
             val semaphore = Semaphore(segmentWorkers.coerceIn(1, 16))
-            playlist.segments.map { seg ->
+            list.segments.map { seg ->
                 async {
                     semaphore.withPermit {
                         checkPausedOrCancelled()
-                        val segFile = File(tempDir, "seg_%05d.ts".format(seg.index))
+                        val segFile = File(tempDir, "${prefix}_%05d.ts".format(seg.index))
                         if (seg.index in done && segFile.exists() && segFile.length() > 0) return@async
                         try {
                             val raw = EngineHttp.requestWithRetry(
@@ -604,17 +980,18 @@ object HlsDownloader {
                             }
                             // Atomic write: temp file then rename, so a
                             // crash never leaves a half segment marked done.
-                            val tmp = File(tempDir, "seg_%05d.tmp".format(seg.index))
+                            val tmp = File(tempDir, "${prefix}_%05d.tmp".format(seg.index))
                             tmp.writeBytes(plain)
                             if (!tmp.renameTo(segFile)) segFile.writeBytes(plain)
                             throttler.throttle(plain.size)
                             synchronized(lock) {
                                 downloadedBytes += plain.size
+                                playlistBytes += plain.size
                                 val now = System.currentTimeMillis()
                                 val elapsed = (now - reportTimeMs).coerceAtLeast(1)
                                 val speed = (downloadedBytes - reportBytes) * 1000.0 / elapsed / (1024.0 * 1024.0)
-                                val remaining = total - done.size - 1
-                                val avg = if (done.isNotEmpty()) downloadedBytes / done.size.coerceAtLeast(1) else plain.size.toLong()
+                                val remaining = count - done.size - 1
+                                val avg = if (done.isNotEmpty()) playlistBytes / done.size.coerceAtLeast(1) else plain.size.toLong()
                                 val estimate = downloadedBytes + remaining.coerceAtLeast(0) * avg
                                 if (now - lastReportMs >= 500) {
                                     lastReportMs = now
@@ -631,7 +1008,7 @@ object HlsDownloader {
                                         // rides the same 500 ms
                                         // throttle, so the row can
                                         // show "Segment 34/267".
-                                        onPhase?.invoke(HlsPhase.DOWNLOADING_SEGMENTS, "Segment ${done.size}/$total")
+                                        onPhase?.invoke(HlsPhase.DOWNLOADING_SEGMENTS, "$label ${done.size}/$count")
                                     }
                                 }
                             }
@@ -677,13 +1054,13 @@ object HlsDownloader {
                             // stopped. Zero completions fails over
                             // to the next server; later failures take
                             // the normal resume path.
-                            val failFastAt = if (completedInRun.get() == 0) 8 else maxOf(8, total / 4)
+                            val failFastAt = if (completedInRun.get() == 0) 8 else maxOf(8, count / 4)
                             if (failedCount >= failFastAt) {
                                 aborted.set(true)
                                 connectionHandle?.disconnectAll()
-                                DownloadLogs.log("HLS", "fail-fast: $failedCount segment(s) failed, ${completedInRun.get()} completed in this run — aborting instead of waiting out $total segments")
+                                DownloadLogs.log("HLS", "fail-fast: $failedCount segment(s) failed, ${completedInRun.get()} completed in this run — aborting instead of waiting out $count $label segments")
                                 if (completedInRun.get() == 0) throw HlsStallException("Server stalled — $failedCount segments failed before the first one landed. Trying the next server.")
-                                throw java.io.IOException("$failedCount of $total segments failed — download aborted early, retry to resume. First: ${failed.first()}")
+                                throw java.io.IOException("$failedCount of $count $label segments failed — download aborted early, retry to resume. First: ${failed.first()}")
                             }
                         }
                     }
@@ -691,12 +1068,21 @@ object HlsDownloader {
             }.awaitAll()
             }
         } catch (e: CancellationException) {
-            DownloadLogs.log("HLS", "cancelled during segment download (${done.size}/$total segments done)")
+            DownloadLogs.log("HLS", "cancelled during $label download (${done.size}/$count segments done)")
             throw e
         }
         if (failed.isNotEmpty()) {
-            DownloadLogs.log("HLS", "aborted: ${failed.size} of $total segments failed in ${System.currentTimeMillis() - hlsStartedMs}ms — first: ${failed.first()}")
-            throw java.io.IOException("${failed.size} of $total segments failed — download aborted, retry to resume. First: ${failed.first()}")
+            DownloadLogs.log("HLS", "aborted: ${failed.size} of $count $label segments failed in ${System.currentTimeMillis() - hlsStartedMs}ms — first: ${failed.first()}")
+            throw java.io.IOException("${failed.size} of $count $label segments failed — download aborted, retry to resume. First: ${failed.first()}")
+        }
+        }
+
+        // Video segments first, then the separate audio rendition
+        // (if any): if the video fails fast, no time is wasted on
+        // the audio playlist.
+        downloadSegments(playlist, "seg", "segments.done", "Segment", firstSegmentHost)
+        if (audioPlaylist != null) {
+            downloadSegments(audioPlaylist, "aseg", "audio.done", "Audio segment", audioFirstHost)
         }
         // 2.0-dev2.7 DEFECT 2: do not emit the finish progress
         // (total == downloaded) for a cancelled job, and do not
@@ -704,13 +1090,37 @@ object HlsDownloader {
         // checks, per segment and per sample batch.
         checkPausedOrCancelled()
         onProgress(downloadedBytes, downloadedBytes, 0.0)
-        DownloadLogs.log("HLS", "all $total segments done in ${System.currentTimeMillis() - hlsStartedMs}ms, ${downloadedBytes / 1024} KB — remuxing")
+        DownloadLogs.log("HLS", "all segments done in ${System.currentTimeMillis() - hlsStartedMs}ms, ${downloadedBytes / 1024} KB — remuxing")
+
+        // 2.0-dev2.19 — subtitles, before the remux: the
+        // resolver's tracks + the master's tracks, parsed into
+        // cues and embedded as text tracks. English was already
+        // fetched + gated above for Sub (reused here, not fetched
+        // twice); the other languages are best-effort, and for Dub
+        // English is fetched here like the rest.
+        val subTracksForEmbed = (linkSubtitles + subtitleTracks).distinctBy { it.url }
+            .filter { englishSubs == null || normalizeSubtitleLanguage(it.language, it.label) != "en" }
+        val otherSubs = fetchAndParseSubtitles(
+            subTracksForEmbed,
+            fetchHeaders,
+            fetchCancelled,
+            connectionHandle,
+        )
+        val embeddedSubs = listOfNotNull(englishSubs) + otherSubs
+        if (embeddedSubs.isNotEmpty()) {
+            DownloadLogs.log("HLS", "subtitles to embed: ${embeddedSubs.joinToString { "${it.language} (${it.cues.size} cues)" }}")
+        }
 
         // 2.0-dev2.9: remux progress — the phase callback now
         // reports concat/mux progress instead of the UI sitting
         // silent at 100%/Connecting through the whole remux.
-        onPhase?.invoke(HlsPhase.REMUXING, "0/$total segments")
-        remux(tempDir, playlist.segments.size, initFile, outputFile, isCancelled, onPhase)
+        onPhase?.invoke(HlsPhase.REMUXING, "0/${playlist.segments.size + (audioPlaylist?.segments?.size ?: 0)} segments")
+        remux(
+            tempDir, playlist.segments.size, initFile,
+            audioPlaylist?.segments?.size ?: 0,
+            if (audioPlaylist != null) audioInitFile else null,
+            outputFile, embeddedSubs, isCancelled, onPhase, onRemuxProgress,
+        )
         DownloadLogs.log("HLS", "remux done: ${outputFile.length() / 1024} KB -> ${outputFile.name}")
         // Segments are now inside the mp4; clean up.
         try {
@@ -734,42 +1144,204 @@ object HlsDownloader {
     // notification post, so per-segment/per-sample would spam).
     // Remux itself stays single-threaded: MediaMuxer is serial,
     // and the concat order is the segment order.
-    private fun remux(tempDir: File, segmentCount: Int, initFile: File, outputFile: File, isCancelled: () -> Boolean = { false }, onPhase: ((HlsPhase, String?) -> Unit)? = null) {
-        val combined = File(tempDir, "combined.ts")
-        combined.outputStream().use { out ->
-            if (initFile.exists()) initFile.inputStream().use { it.copyTo(out) }
-            for (i in 0 until segmentCount) {
-                if (isCancelled()) {
-                    DownloadLogs.log("HLS", "remux cancelled during concat (segment $i/$segmentCount)")
-                    throw CancellationException("HLS remux cancelled")
+    // 2.0-dev2.19: the remux now merges TWO extractors (video +
+    // the separate audio rendition, when one was fetched) plus one
+    // text/vtt track per embedded subtitle language, all merged
+    // by timestamp. The video file's own audio is skipped when
+    // the separate audio file actually carries an audio track
+    // (keeping both would double it); when it doesn't, the video
+    // file's audio is kept instead (muxed streams).
+    private fun remux(
+        tempDir: File,
+        segmentCount: Int,
+        initFile: File,
+        audioSegmentCount: Int = 0,
+        audioInitFile: File? = null,
+        outputFile: File,
+        subtitleCues: List<SubtitleTrackCues> = emptyList(),
+        isCancelled: () -> Boolean = { false },
+        onPhase: ((HlsPhase, String?) -> Unit)? = null,
+        onRemuxProgress: ((Float) -> Unit)? = null,
+    ) {
+        // Concat: video first, then audio. The concat half of the
+        // remux is progress 0..0.5; the mux half is 0.5..1.
+        val totalConcat = segmentCount + audioSegmentCount
+        fun concat(prefix: String, count: Int, init: File?, outFile: File, startIndex: Int) {
+            outFile.outputStream().use { out ->
+                if (init != null && init.exists()) init.inputStream().use { it.copyTo(out) }
+                for (i in 0 until count) {
+                    if (isCancelled()) {
+                        DownloadLogs.log("HLS", "remux cancelled during concat (segment $i/$count)")
+                        throw CancellationException("HLS remux cancelled")
+                    }
+                    val seg = File(tempDir, "${prefix}_%05d.ts".format(i))
+                    if (!seg.exists()) throw java.io.IOException("Missing segment $i at remux — retry the download.")
+                    seg.inputStream().use { it.copyTo(out) }
+                    val done = startIndex + i + 1
+                    if (done % 16 == 0 || done == totalConcat) {
+                        onPhase?.invoke(HlsPhase.REMUXING, "${done - 1}/$totalConcat segments")
+                        if (totalConcat > 0) onRemuxProgress?.invoke(0.5f * done / totalConcat)
+                    }
                 }
-                val seg = File(tempDir, "seg_%05d.ts".format(i))
-                if (!seg.exists()) throw java.io.IOException("Missing segment $i at remux — retry the download.")
-                seg.inputStream().use { it.copyTo(out) }
-                if (i % 16 == 0 || i == segmentCount - 1) onPhase?.invoke(HlsPhase.REMUXING, "$i/$segmentCount segments")
             }
         }
+        val combined = File(tempDir, "combined.ts")
+        concat("seg", segmentCount, initFile, combined, 0)
+        val combinedAudio = if (audioSegmentCount > 0) File(tempDir, "combined-audio.ts") else null
+        if (combinedAudio != null) {
+            concat("aseg", audioSegmentCount, audioInitFile, combinedAudio, segmentCount)
+        }
+        val sources = mutableListOf(MuxSource(combined, includeVideo = true, includeAudio = true))
+        if (combinedAudio != null) sources += MuxSource(combinedAudio, includeVideo = false, includeAudio = true)
+        try {
+            muxFromExtractors(sources, subtitleCues, outputFile, isCancelled, onPhase, onRemuxProgress)
+        } finally {
+            try {
+                combined.delete()
+            } catch (_: Exception) {
+            }
+            try {
+                combinedAudio?.delete()
+            } catch (_: Exception) {
+            }
+        }
+        if (!outputFile.exists() || outputFile.length() == 0L) {
+            throw java.io.IOException("Remux produced an empty file — the stream may be unsupported.")
+        }
+    }
+
+    // One input file for the mux: which of its tracks to keep.
+    private data class MuxSource(
+        val file: File,
+        val includeVideo: Boolean,
+        val includeAudio: Boolean,
+    )
+
+    // One extractor's read-ahead state: the next sample is held
+    // (buffer + time + track) so the merge loop can compare
+    // timestamps across sources before writing anything.
+    private class ExtractorState(
+        val extractor: MediaExtractor,
+        val trackMap: IntArray, // extractor track index -> muxer track index (-1 = skipped)
+        val buffer: ByteBuffer = ByteBuffer.allocate(1024 * 1024),
+    ) {
+        var hasSample = false
+        var sampleTimeUs = 0L
+        var sampleSize = 0
+        var sampleTrack = -1
+        var sampleFlags = 0
+
+        fun readNext(): Boolean {
+            sampleSize = extractor.readSampleData(buffer, 0)
+            if (sampleSize < 0) {
+                hasSample = false
+                return false
+            }
+            sampleTrack = extractor.sampleTrackIndex
+            sampleTimeUs = extractor.sampleTime
+            sampleFlags = extractor.sampleFlags
+            hasSample = true
+            return true
+        }
+
+        fun advance() = extractor.advance()
+    }
+
+    private class CueStreamState(
+        val trackIndex: Int, // muxer track index
+        val cues: List<SubtitleCue>,
+    ) {
+        var pointer = 0
+        val hasNext: Boolean get() = pointer < cues.size
+        val nextStartUs: Long get() = cues[pointer].startUs
+        fun next(): SubtitleCue = cues[pointer++]
+    }
+
+    // Mux every kept track from every source plus one text/vtt
+    // track per subtitle language, merged by timestamp (ties: A/V
+    // first, then cues). Samples are monotonic per track, which is
+    // all MediaMuxer requires; cross-track order is the merge's
+    // timestamp order. The DDL post-pass reuses this with a single
+    // source (the finished mp4) — see embedSubtitlesIntoMp4.
+    private fun muxFromExtractors(
+        sources: List<MuxSource>,
+        cueStreams: List<SubtitleTrackCues>,
+        outputFile: File,
+        isCancelled: () -> Boolean,
+        onPhase: ((HlsPhase, String?) -> Unit)?,
+        onRemuxProgress: ((Float) -> Unit)?,
+    ) {
         outputFile.parentFile?.mkdirs()
         if (outputFile.exists()) outputFile.delete()
-        val extractor = MediaExtractor()
+        val extractors = mutableListOf<MediaExtractor>()
         var muxer: MediaMuxer? = null
         var started = false
         try {
-            extractor.setDataSource(combined.absolutePath)
-            val trackCount = extractor.trackCount
-            if (trackCount == 0) throw java.io.IOException("Remux failed: no tracks found in the stream.")
-            DownloadLogs.log("HLS", "remux: $trackCount track(s) from ${combined.length() / 1024} KB combined TS")
-            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
-            val trackMap = IntArray(trackCount)
-            for (i in 0 until trackCount) {
-                trackMap[i] = muxer.addTrack(extractor.getTrackFormat(i))
-                extractor.selectTrack(i)
+            val opened = sources.map { src ->
+                val ex = MediaExtractor()
+                extractors += ex
+                ex.setDataSource(src.file.absolutePath)
+                src to ex
             }
+            // A separate audio file wins the audio tracks: the
+            // video file's audio is then skipped. When the audio
+            // file has no audio track at all, the video file's
+            // audio is kept instead.
+            val audioSourceHasAudio = opened.any { (src, ex) ->
+                !src.includeVideo && src.includeAudio && (0 until ex.trackCount).any {
+                    (ex.getTrackFormat(it).getString(MediaFormat.KEY_MIME) ?: "").startsWith("audio/")
+                }
+            }
+            muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
+            val states = mutableListOf<ExtractorState>()
+            var videoDurationUs = 0L
+            var keptTracks = 0
+            for ((src, ex) in opened) {
+                val trackMap = IntArray(ex.trackCount) { -1 }
+                for (i in 0 until ex.trackCount) {
+                    val format = ex.getTrackFormat(i)
+                    val mime = format.getString(MediaFormat.KEY_MIME) ?: ""
+                    val isVideo = mime.startsWith("video/")
+                    val isAudio = mime.startsWith("audio/")
+                    val keep = when {
+                        isVideo && src.includeVideo -> true
+                        isAudio && src.includeAudio && !(src.includeVideo && audioSourceHasAudio) -> true
+                        else -> false
+                    }
+                    if (!keep) continue
+                    if (isVideo && format.containsKey(MediaFormat.KEY_DURATION)) {
+                        videoDurationUs = maxOf(videoDurationUs, format.getLong(MediaFormat.KEY_DURATION))
+                    }
+                    trackMap[i] = muxer.addTrack(format)
+                    ex.selectTrack(i)
+                    keptTracks++
+                }
+                states += ExtractorState(ex, trackMap)
+            }
+            val cueStates = mutableListOf<CueStreamState>()
+            for (stream in cueStreams) {
+                if (stream.cues.isEmpty()) continue
+                val format = MediaFormat()
+                format.setString(MediaFormat.KEY_MIME, "text/vtt")
+                format.setString(MediaFormat.KEY_LANGUAGE, stream.language)
+                val muxerTrack = muxer.addTrack(format)
+                cueStates += CueStreamState(muxerTrack, stream.cues)
+                keptTracks++
+            }
+            if (keptTracks == 0) throw java.io.IOException("Remux failed: no tracks found in the stream.")
+            DownloadLogs.log(
+                "HLS",
+                "remux: ${opened.sumOf { it.second.trackCount }} source track(s), $keptTracks kept" +
+                    (if (cueStates.isNotEmpty()) ", subtitles: ${cueStates.size} track(s)" else "") +
+                    (if (audioSourceHasAudio) ", audio from separate rendition" else ""),
+            )
             muxer.start()
             started = true
-            val buffer = ByteBuffer.allocate(1024 * 1024)
             val info = android.media.MediaCodec.BufferInfo()
             var samples = 0
+            var maxSampleTimeUs = 0L
+            var lastProgressSent = 0f
+            for (st in states) st.readNext()
             while (true) {
                 // 2.0-dev2.7 DEFECT 2: remux-phase cancel check —
                 // one sample batch at most.
@@ -779,13 +1351,50 @@ object HlsDownloader {
                 }
                 // 2.0-dev2.9: coarse mux progress (see remux header).
                 if (samples % 8192 == 0) onPhase?.invoke(HlsPhase.REMUXING, "muxing…")
-                val size = extractor.readSampleData(buffer, 0)
-                if (size < 0) break
-                val trackIndex = extractor.sampleTrackIndex
-                info.set(0, size, extractor.sampleTime, extractor.sampleFlags)
-                muxer.writeSampleData(trackMap[trackIndex], buffer, info)
-                extractor.advance()
+                var bestTime = Long.MAX_VALUE
+                var bestExtractor: ExtractorState? = null
+                var bestCue: CueStreamState? = null
+                for (st in states) {
+                    if (st.hasSample && st.sampleTimeUs < bestTime) {
+                        bestTime = st.sampleTimeUs
+                        bestExtractor = st
+                        bestCue = null
+                    }
+                }
+                for (cs in cueStates) {
+                    if (cs.hasNext && cs.nextStartUs < bestTime) {
+                        bestTime = cs.nextStartUs
+                        bestExtractor = null
+                        bestCue = cs
+                    }
+                }
+                if (bestExtractor == null && bestCue == null) break
+                if (bestExtractor != null) {
+                    val st = bestExtractor
+                    info.set(0, st.sampleSize, st.sampleTimeUs, st.sampleFlags)
+                    muxer.writeSampleData(st.trackMap[st.sampleTrack], st.buffer, info)
+                    maxSampleTimeUs = maxOf(maxSampleTimeUs, st.sampleTimeUs)
+                    st.advance()
+                    st.readNext()
+                } else {
+                    val cue = bestCue!!.next()
+                    val bytes = cue.text.toByteArray(Charsets.UTF_8)
+                    info.set(0, bytes.size, cue.startUs, 0)
+                    muxer.writeSampleData(bestCue.trackIndex, ByteBuffer.wrap(bytes), info)
+                    maxSampleTimeUs = maxOf(maxSampleTimeUs, cue.startUs)
+                }
+                // 2.0-dev2.19: mux fraction from the video
+                // timeline, so the bar keeps moving through the
+                // remux (the 87% freeze).
+                if (videoDurationUs > 0 && samples % 512 == 0) {
+                    val frac = (0.5f + 0.5f * (maxSampleTimeUs.toFloat() / videoDurationUs.toFloat())).coerceIn(0.5f, 1f)
+                    if (frac - lastProgressSent >= 0.02f) {
+                        lastProgressSent = frac
+                        onRemuxProgress?.invoke(frac)
+                    }
+                }
             }
+            onRemuxProgress?.invoke(1f)
         } finally {
             if (started) {
                 try {
@@ -797,17 +1406,31 @@ object HlsDownloader {
                 muxer?.release()
             } catch (_: Exception) {
             }
-            try {
-                extractor.release()
-            } catch (_: Exception) {
-            }
-            try {
-                combined.delete()
-            } catch (_: Exception) {
+            for (ex in extractors) {
+                try {
+                    ex.release()
+                } catch (_: Exception) {
+                }
             }
         }
-        if (!outputFile.exists() || outputFile.length() == 0L) {
-            throw java.io.IOException("Remux produced an empty file — the stream may be unsupported.")
-        }
+    }
+
+    // 2.0-dev2.19 — embed subtitle cues into a finished mp4 (the
+    // DDL path: the file is a complete server file, never remuxed).
+    // Copies every track and adds one text/vtt track per language;
+    // writes to outputFile (the caller renames it over the
+    // original). No-op when cues is empty. Throws on failure — the
+    // caller keeps the original file.
+    fun embedSubtitlesIntoMp4(
+        inputFile: File,
+        cues: List<SubtitleTrackCues>,
+        outputFile: File,
+        isCancelled: () -> Boolean = { false },
+    ) {
+        if (cues.isEmpty()) return
+        muxFromExtractors(
+            listOf(MuxSource(inputFile, includeVideo = true, includeAudio = true)),
+            cues, outputFile, isCancelled, null, null,
+        )
     }
 }

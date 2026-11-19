@@ -960,7 +960,6 @@ object DownloadEngine {
             // pump() is untouched — this is per-download workers,
             // not parallel episodes.
             val segmentWorkers = (parallelLimit(ctx) * 2).coerceIn(8, 12)
-            var hlsSubs: List<SubtitleTrack> = emptyList()
             var hlsActualHeight: Int? = null
             try {
                 // 2.0-dev2.9 STALL FAILOVER: the download dispatch
@@ -1014,6 +1013,41 @@ object DownloadEngine {
                         speedLimitMBps = speedLimit,
                         onProgress = { bytes, total, speed -> reportProgress(id, bytes, total, speed) },
                     )
+                        // 2.0-dev2.19 — embed subtitles into the
+                        // finished DDL file (best-effort: a failed
+                        // embed keeps the original file, never
+                        // fails the job). DDL files are complete
+                        // server files, never remuxed, so this is
+                        // a rewrite pass; HLS embeds during its
+                        // remux instead. Hardsubbed DDL needs
+                        // nothing — its subs are burned in.
+                        if (attemptLink.subtitles.isNotEmpty()) {
+                            try {
+                                if (control.cancelled) throw CancellationException("cancelled")
+                                reportPhase(id, "Adding subtitles…")
+                                val ddlCues = HlsDownloader.fetchAndParseSubtitles(
+                                    attemptLink.subtitles,
+                                    mapOf("Referer" to attemptLink.referer),
+                                    { control.cancelled },
+                                    null,
+                                )
+                                if (ddlCues.isNotEmpty()) {
+                                    val embedded = File(dest.tempDir, "embedded.mp4")
+                                    HlsDownloader.embedSubtitlesIntoMp4(dest.workFile, ddlCues, embedded) { control.cancelled }
+                                    if (embedded.exists() && embedded.length() > 0) {
+                                        dest.workFile.delete()
+                                        embedded.renameTo(dest.workFile)
+                                        DownloadLogs.logJob(id, "ENGINE", "subtitles embedded into DDL file (${ddlCues.joinToString { "${it.language} (${it.cues.size} cues)" }})")
+                                    } else {
+                                        try { embedded.delete() } catch (_: Exception) { }
+                                    }
+                                }
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (e: Exception) {
+                                DownloadLogs.logJob(id, "ENGINE", "subtitle embed skipped (${e.message ?: "error"}) — keeping the original file")
+                            }
+                        }
                     }
                     is ResolvedLink.Hls -> {
                         val hlsResult = HlsDownloader.download(
@@ -1037,8 +1071,14 @@ object DownloadEngine {
                             // row/notification show the real phase.
                             connectionHandle = hlsConnectionHandle(id),
                             onPhase = { phase, detail -> reportHlsPhase(id, phase, detail) },
+                            // 2.0-dev2.19: the resolver's subtitle
+                            // tracks (embedded during the remux, no
+                            // sidecars) and the remux fraction so
+                            // the bar keeps moving through the
+                            // remux instead of freezing at 87%.
+                            linkSubtitles = attemptLink.subtitles,
+                            onRemuxProgress = { frac -> reportRemuxProgress(id, frac) },
                         )
-                        hlsSubs = hlsResult.subtitles
                         hlsActualHeight = hlsResult.actualHeight
                     }
                     is ResolvedLink.Failed -> throw java.io.IOException(attemptLink.message)
@@ -1092,7 +1132,6 @@ object DownloadEngine {
                     }
                     link = fresh.link
                     links[id] = fresh.link
-                    hlsSubs = emptyList()
                     hlsActualHeight = null
                     val newServer = fresh.serverNumber ?: 0
                     updateJob(id, {
@@ -1127,6 +1166,20 @@ object DownloadEngine {
                     } catch (_: Exception) {
                     }
                     throw QualityMismatchException("Downloaded ${deliveredHeight}p, not ${job.quality} — tap Retry.")
+                }
+                // 2.0-dev2.19 — a readable file with a video track
+                // but NO audio track is NOT a completion (Death
+                // Note E1 completed silent). Null (unreadable / no
+                // tracks) stays "unverifiable" and must NOT fail
+                // the job, same rule as the height probe above.
+                val hasAudio = probeHasAudioTrack(dest.workFile)
+                if (hasAudio == false) {
+                    DownloadLogs.logJob(id, "ENGINE", "NO AUDIO TRACK: downloaded file has video but no audio — failing, not completing")
+                    try {
+                        dest.workFile.delete()
+                    } catch (_: Exception) {
+                    }
+                    throw java.io.IOException("The downloaded file has no audio — try another server or a different quality.")
                 }
                 val actualHeight = deliveredHeight ?: hlsActualHeight ?: link.offeredHeight()
                 val actualLabel = actualHeight?.let { "${it}p" } ?: job.quality
@@ -1203,36 +1256,11 @@ object DownloadEngine {
                         phaseLabel = null,
                     )
                 }, persistNow = true)
-                // Subtitle sidecars (best-effort): union of the
-                // resolve-time tracks and the ones the master
-                // playlist itself advertised. A failed sidecar never
-                // fails the job.
-                try {
-                    val linkSubs: List<SubtitleTrack> = when (link) {
-                        is ResolvedLink.DirectMp4 -> link.subtitles
-                        is ResolvedLink.Hls -> link.subtitles
-                        else -> emptyList()
-                    }
-                    val allSubs = (linkSubs + hlsSubs).distinctBy { it.url }
-                    if (allSubs.isNotEmpty()) {
-                        // Subtitle sidecars live on the same gated
-                        // CDNs, so they get the same Referer/Origin
-                        // the segments got (HLS links only; DDL
-                        // links have no Origin and a plain Referer).
-                        val subHeaders: Map<String, String> = buildMap {
-                            val ref = when (link) {
-                                is ResolvedLink.DirectMp4 -> link.referer
-                                is ResolvedLink.Hls -> link.referer
-                                else -> null
-                            }
-                            ref?.takeIf { it.isNotBlank() }?.let { put("Referer", it) }
-                            (link as? ResolvedLink.Hls)?.origin
-                                ?.takeIf { it.isNotBlank() }?.let { put("Origin", it) }
-                        }
-                        writeSubtitleSidecars(ctx, job, finalFileName, finalPath, allSubs, subHeaders)
-                    }
-                } catch (_: Exception) {
-                }
+                // 2.0-dev2.19 — no subtitle sidecars anymore: the
+                // subtitles were embedded into the mp4 itself
+                // during the remux (HLS) or the post-pass (DDL),
+                // so VLC lists them as subtitle tracks and no
+                // extra files sit in the folder.
             } catch (e: QualityMismatchException) {
                 // 2.0-dev2.5 DEFECT 3: no auto-retry — the same
                 // link would deliver the same low file again.
@@ -1371,6 +1399,22 @@ object DownloadEngine {
     // of the undifferentiated "Connecting…".
     private fun reportHlsPhase(id: String, phase: HlsPhase, detail: String?) {
         reportPhase(id, if (detail.isNullOrBlank()) phase.label else "${phase.label} $detail")
+    }
+
+    // 2.0-dev2.19 — remux progress: the remux fraction 0..1 maps
+    // onto the remaining gap between the bytes already downloaded
+    // and the frozen total, so the bar keeps moving through the
+    // remux instead of freezing at the segment bytes (the 87%
+    // freeze: the frozen total was the HLS size estimate, which
+    // overshot the real file, and the remux reported no bytes).
+    private fun reportRemuxProgress(id: String, fraction: Float) {
+        val job = _jobs.value.firstOrNull { it.id == id } ?: return
+        if (job.state == JobState.CANCELLED || job.state == JobState.FAILED || job.state == JobState.COMPLETED) return
+        val total = job.totalBytes
+        if (total <= 0) return
+        val base = job.downloadedBytes
+        val target = base + ((total - base) * fraction.coerceIn(0f, 1f)).toLong()
+        reportProgress(id, target, total, 0.0)
     }
 
     // 2.0-dev2.9 STALL FAILOVER: fresh race for this episode
@@ -1718,6 +1762,32 @@ object DownloadEngine {
         }
     }
 
+    // 2.0-dev2.19 — post-download audio verification, the sibling
+    // of probeVideoHeight above. True when the file has an audio
+    // track, false when it is readable but has none, null when the
+    // file can't be read at all (callers treat null as
+    // "unverifiable" and must NOT fail the job on it).
+    private fun probeHasAudioTrack(file: File): Boolean? {
+        if (!file.exists() || file.length() == 0L) return null
+        val extractor = MediaExtractor()
+        return try {
+            extractor.setDataSource(file.absolutePath)
+            if (extractor.trackCount == 0) return null
+            for (i in 0 until extractor.trackCount) {
+                val mime = extractor.getTrackFormat(i).getString(MediaFormat.KEY_MIME) ?: continue
+                if (mime.startsWith("audio/")) return true
+            }
+            false
+        } catch (_: Exception) {
+            null
+        } finally {
+            try {
+                extractor.release()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
     private fun deleteFile(context: Context, path: String?) {
         if (path.isNullOrBlank()) return
         try {
@@ -1741,64 +1811,9 @@ object DownloadEngine {
 
     // --- Subtitle sidecars (best-effort) ------------------------------
 
-    // Download each subtitle track next to the finished video:
-    // same stem + .<language>.vtt. File mode writes beside the mp4;
-    // SAF mode writes into the same tree folder via DocumentsContract
-    // (reusing the safCreateFile pattern). A failed sidecar is
-    // skipped silently and never fails the job.
-    private fun writeSubtitleSidecars(
-        context: Context,
-        job: DownloadJob,
-        fileName: String,
-        finalPath: String,
-        subs: List<SubtitleTrack>,
-        headers: Map<String, String> = emptyMap(),
-    ) {
-        val stem = fileName.removeSuffix(".mp4")
-        val used = mutableSetOf<String>()
-        for (sub in subs) {
-            try {
-                val langRaw = sub.language.ifBlank { "sub" }
-                    .map { c -> if (c.isLetterOrDigit() || c == '-' || c == '_') c else '-' }
-                    .joinToString("").trim('-').ifBlank { "sub" }
-                var vttName = "$stem.$langRaw.vtt"
-                var n = 2
-                while (!used.add(vttName)) {
-                    vttName = "$stem.$langRaw-$n.vtt"
-                    n++
-                }
-                val bytes = try {
-                    val resp = EngineHttp.requestWithRetry(sub.url, headers = headers, timeoutMs = 15_000)
-                    if (resp.code != 200 || resp.bytes.isEmpty()) null else resp.bytes
-                } catch (_: Exception) {
-                    null
-                } ?: continue
-                if (finalPath.startsWith("content://")) {
-                    // 2.0-dev2.6: a MediaStore finalPath (authority
-                    // "media") gets its sidecar published into the
-                    // same public folder; a SAF document Uri still
-                    // goes through the chosen tree.
-                    if (DownloadStorage.isMediaStoreUri(finalPath)) {
-                        DownloadStorage.publishBytes(context, bytes, job.animeTitle, vttName, "text/vtt")
-                    } else {
-                        val tree = safTreeUri(context) ?: continue
-                        val staging = File(
-                            File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir, ".staging"),
-                            "${job.id}-$vttName",
-                        )
-                        staging.parentFile?.mkdirs()
-                        staging.writeBytes(bytes)
-                        safCreateFile(context, tree, sanitizeFileName(job.animeTitle), vttName, staging, mimeType = "text/vtt")
-                    }
-                } else {
-                    val dir = File(finalPath).parentFile ?: continue
-                    File(dir, vttName).writeBytes(bytes)
-                }
-            } catch (_: Exception) {
-                // Best-effort: skip this track, keep the rest.
-            }
-        }
-    }
+    // 2.0-dev2.19 — writeSubtitleSidecars DELETED: subtitles are
+    // embedded into the mp4 now (HlsDownloader), so no sidecar
+    // files are written next to the video anymore.
 
     // --- SAF helpers (framework DocumentsContract only, no new dep) -----
 
