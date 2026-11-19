@@ -6,8 +6,11 @@
      (180 of a 238.8 circumference, rotated -45deg) is written as an
      explicit large arc instead — start (76.87, 19.13) at -45deg,
      clockwise 271deg to (23.6, 18.67), gap across the top.
-     Glyph bbox x 12-88, y 8-84, centre (50, 46); scaled 0.9 about
-     (50, 50) + translateY 3.6 centres it exactly at (50, 50).
+     Glyph bbox x 12-88, y 8-84, centre (50, 46).
+     2.0-dev2.20: black padding on all sides (JS 2026-11-19, like
+     Geode) — scaled 0.72 about (50, 50) + translateY 2.9, so the
+     glyph spans ~55% of the canvas and sits inside the launcher
+     mask with black around it instead of touching the edges.
      Background stays dark (#07070C) — pink on black, as before.
      In-app header logo reuses this drawable, so it changes too.
      Wordmark unchanged. -->
@@ -19,9 +22,9 @@
     <group
         android:pivotX="50"
         android:pivotY="50"
-        android:scaleX="0.9"
-        android:scaleY="0.9"
-        android:translateY="3.6">
+        android:scaleX="0.72"
+        android:scaleY="0.72"
+        android:translateY="2.9">
         <path
             android:strokeColor="#FF4D8D"
             android:strokeWidth="6"

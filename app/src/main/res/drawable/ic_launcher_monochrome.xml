@@ -1,7 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Themed-icon (Android 13+) monochrome layer: Orbit spark, all white
      on transparent, same geometry as the colour layer (same arc, sparkle
-     and dot, same 0.9 scale + translateY 3.6 centring).
+     and dot, same 0.72 scale + translateY 2.9 centring, with the same
+     black padding on all sides as the colour icon).
      Unlike the v2 stack, nothing is removed here: the mono SVG JS chose
      already uses these exact shapes in white, so colour and mono match
      shape-for-shape. One thing to check on a real phone: the dot sits
@@ -17,9 +18,9 @@
     <group
         android:pivotX="50"
         android:pivotY="50"
-        android:scaleX="0.9"
-        android:scaleY="0.9"
-        android:translateY="3.6">
+        android:scaleX="0.72"
+        android:scaleY="0.72"
+        android:translateY="2.9">
         <path
             android:strokeColor="#FFFFFF"
             android:strokeWidth="6"

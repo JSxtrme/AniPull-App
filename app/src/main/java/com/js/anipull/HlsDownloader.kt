@@ -107,8 +107,9 @@ object HlsDownloader {
     data class SubtitleCue(val startUs: Long, val endUs: Long, val text: String)
 
     // 2.0-dev2.19 — a subtitle track's parsed cues, ready to be
-    // embedded as one text/vtt track in the mp4. Language is one
-    // of the five embedded languages (see EMBED_SUBTITLE_LANGUAGES).
+    // embedded as one tx3g track in the mp4 (via Mp4WebVtt).
+    // Language is one of the five embedded languages (see
+    // EMBED_SUBTITLE_LANGUAGES).
     data class SubtitleTrackCues(val language: String, val cues: List<SubtitleCue>)
 
     // 2.0-dev2.19 — subtitle languages embedded into the mp4 (JS
@@ -330,9 +331,9 @@ object HlsDownloader {
 
     // --- Subtitles: fetch + parse, for embedding into the mp4 -----
     // 2.0-dev2.19 — no sidecar files anymore (JS 2026-11-19): the
-    // real subtitle files are parsed into cues and muxed into the
-    // video as text/vtt tracks, so VLC lists them as subtitle
-    // tracks and nothing extra sits in the folder.
+    // real subtitle files are parsed into cues and injected into
+    // the video as tx3g tracks (Mp4WebVtt, dev2.20), so VLC lists
+    // them as subtitle tracks and nothing extra sits in the folder.
 
     // Normalize a track's language/label to one of the five
     // embedded languages, or null when it isn't one of them.
@@ -535,10 +536,11 @@ object HlsDownloader {
     // requested language.
     // 2.0-dev2.19: `linkSubtitles` (the resolver's tracks) are
     // merged with the master's subtitle tracks, parsed, and
-    // EMBEDDED into the mp4 as text/vtt tracks — no sidecar files
-    // are written anymore. When the picked variant declares an
-    // AUDIO group, the separate audio rendition is fetched and
-    // muxed with the video (the Death Note E1 no-audio fix).
+    // EMBEDDED into the mp4 as tx3g tracks (Mp4WebVtt, dev2.20) —
+    // no sidecar files are written anymore. When the picked
+    // variant declares an AUDIO group, the separate audio
+    // rendition is fetched and muxed with the video (the Death
+    // Note E1 no-audio fix).
     // `onRemuxProgress` gets the remux fraction 0..1 so the bar
     // keeps moving through the remux instead of freezing at the
     // segment bytes (the 87% freeze).
@@ -1145,12 +1147,13 @@ object HlsDownloader {
     // Remux itself stays single-threaded: MediaMuxer is serial,
     // and the concat order is the segment order.
     // 2.0-dev2.19: the remux now merges TWO extractors (video +
-    // the separate audio rendition, when one was fetched) plus one
-    // text/vtt track per embedded subtitle language, all merged
-    // by timestamp. The video file's own audio is skipped when
-    // the separate audio file actually carries an audio track
-    // (keeping both would double it); when it doesn't, the video
-    // file's audio is kept instead (muxed streams).
+    // the separate audio rendition, when one was fetched). The
+    // video file's own audio is skipped when the separate audio
+    // file actually carries an audio track (keeping both would
+    // double it); when it doesn't, the video file's audio is kept
+    // instead (muxed streams). Subtitles are NOT muxed here —
+    // MediaMuxer rejects subtitle tracks (dev2.19 lesson) — they
+    // are injected afterwards by Mp4WebVtt (see remux()).
     private fun remux(
         tempDir: File,
         segmentCount: Int,
@@ -1194,7 +1197,7 @@ object HlsDownloader {
         val sources = mutableListOf(MuxSource(combined, includeVideo = true, includeAudio = true))
         if (combinedAudio != null) sources += MuxSource(combinedAudio, includeVideo = false, includeAudio = true)
         try {
-            muxFromExtractors(sources, subtitleCues, outputFile, isCancelled, onPhase, onRemuxProgress)
+            muxFromExtractors(sources, outputFile, isCancelled, onPhase, onRemuxProgress)
         } finally {
             try {
                 combined.delete()
@@ -1207,6 +1210,22 @@ object HlsDownloader {
         }
         if (!outputFile.exists() || outputFile.length() == 0L) {
             throw java.io.IOException("Remux produced an empty file — the stream may be unsupported.")
+        }
+        // 2.0-dev2.20 — subtitles are injected AFTER the remux,
+        // as tx3g tracks (see Mp4WebVtt). MediaMuxer cannot add
+        // subtitle tracks at all — dev2.19's text/vtt addTrack
+        // was rejected by the muxer and failed the whole download.
+        // Best-effort: a failed inject keeps the A/V-only file,
+        // never fails the job.
+        if (subtitleCues.isNotEmpty()) {
+            val ok = Mp4WebVtt.inject(outputFile, subtitleCues.map { stream ->
+                Mp4WebVtt.Track(stream.language, stream.cues.map { Mp4WebVtt.Cue(it.startUs, it.endUs, it.text) })
+            }) { msg -> DownloadLogs.log("HLS", msg) }
+            DownloadLogs.log(
+                "HLS",
+                if (ok) "subtitles embedded: ${subtitleCues.joinToString { "${it.language} (${it.cues.size} cues)" }}"
+                else "subtitle embed failed — keeping A/V-only file",
+            )
         }
     }
 
@@ -1247,25 +1266,15 @@ object HlsDownloader {
         fun advance() = extractor.advance()
     }
 
-    private class CueStreamState(
-        val trackIndex: Int, // muxer track index
-        val cues: List<SubtitleCue>,
-    ) {
-        var pointer = 0
-        val hasNext: Boolean get() = pointer < cues.size
-        val nextStartUs: Long get() = cues[pointer].startUs
-        fun next(): SubtitleCue = cues[pointer++]
-    }
-
-    // Mux every kept track from every source plus one text/vtt
-    // track per subtitle language, merged by timestamp (ties: A/V
-    // first, then cues). Samples are monotonic per track, which is
-    // all MediaMuxer requires; cross-track order is the merge's
-    // timestamp order. The DDL post-pass reuses this with a single
+    // Mux every kept track from every source, merged by
+    // timestamp. Samples are monotonic per track, which is all
+    // MediaMuxer requires; cross-track order is the merge's
+    // timestamp order. No subtitle tracks here — MediaMuxer
+    // rejects them (dev2.19 lesson); Mp4WebVtt injects them
+    // afterwards. The DDL post-pass reuses this with a single
     // source (the finished mp4) — see embedSubtitlesIntoMp4.
     private fun muxFromExtractors(
         sources: List<MuxSource>,
-        cueStreams: List<SubtitleTrackCues>,
         outputFile: File,
         isCancelled: () -> Boolean,
         onPhase: ((HlsPhase, String?) -> Unit)?,
@@ -1318,21 +1327,10 @@ object HlsDownloader {
                 }
                 states += ExtractorState(ex, trackMap)
             }
-            val cueStates = mutableListOf<CueStreamState>()
-            for (stream in cueStreams) {
-                if (stream.cues.isEmpty()) continue
-                val format = MediaFormat()
-                format.setString(MediaFormat.KEY_MIME, "text/vtt")
-                format.setString(MediaFormat.KEY_LANGUAGE, stream.language)
-                val muxerTrack = muxer.addTrack(format)
-                cueStates += CueStreamState(muxerTrack, stream.cues)
-                keptTracks++
-            }
             if (keptTracks == 0) throw java.io.IOException("Remux failed: no tracks found in the stream.")
             DownloadLogs.log(
                 "HLS",
                 "remux: ${opened.sumOf { it.second.trackCount }} source track(s), $keptTracks kept" +
-                    (if (cueStates.isNotEmpty()) ", subtitles: ${cueStates.size} track(s)" else "") +
                     (if (audioSourceHasAudio) ", audio from separate rendition" else ""),
             )
             muxer.start()
@@ -1353,36 +1351,19 @@ object HlsDownloader {
                 if (samples % 8192 == 0) onPhase?.invoke(HlsPhase.REMUXING, "muxing…")
                 var bestTime = Long.MAX_VALUE
                 var bestExtractor: ExtractorState? = null
-                var bestCue: CueStreamState? = null
                 for (st in states) {
                     if (st.hasSample && st.sampleTimeUs < bestTime) {
                         bestTime = st.sampleTimeUs
                         bestExtractor = st
-                        bestCue = null
                     }
                 }
-                for (cs in cueStates) {
-                    if (cs.hasNext && cs.nextStartUs < bestTime) {
-                        bestTime = cs.nextStartUs
-                        bestExtractor = null
-                        bestCue = cs
-                    }
-                }
-                if (bestExtractor == null && bestCue == null) break
-                if (bestExtractor != null) {
-                    val st = bestExtractor
-                    info.set(0, st.sampleSize, st.sampleTimeUs, st.sampleFlags)
-                    muxer.writeSampleData(st.trackMap[st.sampleTrack], st.buffer, info)
-                    maxSampleTimeUs = maxOf(maxSampleTimeUs, st.sampleTimeUs)
-                    st.advance()
-                    st.readNext()
-                } else {
-                    val cue = bestCue!!.next()
-                    val bytes = cue.text.toByteArray(Charsets.UTF_8)
-                    info.set(0, bytes.size, cue.startUs, 0)
-                    muxer.writeSampleData(bestCue.trackIndex, ByteBuffer.wrap(bytes), info)
-                    maxSampleTimeUs = maxOf(maxSampleTimeUs, cue.startUs)
-                }
+                if (bestExtractor == null) break
+                val st = bestExtractor
+                info.set(0, st.sampleSize, st.sampleTimeUs, st.sampleFlags)
+                muxer.writeSampleData(st.trackMap[st.sampleTrack], st.buffer, info)
+                maxSampleTimeUs = maxOf(maxSampleTimeUs, st.sampleTimeUs)
+                st.advance()
+                st.readNext()
                 // 2.0-dev2.19: mux fraction from the video
                 // timeline, so the bar keeps moving through the
                 // remux (the 87% freeze).
@@ -1415,12 +1396,13 @@ object HlsDownloader {
         }
     }
 
-    // 2.0-dev2.19 — embed subtitle cues into a finished mp4 (the
+    // 2.0-dev2.20 — embed subtitle cues into a finished mp4 (the
     // DDL path: the file is a complete server file, never remuxed).
-    // Copies every track and adds one text/vtt track per language;
-    // writes to outputFile (the caller renames it over the
-    // original). No-op when cues is empty. Throws on failure — the
-    // caller keeps the original file.
+    // Copies the file, then injects one tx3g track per language
+    // via Mp4WebVtt. No-op when cues is empty. On failure the
+    // output file is deleted, so the caller keeps the original
+    // file. (dev2.19 did this through MediaMuxer; the muxer
+    // rejects subtitle tracks, so that path failed the job.)
     fun embedSubtitlesIntoMp4(
         inputFile: File,
         cues: List<SubtitleTrackCues>,
@@ -1428,9 +1410,16 @@ object HlsDownloader {
         isCancelled: () -> Boolean = { false },
     ) {
         if (cues.isEmpty()) return
-        muxFromExtractors(
-            listOf(MuxSource(inputFile, includeVideo = true, includeAudio = true)),
-            cues, outputFile, isCancelled, null, null,
-        )
+        if (isCancelled()) return
+        inputFile.copyTo(outputFile, overwrite = true)
+        val ok = Mp4WebVtt.inject(outputFile, cues.map { stream ->
+            Mp4WebVtt.Track(stream.language, stream.cues.map { Mp4WebVtt.Cue(it.startUs, it.endUs, it.text) })
+        }) { msg -> DownloadLogs.log("HLS", msg) }
+        if (!ok) {
+            try {
+                outputFile.delete()
+            } catch (_: Exception) {
+            }
+        }
     }
 }
