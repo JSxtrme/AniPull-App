@@ -65,8 +65,17 @@ enum class HlsPhase(val label: String) {
     DOWNLOADING_INIT("Downloading init…"),
     FETCHING_KEY("Fetching key…"),
     DOWNLOADING_SEGMENTS("Downloading segments…"),
-    REMUXING("Remuxing…"),
-    PUBLISHING("Publishing…"),
+    // 2.0-dev2.22 — finishing labels are hooks, not technical
+    // terms: once the segments are in, the bar jumps to 100% and
+    // the label says what the app is doing for the user
+    // ("Wrapping up…", "Adding subtitles…", "Almost there…").
+    // The old "Remuxing… 99%" sat frozen through the whole
+    // remux + inject + publish (JS: "that's a way to lose
+    // users"). The engine drops the segment-count detail on
+    // these phases — the label alone carries it.
+    REMUXING("Wrapping up…"),
+    EMBEDDING_SUBTITLES("Adding subtitles…"),
+    PUBLISHING("Almost there…"),
 }
 
 // 2.0-dev2.9 — hard deadlines for HLS fetches. Why these numbers:
@@ -1217,6 +1226,10 @@ object HlsDownloader {
         // Best-effort: a failed inject keeps the A/V-only file,
         // never fails the job.
         if (subtitleCues.isNotEmpty()) {
+            // 2.0-dev2.22 — the inject rewrites the whole file and
+            // is the longest silent stretch of the finish, so the
+            // label switches here (the bar is already 100%).
+            onPhase?.invoke(HlsPhase.EMBEDDING_SUBTITLES, null)
             val ok = Mp4WebVtt.inject(outputFile, subtitleCues.map { stream ->
                 Mp4WebVtt.Track(stream.language, stream.cues.map { Mp4WebVtt.Cue(it.startUs, it.endUs, it.text) })
             }) { msg -> DownloadLogs.log("HLS", msg) }

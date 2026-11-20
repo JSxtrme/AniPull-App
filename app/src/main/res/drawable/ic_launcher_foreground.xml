@@ -11,9 +11,12 @@
      Geode) — scaled 0.72 about (50, 50) + translateY 2.9, so the
      glyph spans ~55% of the canvas and sits inside the launcher
      mask with black around it instead of touching the edges.
-     Background stays dark (#07070C) — pink on black, as before.
-     In-app header logo reuses this drawable, so it changes too.
-     Wordmark unchanged. -->
+     2.0-dev2.22: JS said 0.72 still wasn't enough padding (his
+     screenshot) — eyeball call, no approval round: scaled 0.58
+     + translateY 2.3, glyph ~44% of the canvas, more black
+     around it. Background stays dark (#07070C) — pink on black,
+     as before. In-app header logo reuses this drawable, so it
+     changes too. Wordmark unchanged. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -22,9 +25,9 @@
     <group
         android:pivotX="50"
         android:pivotY="50"
-        android:scaleX="0.72"
-        android:scaleY="0.72"
-        android:translateY="2.9">
+        android:scaleX="0.58"
+        android:scaleY="0.58"
+        android:translateY="2.3">
         <path
             android:strokeColor="#FF4D8D"
             android:strokeWidth="6"

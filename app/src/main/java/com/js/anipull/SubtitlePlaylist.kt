@@ -57,16 +57,21 @@ internal fun parseSubtitlePlaylistSegments(playlistText: String): List<SubtitleP
 }
 
 // True when the segments' cue times are already absolute (total
-// display times): at least one later segment's cues sit at or
-// after that segment's playlist offset. Local-timed segments
-// have all their cues near zero no matter how large the offset
-// is. The median cue start is used (not the first) so one
-// boundary-spanning cue spilling in from the previous segment
-// cannot flip the verdict.
+// display times). Per-segment evidence is (median cue start -
+// playlist offset): absolute-timed segments sit at their offset
+// (diff ~ +half a chunk, always >= -1.5 s); local-timed segments
+// sit near zero (diff very negative once the offset grows). The
+// MEDIAN across segments decides, so one early chunk with
+// late-clustered cues cannot flip the verdict — the dev2.21 bug
+// was that ANY single segment could, and segment 1's offset is
+// small enough that a late cue there looked "absolute", so no
+// shift was applied and the cues stayed crammed in the first
+// seconds (tracks listed, nothing shown).
 internal fun subtitleCuesAreAbsolute(
     perSegmentCues: List<List<TimedCue>>,
     offsetsUs: List<Long>,
 ): Boolean {
+    val diffs = mutableListOf<Long>()
     for (i in perSegmentCues.indices) {
         if (i == 0) continue
         val cues = perSegmentCues[i]
@@ -74,10 +79,11 @@ internal fun subtitleCuesAreAbsolute(
         val off = offsetsUs[i]
         if (off <= 0) continue
         val starts = cues.map { it.startUs }.sorted()
-        val median = starts[starts.size / 2]
-        if (median >= off - 1_500_000L) return true
+        diffs += starts[starts.size / 2] - off
     }
-    return false
+    if (diffs.isEmpty()) return true // nothing to shift anyway
+    val sorted = diffs.sorted()
+    return sorted[sorted.size / 2] >= -1_500_000L
 }
 
 // Merge per-segment cue lists into one episode-timeline list:

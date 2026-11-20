@@ -1398,23 +1398,30 @@ object DownloadEngine {
     // App.kt renders job.phaseLabel for DOWNLOADING jobs instead
     // of the undifferentiated "Connecting…".
     private fun reportHlsPhase(id: String, phase: HlsPhase, detail: String?) {
-        reportPhase(id, if (detail.isNullOrBlank()) phase.label else "${phase.label} $detail")
+        // 2.0-dev2.22 — finishing labels are hooks, not counters:
+        // the bar is already 100% and the label alone
+        // ("Wrapping up…") says the file is being finished.
+        // Segment counts stay on the downloading phase only.
+        val label = when (phase) {
+            HlsPhase.REMUXING, HlsPhase.EMBEDDING_SUBTITLES -> phase.label
+            else -> if (detail.isNullOrBlank()) phase.label else "${phase.label} $detail"
+        }
+        reportPhase(id, label)
     }
 
-    // 2.0-dev2.19 — remux progress: the remux fraction 0..1 maps
-    // onto the remaining gap between the bytes already downloaded
-    // and the frozen total, so the bar keeps moving through the
-    // remux instead of freezing at the segment bytes (the 87%
-    // freeze: the frozen total was the HLS size estimate, which
-    // overshot the real file, and the remux reported no bytes).
+    // 2.0-dev2.22 — finishing stage: the download is done, so the
+    // bar jumps to 100% and the phase label carries the hook
+    // ("Wrapping up…", "Adding subtitles…", "Almost there…").
+    // The old gap-mapping left the bar frozen at 99% through the
+    // whole remux + inject + publish (JS: "that's a way to lose
+    // users"). `fraction` is intentionally ignored now — the bar
+    // does not move during the finish, the label does.
     private fun reportRemuxProgress(id: String, fraction: Float) {
         val job = _jobs.value.firstOrNull { it.id == id } ?: return
         if (job.state == JobState.CANCELLED || job.state == JobState.FAILED || job.state == JobState.COMPLETED) return
         val total = job.totalBytes
         if (total <= 0) return
-        val base = job.downloadedBytes
-        val target = base + ((total - base) * fraction.coerceIn(0f, 1f)).toLong()
-        reportProgress(id, target, total, 0.0)
+        reportProgress(id, total, total, 0.0)
     }
 
     // 2.0-dev2.9 STALL FAILOVER: fresh race for this episode
