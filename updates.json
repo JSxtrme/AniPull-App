@@ -69,14 +69,15 @@
     ]
   },
   "dev": {
-    "versionCode": 82,
-    "versionName": "2.0-dev2.21",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.21/anipull-2.0-dev2.21.apk",
-    "sha256": "4bf56a0fbf3c1dbf5cab318082c877d9978af01da07a5f9fd5bf9726218ca9e3",
+    "versionCode": 83,
+    "versionName": "2.0-dev2.22",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.22/anipull-2.0-dev2.22.apk",
+    "sha256": "06deeb6d97e5641a90c274f275c7d3905b70eeb66df3ab8d7a96cdc7d3d4b332",
     "features": [],
     "fixes": [
-      "Subtitles on HLS downloads now show for the whole episode \u2014 the app used to stitch the server's ~6-second subtitle chunks together without shifting their clocks, so every line piled into the first seconds and nothing showed after that. Each chunk's lines are now placed at the right time in the episode.",
-      "A subtitle chunk that fails to load no longer kills the whole subtitle track \u2014 only that chunk's lines are lost and the rest stay in place."
+      "Subtitles now land at the right time in the episode \u2014 the dev2.21 fix's check for whether the server's subtitle chunks were already timed could be fooled by a single early chunk, so no shift was applied and every line stayed in the first seconds. The check now looks at all chunks together, so the lines show when the dialogue lands.",
+      "Downloads no longer sit frozen at 99% while the file is being finished \u2014 the bar now jumps to 100% and the row says what it's doing: Wrapping up\u2026, Adding subtitles\u2026, Almost there\u2026",
+      "App icon has more padding around the pink star."
     ]
   }
 }
