@@ -69,16 +69,14 @@
     ]
   },
   "dev": {
-    "versionCode": 81,
-    "versionName": "2.0-dev2.20",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.20/anipull-2.0-dev2.20.apk",
-    "sha256": "31e8b9d91b08c63629395ff6ef98d3bfa3389e1df949e115c4c51c023e709a15",
-    "features": [
-      "App icon now has black padding on all sides, like Geode \u2014 the pink star sits smaller inside the black icon."
-    ],
+    "versionCode": 82,
+    "versionName": "2.0-dev2.21",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.21/anipull-2.0-dev2.21.apk",
+    "sha256": "4bf56a0fbf3c1dbf5cab318082c877d9978af01da07a5f9fd5bf9726218ca9e3",
+    "features": [],
     "fixes": [
-      "The Death Note E1 1080p Sub download that failed on dev2.19 now completes \u2014 subtitles are embedded as standard timed-text tracks instead of through the system muxer, which rejects subtitle tracks.",
-      "A subtitle problem can never fail a download anymore \u2014 if embedding fails, the download still completes with audio and video."
+      "Subtitles on HLS downloads now show for the whole episode \u2014 the app used to stitch the server's ~6-second subtitle chunks together without shifting their clocks, so every line piled into the first seconds and nothing showed after that. Each chunk's lines are now placed at the right time in the episode.",
+      "A subtitle chunk that fails to load no longer kills the whole subtitle track \u2014 only that chunk's lines are lost and the rest stay in place."
     ]
   }
 }
