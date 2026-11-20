@@ -69,16 +69,17 @@
     ]
   },
   "dev": {
-    "versionCode": 84,
-    "versionName": "2.0-dev2.23",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.23/anipull-2.0-dev2.23.apk",
-    "sha256": "05a4eed5ee49da730e810308f6eedce24f4db73b250c5073117b747acb239176",
+    "versionCode": 85,
+    "versionName": "2.0-dev2.24",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.24/anipull-2.0-dev2.24.apk",
+    "sha256": "a15fa8c0f9cac583aeaae0809b64e2950053a63274228cab2d631b83ff100d47",
     "features": [],
     "fixes": [
-      "Subtitle lines no longer show literal <b> and </b> tags \u2014 the server's bold markup is stripped before the lines go into the file.",
-      "A subtitle line now disappears when its dialogue ends instead of hanging on through the silence until the next line.",
-      "Deleting a downloaded episode now asks first instead of deleting on one tap.",
-      "The finish no longer sits on one static label for ~30 seconds \u2014 it now moves through Combining parts\u2026 (with a count), Assembling file\u2026, Adding subtitles\u2026, Almost there\u2026."
+      "Tapping a failed download now opens a sheet that says what went wrong, what to do about it, and that your downloaded progress is safe \u2014 with Resume and Delete right there.",
+      "Downloads that were running when the app closed now say they're resuming from the progress you already have, instead of looking like they started over.",
+      "The download status now shows the segment count and an ETA, so a long download reads as moving.",
+      "The 'Download complete' notification now shows the episode poster, and tapping it opens the finished episode.",
+      "Completed downloads are grouped by title, and each title has a 'Delete all' that asks first and shows how many episodes it will remove."
     ]
   }
 }
