@@ -69,15 +69,16 @@
     ]
   },
   "dev": {
-    "versionCode": 83,
-    "versionName": "2.0-dev2.22",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.22/anipull-2.0-dev2.22.apk",
-    "sha256": "06deeb6d97e5641a90c274f275c7d3905b70eeb66df3ab8d7a96cdc7d3d4b332",
+    "versionCode": 84,
+    "versionName": "2.0-dev2.23",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.23/anipull-2.0-dev2.23.apk",
+    "sha256": "05a4eed5ee49da730e810308f6eedce24f4db73b250c5073117b747acb239176",
     "features": [],
     "fixes": [
-      "Subtitles now land at the right time in the episode \u2014 the dev2.21 fix's check for whether the server's subtitle chunks were already timed could be fooled by a single early chunk, so no shift was applied and every line stayed in the first seconds. The check now looks at all chunks together, so the lines show when the dialogue lands.",
-      "Downloads no longer sit frozen at 99% while the file is being finished \u2014 the bar now jumps to 100% and the row says what it's doing: Wrapping up\u2026, Adding subtitles\u2026, Almost there\u2026",
-      "App icon has more padding around the pink star."
+      "Subtitle lines no longer show literal <b> and </b> tags \u2014 the server's bold markup is stripped before the lines go into the file.",
+      "A subtitle line now disappears when its dialogue ends instead of hanging on through the silence until the next line.",
+      "Deleting a downloaded episode now asks first instead of deleting on one tap.",
+      "The finish no longer sits on one static label for ~30 seconds \u2014 it now moves through Combining parts\u2026 (with a count), Assembling file\u2026, Adding subtitles\u2026, Almost there\u2026."
     ]
   }
 }
