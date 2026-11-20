@@ -8,6 +8,7 @@ import java.nio.ByteOrder
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * 2.0-dev2.20 — inject WebVTT subtitle tracks into a finished MP4.
@@ -264,29 +265,67 @@ object Mp4WebVtt {
         val firstStartMs: Long,
         val lastEndMs: Long,
         val cues: List<Cue>,
+        // One duration per sample, cue and gap alike (ms) — the
+        // stts clock. A cue's duration is its own end minus its
+        // start (truncated at the next cue's start when they
+        // overlap); a gap sample's is the silence to the next cue.
+        val sampleDurationsMs: List<Long>,
     )
 
     private fun buildTrackSamples(track: Track): BuiltTrack? {
-        val cues = track.cues
+        // A cue over 64 KB of text cannot fit a tx3g sample — drop
+        // it up front so the sample/duration lists stay in lockstep.
+        val cues = track.cues.filter { it.text.toByteArray(Charsets.UTF_8).size <= 0xFFFF }
+        if (cues.isEmpty()) return null
         val firstStartMs = cues.first().startUs / 1000
         val lastEndMs = cues.last().endUs / 1000
         if (lastEndMs <= firstStartMs) return null
         val out = ByteArrayOutputStream()
         val sizes = ArrayList<Int>(cues.size)
-        for (cue in cues) {
+        val durations = ArrayList<Long>(cues.size)
+        for (i in cues.indices) {
+            val cue = cues[i]
             // tx3g text sample: u16 byte length + UTF-8 text.
             // (Modifier boxes for per-cue styling are skipped —
             // the cues are plain text; the entry's default style
             // covers them.)
             val textBytes = cue.text.toByteArray(Charsets.UTF_8)
-            if (textBytes.size > 0xFFFF) continue
             val sample = ByteBuffer.allocate(2 + textBytes.size).order(ByteOrder.BIG_ENDIAN)
             sample.putShort(textBytes.size.toShort())
             sample.put(textBytes)
             sizes += sample.array().size
             out.write(sample.array())
+            // 2.0-dev2.23 — each cue lasts only until its own end
+            // (the old code stretched it to the next cue's start,
+            // so a line hung on through the silence until the next
+            // line replaced it — JS, Death Note E1, dev2.22). An
+            // overlapping cue is truncated at the next cue's start
+            // so later start times stay exact. The gap to the next
+            // cue is an EMPTY sample (u16 length 0): it shows
+            // nothing, and its duration keeps every later cue's
+            // start time exact (stts deltas are the only clock
+            // here — without the gap sample the starts would
+            // collapse onto the cue ends).
+            val rawDurMs = (cue.endUs - cue.startUs) / 1000
+            val durMs = if (i < cues.lastIndex) {
+                val untilNextMs = (cues[i + 1].startUs - cue.startUs) / 1000
+                max(1L, min(rawDurMs, untilNextMs))
+            } else {
+                max(1L, rawDurMs)
+            }
+            durations += durMs
+            if (i < cues.lastIndex) {
+                val gapMs = (cues[i + 1].startUs - cue.endUs) / 1000
+                if (gapMs > 0) {
+                    val empty = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN)
+                    empty.putShort(0)
+                    sizes += 2
+                    out.write(empty.array())
+                    durations += max(1L, gapMs)
+                }
+            }
         }
-        return BuiltTrack(track.language, out.toByteArray(), sizes, firstStartMs, lastEndMs, cues)
+        return BuiltTrack(track.language, out.toByteArray(), sizes, firstStartMs, lastEndMs, cues, durations)
     }
 
     private fun buildTrak(trackId: Int, built: BuiltTrack, chunkOffset: Long, movieTimescale: Long): ByteArray {
@@ -387,25 +426,17 @@ object Mp4WebVtt {
         }
         val stsd = box("stsd", byteArrayOf(0, 0, 0, 0, 0, 0, 0, 1) + box("tx3g", tx3gEntry))
 
-        // stts: each sample lasts until the next cue starts (the
-        // last one until its own end) — that keeps the timeline
-        // aligned across gaps; a cue never shows past the next
-        // cue's start.
+        // stts: one entry per sample, cue and gap alike — a cue
+        // sample lasts until its own end, an empty gap sample
+        // covers the silence to the next cue, so no line lingers
+        // past its time and every later cue keeps its true start.
         val stts = run {
-            val deltas = ArrayList<Long>(built.cues.size)
-            for (i in built.cues.indices) {
-                val d = if (i < built.cues.lastIndex) {
-                    (built.cues[i + 1].startUs - built.cues[i].startUs) / 1000
-                } else {
-                    (built.cues[i].endUs - built.cues[i].startUs) / 1000
-                }
-                deltas += max(1L, d)
-            }
             val entries = ArrayList<Pair<Long, Long>>()
-            for (d in deltas) {
+            for (d in built.sampleDurationsMs) {
+                val dd = max(1L, d)
                 val last = entries.lastOrNull()
-                if (last != null && last.second == d) entries[entries.lastIndex] = last.first + 1 to d
-                else entries += 1L to d
+                if (last != null && last.second == dd) entries[entries.lastIndex] = last.first + 1 to dd
+                else entries += 1L to dd
             }
             val buf = ByteBuffer.allocate(4 + 4 + entries.size * 8).order(ByteOrder.BIG_ENDIAN)
             buf.putInt(0) // version/flags

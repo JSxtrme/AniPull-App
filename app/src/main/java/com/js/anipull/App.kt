@@ -5050,6 +5050,9 @@ private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Uni
 @Composable
 private fun CompletedJobRow(job: DownloadJob) {
     val context = LocalContext.current
+    // 2.0-dev2.23 — deleting a finished episode used to fire on one
+    // tap with no confirmation (JS: "dangerous"). Now it asks first.
+    var showDeleteConfirm by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -5077,9 +5080,23 @@ private fun CompletedJobRow(job: DownloadJob) {
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text("Open", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.openFile(context, job) })
-                Text("Delete", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.deleteCompleted(context, job.id) })
+                Text("Delete", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { showDeleteConfirm = true })
             }
         }
+    }
+    if (showDeleteConfirm) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showDeleteConfirm = false },
+            title = { Text("Delete this episode?", color = TextMain, fontWeight = FontWeight.Bold, fontFamily = HeadingFont) },
+            text = { Text("“${job.animeTitle} — Episode ${job.episodeNumber}” will be deleted from your device. This can't be undone.", color = Muted, fontSize = 14.sp) },
+            confirmButton = {
+                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color(0xFFFF3B30)).clickable {
+                    DownloadEngine.deleteCompleted(context, job.id)
+                    showDeleteConfirm = false
+                }.padding(horizontal = 20.dp, vertical = 10.dp)) { Text("Delete", color = Color.White, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { Text("Cancel", color = Muted, modifier = Modifier.clickable(onClick = { showDeleteConfirm = false }).padding(horizontal = 12.dp, vertical = 10.dp)) },
+        )
     }
 }
 

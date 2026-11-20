@@ -71,8 +71,12 @@ enum class HlsPhase(val label: String) {
     // ("Wrapping up…", "Adding subtitles…", "Almost there…").
     // The old "Remuxing… 99%" sat frozen through the whole
     // remux + inject + publish (JS: "that's a way to lose
-    // users"). The engine drops the segment-count detail on
-    // these phases — the label alone carries it.
+    // users"). 2.0-dev2.23 — one static label still read as
+    // frozen: the remux alone is ~30 s on the phone (Death Note
+    // E1, 685 segments), so REMUXING splits by its detail —
+    // concat shows its count ("Combining parts… 128/685
+    // segments"), the mux shows "Assembling file…" (see
+    // reportHlsPhase). The label changes as the finish moves.
     REMUXING("Wrapping up…"),
     EMBEDDING_SUBTITLES("Adding subtitles…"),
     PUBLISHING("Almost there…"),
@@ -392,6 +396,21 @@ object HlsDownloader {
     // WebVTT and SRT share one shape once the header/index lines
     // are ignored: blocks separated by blank lines, a "-->" line,
     // then the cue text. Returns cues sorted by start time.
+    // Strip WebVTT/HTML markup from cue text — <b>, <i>, <u>,
+    // <v Speaker>, <c.class>, <font ...> — and decode the common
+    // entities. tx3g has no markup, so VLC renders the tags
+    // literally (dev2.22: every line showed "<b>…</b>"). Tags are
+    // stripped BEFORE entities are decoded, so "&lt;b&gt;" (meant
+    // as literal text) survives as "<b>". A cue that was only
+    // markup comes back empty and is dropped by the caller.
+    internal fun stripSubtitleMarkup(text: String): String {
+        var s = text.replace(Regex("<[^>]*>"), "")
+        s = s.replace("&amp;", "&").replace("&lt;", "<").replace("&gt;", ">")
+            .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'")
+            .replace("&nbsp;", " ")
+        return s.trim()
+    }
+
     internal fun parseTimedText(text: String): List<SubtitleCue> {
         val cues = mutableListOf<SubtitleCue>()
         val blocks = text.replace("\r\n", "\n").split("\n\n")
@@ -407,7 +426,7 @@ object HlsDownloader {
             val start = parseTimestampToUs(arrow[0]) ?: continue
             val end = parseTimestampToUs(arrow[1].trim().split(" ").first()) ?: continue
             if (end <= start) continue
-            val cueText = lines.drop(tsIndex + 1).joinToString("\n").trim()
+            val cueText = stripSubtitleMarkup(lines.drop(tsIndex + 1).joinToString("\n").trim())
             if (cueText.isEmpty()) continue
             cues += SubtitleCue(start, end, cueText)
         }

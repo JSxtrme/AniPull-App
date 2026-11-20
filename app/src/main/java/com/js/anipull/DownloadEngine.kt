@@ -1398,12 +1398,20 @@ object DownloadEngine {
     // App.kt renders job.phaseLabel for DOWNLOADING jobs instead
     // of the undifferentiated "Connecting…".
     private fun reportHlsPhase(id: String, phase: HlsPhase, detail: String?) {
-        // 2.0-dev2.22 — finishing labels are hooks, not counters:
-        // the bar is already 100% and the label alone
-        // ("Wrapping up…") says the file is being finished.
-        // Segment counts stay on the downloading phase only.
+        // 2.0-dev2.23 — the finish changes labels as it moves, so
+        // a long remux reads as work, not a freeze: concat shows
+        // its count ("Combining parts… 128/685 segments"), the
+        // mux shows "Assembling file…", the inject "Adding
+        // subtitles…", the publish "Almost there… N%". (dev2.22
+        // used one static "Wrapping up…" for the whole ~30 s
+        // remux and JS still read it as stuck.)
         val label = when (phase) {
-            HlsPhase.REMUXING, HlsPhase.EMBEDDING_SUBTITLES -> phase.label
+            HlsPhase.REMUXING -> when {
+                detail == "muxing…" -> "Assembling file…"
+                !detail.isNullOrBlank() -> "Combining parts… $detail"
+                else -> phase.label
+            }
+            HlsPhase.EMBEDDING_SUBTITLES -> phase.label
             else -> if (detail.isNullOrBlank()) phase.label else "${phase.label} $detail"
         }
         reportPhase(id, label)
