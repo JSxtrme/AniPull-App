@@ -405,50 +405,49 @@ object HlsDownloader {
         return cues.sortedBy { it.startUs }
     }
 
-    // A subtitle media playlist (.m3u8), not a subtitle file: fetch
-    // its segments and build one WebVTT text from them. Later
-    // segments repeat the WEBVTT header — dropped, cues kept.
-    private suspend fun buildWebVttFromPlaylist(
+    // A subtitle media playlist (.m3u8): fetch its .vtt segments
+    // and merge their cues onto the episode timeline. Segment cue
+    // times may be LOCAL (each chunk's clock restarts at zero) or
+    // ABSOLUTE — see SubtitlePlaylist.kt (dev2.21). The old code
+    // stitched the raw segment texts together, so with local-timed
+    // segments all cues piled into the first ~6 s (Death Note E1).
+    // A failed segment only loses that segment's cues — its EXTINF
+    // still advances the offset, so later cues stay in place.
+    private suspend fun fetchCuesFromSubtitlePlaylist(
         playlistText: String,
         playlistUrl: String,
         headers: Map<String, String>,
         isCancelled: () -> Boolean,
         connectionHandle: HlsConnectionHandle?,
-    ): String? {
-        val segUris = playlistText.lineSequence()
-            .map { it.trim() }
-            .filter { it.isNotEmpty() && !it.startsWith("#") }
-            .map { resolveUrl(playlistUrl, it) }
-            .toList()
-        if (segUris.isEmpty()) return null
-        val parts = StringBuilder()
-        var first = true
-        for (uri in segUris) {
+    ): List<SubtitleCue>? {
+        val segments = parseSubtitlePlaylistSegments(playlistText)
+        if (segments.isEmpty()) return null
+        val perSegment = mutableListOf<List<TimedCue>>()
+        for (seg in segments) {
             if (isCancelled()) return null
-            val resp = try {
-                EngineHttp.requestWithRetry(
-                    uri, headers = headers, timeoutMs = 15_000, followRedirects = true,
+            val cues = try {
+                val resp = EngineHttp.requestWithRetry(
+                    resolveUrl(playlistUrl, seg.uri), headers = headers, timeoutMs = 15_000, followRedirects = true,
                     maxAttempts = 1,
                     totalDeadlineMs = HLS_PLAYLIST_TOTAL_MS,
                     firstByteDeadlineMs = HLS_PLAYLIST_FIRST_BYTE_MS,
                     isCancelled = { isCancelled() },
                     connectionHandle = connectionHandle,
                 )
+                if (resp.code != 200 || resp.bytes.isEmpty()) {
+                    DownloadLogs.log("HLS", "subtitle segment ${seg.uri} HTTP ${resp.code} — skipped")
+                    emptyList()
+                } else {
+                    parseTimedText(String(resp.bytes, Charsets.UTF_8)).map { TimedCue(it.startUs, it.endUs, it.text) }
+                }
             } catch (_: Exception) {
-                return null
+                DownloadLogs.log("HLS", "subtitle segment ${seg.uri} fetch failed — skipped")
+                emptyList()
             }
-            if (resp.code != 200 || resp.bytes.isEmpty()) return null
-            var segText = String(resp.bytes, Charsets.UTF_8)
-            if (!first) {
-                segText = segText.lines()
-                    .dropWhile { it.trim().isEmpty() || it.trim().startsWith("WEBVTT") }
-                    .joinToString("\n")
-            }
-            first = false
-            if (parts.isNotEmpty()) parts.append("\n\n")
-            parts.append(segText)
+            perSegment += cues
         }
-        return parts.toString().takeIf { it.contains("-->") }
+        val merged = mergeSubtitleSegmentCues(perSegment, segments.map { it.startOffsetUs })
+        return merged.map { SubtitleCue(it.startUs, it.endUs, it.text) }.takeIf { it.isNotEmpty() }
     }
 
     // Fetch + parse one subtitle track's real content. Returns null
@@ -475,15 +474,15 @@ object HlsDownloader {
                 return null
             }
             val body = String(resp.bytes, Charsets.UTF_8)
-            val vttText = if (body.trimStart().startsWith("#EXTM3U")) {
+            val cues: List<SubtitleCue> = if (body.trimStart().startsWith("#EXTM3U")) {
                 // The Death Note E1 case: the "subtitle" URL was a
                 // media playlist, and saving it as .vtt was the
-                // junk that hung VLC. Build a real WebVTT instead.
-                buildWebVttFromPlaylist(body, track.url, headers, isCancelled, connectionHandle)
+                // junk that hung VLC. Fetch its segments and merge
+                // their cues onto the episode timeline (dev2.21).
+                fetchCuesFromSubtitlePlaylist(body, track.url, headers, isCancelled, connectionHandle) ?: return null
             } else {
-                body
-            } ?: return null
-            val cues = parseTimedText(vttText)
+                parseTimedText(body)
+            }
             if (cues.isEmpty()) {
                 DownloadLogs.log("HLS", "subtitle $lang: no usable cues — skipped")
                 return null
