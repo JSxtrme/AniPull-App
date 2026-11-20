@@ -4699,6 +4699,10 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit, onDownloadStarted:
     // FAILED. Retry fresh-resolves; it never reuses the stale link.
     val cancelled = jobs.filter { it.state == JobState.CANCELLED }
     val completed = DownloadEngine.completedJobs(context)
+    // 2.0-dev2.24 (C): completed jobs grouped by title, for the
+    // per-title "Delete all" (with the count). Sorted by title.
+    val completedGroups = completed.groupBy { it.animeTitle }.entries.sortedBy { it.key }
+    var deleteAllTitle by remember { mutableStateOf<Pair<String, List<DownloadJob>>?>(null) }
     val counts = mapOf(
         DownloadFilter.ALL to jobs.size,
         DownloadFilter.ACTIVE to activeJobs.size,
@@ -4824,7 +4828,7 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit, onDownloadStarted:
                         Spacer(Modifier.height(8.dp))
                         Text("Completed", color = TextMain, fontSize = 16.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
                     }
-                    items(completed, key = { it.id }) { job -> CompletedJobRow(job) }
+                    completedTitleGroups(completedGroups) { title, jobs -> deleteAllTitle = title to jobs }
                 }
                 item { Spacer(Modifier.height(16.dp)) }
             }
@@ -4866,13 +4870,66 @@ fun DownloadsScreen(onBack: () -> Unit, onBrowse: () -> Unit, onDownloadStarted:
                             }
                         }
                     }
-                    items(filteredJobs, key = { it.id }) { job ->
-                        if (job.state == JobState.COMPLETED) CompletedJobRow(job) else DownloadJobRow(job, onDownloadStarted)
+                    if (filter == DownloadFilter.COMPLETED) {
+                        // 2.0-dev2.24 (C): the Completed filter shows
+                        // the same per-title groups as the ALL view.
+                        completedTitleGroups(completedGroups) { title, jobs -> deleteAllTitle = title to jobs }
+                    } else {
+                        items(filteredJobs, key = { it.id }) { job ->
+                            if (job.state == JobState.COMPLETED) CompletedJobRow(job) else DownloadJobRow(job, onDownloadStarted)
+                        }
                     }
                 }
                 item { Spacer(Modifier.height(16.dp)) }
             }
         }
+    }
+    // 2.0-dev2.24 (C): per-title "Delete all" confirm — same
+    // AlertDialog pattern as the per-episode delete (dev2.23), with
+    // the count in the text.
+    if (deleteAllTitle != null) {
+        val (title, jobs) = deleteAllTitle!!
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { deleteAllTitle = null },
+            title = { Text("Delete all episodes?", color = TextMain, fontWeight = FontWeight.Bold, fontFamily = HeadingFont) },
+            text = { Text("“$title” — ${jobs.size} episode${if (jobs.size == 1) "" else "s"} will be permanently removed from your device. This can't be undone.", color = Muted, fontSize = 14.sp) },
+            confirmButton = {
+                Box(modifier = Modifier.clip(RoundedCornerShape(999.dp)).background(Color(0xFFFF3B30)).clickable {
+                    val n = DownloadEngine.deleteCompletedTitle(context, title)
+                    showToast(context, "Deleted $n episode${if (n == 1) "" else "s"}")
+                    deleteAllTitle = null
+                }.padding(horizontal = 20.dp, vertical = 10.dp)) { Text("Delete", color = Color.White, fontWeight = FontWeight.Bold) }
+            },
+            dismissButton = { Text("Cancel", color = Muted, modifier = Modifier.clickable(onClick = { deleteAllTitle = null }).padding(horizontal = 12.dp, vertical = 10.dp)) },
+        )
+    }
+}
+
+// 2.0-dev2.24 (C): completed jobs grouped by title, each group with
+// a header ("N episodes · X MB" + Delete all). Used by the Downloads
+// tab's Completed section (ALL view) and the Completed filter.
+private fun LazyListScope.completedTitleGroups(
+    groups: List<Map.Entry<String, List<DownloadJob>>>,
+    onDeleteAll: (String, List<DownloadJob>) -> Unit,
+) {
+    groups.forEach { (title, jobs) ->
+        item(key = "group-$title") {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(title, color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(
+                        "${jobs.size} episode${if (jobs.size == 1) "" else "s"} · ${formatBytes(jobs.sumOf { if (it.totalBytes > 0L) it.totalBytes else it.downloadedBytes })}",
+                        color = Muted, fontSize = 12.sp,
+                    )
+                }
+                Text("Delete all", color = Pink, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { onDeleteAll(title, jobs) })
+            }
+        }
+        items(jobs, key = { it.id }) { job -> CompletedJobRow(job) }
     }
 }
 
@@ -4882,6 +4939,30 @@ private fun formatBytes(bytes: Long): String = when {
     bytes >= 1024L * 1024 -> "%.1f MB".format(bytes / (1024.0 * 1024))
     bytes >= 1024L -> "%.0f KB".format(bytes / 1024.0)
     else -> "$bytes B"
+}
+
+// 2.0-dev2.24 (A): segment count out of the phase label
+// ("Downloading segments… Segment 34/267") — the engine's own
+// format (HlsDownloader.kt:967), so a non-match just omits the
+// count, never crashes. DDL has no segments, so it gets no count.
+private val SEGMENT_COUNT_REGEX = Regex("""Segment (\d+)/(\d+)""")
+private fun segmentCountFromPhase(phaseLabel: String?): String? {
+    if (phaseLabel == null) return null
+    val m = SEGMENT_COUNT_REGEX.find(phaseLabel) ?: return null
+    return "${m.groupValues[1]}/${m.groupValues[2]} seg"
+}
+
+// 2.0-dev2.24 (A): ETA from the bytes left and the current speed.
+// Null when there's nothing left, no speed, or no total — the UI
+// omits the ETA instead of showing a fake one.
+private fun formatEta(remainingBytes: Long, speedMBps: Double): String? {
+    if (remainingBytes <= 0L || speedMBps <= 0.0) return null
+    val seconds = (remainingBytes / (speedMBps * 1024 * 1024)).toLong()
+    return when {
+        seconds < 60 -> "ETA ${seconds}s"
+        seconds < 3600 -> "ETA ${seconds / 60}m ${seconds % 60}s"
+        else -> "ETA ~${seconds / 3600}h"
+    }
 }
 
 @Composable
@@ -4955,11 +5036,22 @@ private fun retryDownloadJob(
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Unit)? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    // 2.0-dev2.24 (A): the failure sheet — tap a FAILED row.
+    var showFailureSheet by remember { mutableStateOf(false) }
+    // 2.0-dev2.24 (A): a re-queued job's progress was reset to 0
+    // (dev2.5 — a queued job has no bytes flowing), but its
+    // downloaded bytes are preserved on disk (persisted in
+    // jobToJson). Show the preserved fraction in the bar, so the
+    // row doesn't read as "back to 0%" after a restart.
+    val barFraction = if (job.state == JobState.QUEUED && job.downloadedBytes > 0L && job.totalBytes > 0L)
+        (job.downloadedBytes.toFloat() / job.totalBytes.toFloat()).coerceIn(0f, 1f)
+    else (job.progress / 100f).coerceIn(0f, 1f)
     val progress by animateFloatAsState(
-        targetValue = (job.progress / 100f).coerceIn(0f, 1f),
+        targetValue = barFraction,
         animationSpec = tween(300),
         label = "dlProgress",
     )
@@ -4969,6 +5061,10 @@ private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Uni
             .clip(RoundedCornerShape(16.dp))
             .background(Card)
             .border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(16.dp))
+            // 2.0-dev2.24 (A): a FAILED row is tappable — it opens
+            // the failure sheet. The inner action Texts (Retry /
+            // Cancel) still take their own taps.
+            .clickable(enabled = job.state == JobState.FAILED) { showFailureSheet = true }
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -5016,8 +5112,18 @@ private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Uni
                         job.downloadedBytes <= 0L -> job.phaseLabel ?: "Connecting…"
                         job.progress >= 100 && job.phaseLabel != null -> job.phaseLabel
                         job.progress < 0 -> "${formatBytes(job.downloadedBytes)} · ${"%.1f".format(job.speedMBps)} MB/s"
-                        job.totalBytes > 0L -> "${job.progress}% · ${formatBytes(job.downloadedBytes)} / ${if (job.totalEstimated) "~" else ""}${formatBytes(job.totalBytes)} · ${"%.1f".format(job.speedMBps)} MB/s"
-                        else -> "${job.progress}% · ${"%.1f".format(job.speedMBps)} MB/s"
+                        job.totalBytes > 0L -> {
+                            // 2.0-dev2.24 (A): segment count + ETA in
+                            // the status line, so a long download
+                            // reads as moving, not stuck.
+                            val seg = segmentCountFromPhase(job.phaseLabel)?.let { " ($it)" } ?: ""
+                            val eta = formatEta(job.totalBytes - job.downloadedBytes, job.speedMBps)?.let { " · $it" } ?: ""
+                            "${job.progress}%$seg · ${formatBytes(job.downloadedBytes)} / ${if (job.totalEstimated) "~" else ""}${formatBytes(job.totalBytes)} · ${"%.1f".format(job.speedMBps)} MB/s$eta"
+                        }
+                        else -> {
+                            val seg = segmentCountFromPhase(job.phaseLabel)?.let { " ($it)" } ?: ""
+                            "${job.progress}%$seg · ${"%.1f".format(job.speedMBps)} MB/s"
+                        }
                     }
                     JobState.PAUSED -> when {
                         job.progress < 0 && job.downloadedBytes > 0L -> "Paused · ${formatBytes(job.downloadedBytes)}"
@@ -5025,7 +5131,12 @@ private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Uni
                         job.totalBytes > 0L -> "Paused · ${job.progress}% · ${formatBytes(job.downloadedBytes)} / ${if (job.totalEstimated) "~" else ""}${formatBytes(job.totalBytes)}"
                         else -> "Paused · ${job.progress}%"
                     }
-                    JobState.QUEUED -> "Queued…"
+                    // 2.0-dev2.24 (A): a re-queued job (crash restart)
+                    // keeps its downloaded bytes on disk — say so,
+                    // instead of a bare "Queued…". The engine already
+                    // re-queues and resumes it (init + pump); this is
+                    // the "progress preserved" message.
+                    JobState.QUEUED -> if (job.downloadedBytes > 0L) "Queued — resuming from ${formatBytes(job.downloadedBytes)} kept" else "Queued…"
                     JobState.FAILED -> job.error ?: "Failed"
                     JobState.CANCELLED -> "Cancelled"
                     else -> "${job.progress}%"
@@ -5042,6 +5153,72 @@ private fun DownloadJobRow(job: DownloadJob, onDownloadStarted: ((String) -> Uni
                 // action for it. FAILED keeps Cancel (it becomes a
                 // CANCELLED job, which is itself retryable now).
                 if (job.state != JobState.CANCELLED) Text("Cancel", color = Muted, fontSize = 13.sp, fontWeight = FontWeight.Bold, modifier = Modifier.clickable { DownloadEngine.cancel(job.id) })
+            }
+        }
+    }
+    // 2.0-dev2.24 (A): the failure sheet — tap a FAILED row. Three
+    // cards (progress preserved / reason / recommended fix) plus
+    // Resume (same fresh-resolve retry as the row's Retry) and
+    // Delete (same as the row's Cancel).
+    if (showFailureSheet) {
+        ModalBottomSheet(onDismissRequest = { showFailureSheet = false }) {
+            Column(
+                modifier = Modifier.padding(horizontal = 16.dp).padding(bottom = 24.dp).verticalScroll(rememberScrollState()),
+            ) {
+                Text("Download failed", color = TextMain, fontSize = 18.sp, fontWeight = FontWeight.Bold, fontFamily = HeadingFont)
+                Spacer(Modifier.height(4.dp))
+                Text("${job.animeTitle} — Episode ${job.episodeNumber}", color = Muted, fontSize = 13.sp)
+                Spacer(Modifier.height(16.dp))
+                Box(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(16.dp)).padding(12.dp),
+                ) {
+                    Column {
+                        Text("Progress preserved (${job.progress}%)", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            if (job.downloadedBytes > 0L) "${formatBytes(job.downloadedBytes)} downloaded — kept safely on disk. Resuming picks up where it stopped, not from 0%."
+                            else "Nothing downloaded yet — resuming starts fresh.",
+                            color = Muted, fontSize = 13.sp, lineHeight = 18.sp,
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(16.dp)).padding(12.dp),
+                ) {
+                    Column {
+                        Text("Reason", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(4.dp))
+                        Text(job.error ?: "Unknown error", color = Muted, fontSize = 13.sp, lineHeight = 18.sp)
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(Card).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(16.dp)).padding(12.dp),
+                ) {
+                    Column {
+                        Text("Recommended fix", color = TextMain, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                        Spacer(Modifier.height(4.dp))
+                        Text(DownloadEngine.downloadFailureAdvice(job.error), color = Muted, fontSize = 13.sp, lineHeight = 18.sp)
+                    }
+                }
+                Spacer(Modifier.height(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Box(
+                        modifier = Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).background(Pink).clickable {
+                            showFailureSheet = false
+                            retryDownloadJob(context, scope, job, onDownloadStarted)
+                        }.padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("Resume", color = OnAccent, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                    Box(
+                        modifier = Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).background(Card).border(1.dp, Color.White.copy(alpha = 0.09f), RoundedCornerShape(999.dp)).clickable {
+                            showFailureSheet = false
+                            DownloadEngine.cancel(job.id)
+                        }.padding(vertical = 12.dp),
+                        contentAlignment = Alignment.Center,
+                    ) { Text("Delete", color = Muted, fontSize = 14.sp, fontWeight = FontWeight.Bold) }
+                }
             }
         }
     }

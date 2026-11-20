@@ -704,6 +704,31 @@ object DownloadEngine {
         DownloadNotifications.cancelJob(context, id)
     }
 
+    // 2.0-dev2.24 (C): delete ALL completed episodes of one title in
+    // one pass — the per-title "Delete all" in the Downloads tab.
+    // Same as deleteCompleted per job (file + partials + record +
+    // notification), but one persist for the whole title. Returns
+    // how many were removed so the UI can toast the count.
+    fun deleteCompletedTitle(context: Context, title: String): Int {
+        val ctx = context.applicationContext
+        val jobs = _jobs.value.filter { it.state == JobState.COMPLETED && it.animeTitle == title }
+        if (jobs.isEmpty()) return 0
+        jobs.forEach { deleteFile(ctx, it.filePath); deletePartials(ctx, it) }
+        val ids = jobs.map { it.id }.toSet()
+        synchronized(lock) {
+            _jobs.value = _jobs.value.filter { it.id !in ids }
+            ids.forEach { id ->
+                links.remove(id)
+                controls.remove(id)
+                attempts.remove(id)
+            }
+        }
+        persist(ctx)
+        jobs.forEach { DownloadNotifications.cancelJob(ctx, it.id) }
+        DownloadLogs.log("ENGINE", "deleteCompletedTitle: removed ${jobs.size} completed episode(s) of \"$title\"")
+        return jobs.size
+    }
+
     // 2.0-dev2.4: Clear all for the Downloads tab — removes every
     // job in the given states (FAILED and/or CANCELLED only; the
     // caller never passes Active/Queue/Completed). Drops their
@@ -737,14 +762,22 @@ object DownloadEngine {
         return _jobs.value.filter { it.state == JobState.COMPLETED }
     }
 
+    // 2.0-dev2.24 (B): the ACTION_VIEW intent for a completed job's
+    // file — the completion notification's tap target ("tap to
+    // watch"). Returns null when the file can't be resolved, so the
+    // caller falls back to opening the app. openFile reuses it.
+    internal fun fileViewIntent(context: Context, job: DownloadJob): Intent? {
+        val uri = resolveOpenUri(context, job) ?: return null
+        return Intent(Intent.ACTION_VIEW).apply {
+            setDataAndType(uri, "video/mp4")
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    }
+
     fun openFile(context: Context, job: DownloadJob): Boolean {
-        val uri = resolveOpenUri(context, job) ?: return false
+        val intent = fileViewIntent(context, job) ?: return false
         return try {
-            val intent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, "video/mp4")
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
             context.startActivity(intent)
             true
         } catch (_: Exception) {
@@ -1334,6 +1367,30 @@ object DownloadEngine {
         } else {
             DownloadLogs.logJob(id, "ENGINE", "final failure (no auto-retry left): $message")
             updateJob(id, { it.copy(state = JobState.FAILED, error = message, speedMBps = 0.0) }, persistNow = true)
+        }
+    }
+
+    // 2.0-dev2.24 (A): the failure sheet's "Recommended fix" — a
+    // diagnosis matched on the job's stored error text (the friendly
+    // strings from friendlyDownloadError plus the engine's own
+    // messages). Matched case-insensitively; the default is the
+    // honest generic: Resume re-resolves a fresh link and picks up
+    // the preserved progress. "Retrying…" is the 5s auto-retry
+    // backoff, not a final failure.
+    internal fun downloadFailureAdvice(error: String?): String {
+        val e = error ?: return "Tap Resume — it re-resolves a fresh link from another server and picks up your downloaded progress."
+        val lower = e.lowercase()
+        return when {
+            lower.startsWith("retrying") -> "Retrying on its own — if it fails again, tap Resume below."
+            "timed out" in lower || "timeout" in lower -> "The connection timed out. Check your Wi-Fi, then tap Resume — it re-resolves a fresh link and tries another server if this one stays slow."
+            "no connection" in lower -> "No connection. Check your Wi-Fi or mobile data, then tap Resume."
+            "not found" in lower -> "The video isn't on that server at this quality. Tap Resume — it tries another server — or pull a lower quality."
+            "stalled" in lower -> "The server stopped sending data. Tap Resume — it races the other servers for a fresh link."
+            "expired" in lower -> "The download link expired (links die in minutes). Tap Resume — it re-resolves a fresh link."
+            "not 1080p" in lower || "not 720p" in lower || "not 480p" in lower || "not 360p" in lower -> "The server couldn't serve the quality you asked for. Tap Resume — it tries another server for the right quality."
+            "429" in lower || "throttl" in lower -> "The server is throttling downloads. Wait a bit, then tap Resume."
+            "403" in lower || "forbidden" in lower -> "Access was refused. Tap Resume — it re-resolves a fresh link."
+            else -> "Tap Resume — it re-resolves a fresh link from another server and picks up your downloaded progress."
         }
     }
 

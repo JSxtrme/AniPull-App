@@ -9,6 +9,11 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 
 // 1.9-dev4.8.1: the download notification DESIGN, built for real
 // (not a mockup) so 2.0 just plugs a real download into it. Agreed
@@ -178,20 +183,48 @@ object DownloadNotifications {
         NotificationManagerCompat.from(context).notify(notificationIdFor(job.id), builder.build())
     }
 
+    // 2.0-dev2.24 (B): the completion ping now carries the poster
+    // (BigPictureStyle) and its tap opens the finished file
+    // ("tap to watch") instead of just opening the app. The poster
+    // loads async (usually a memory-cache hit) with a short
+    // timeout; a slow or missing poster never delays or drops the
+    // ping — it posts plain. A HARDWARE bitmap is copied to
+    // ARGB_8888 first: a HARDWARE bitmap can't be handed to the
+    // notification.
+    private val notifScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     fun showJobComplete(context: Context, job: DownloadJob) {
         synchronized(lastJobNotify) { lastJobNotify.remove(job.id) }
         NotificationManagerCompat.from(context).cancel(notificationIdFor(job.id))
         if (!completionEnabled(context)) return
         createChannel(context)
         val title = "${job.animeTitle} — E${job.episodeNumber}"
-        val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_download)
-            .setContentTitle("Download complete")
-            .setContentText("$title — tap to view in Downloads")
-            .setContentIntent(openAppIntent(context))
-            .setAutoCancel(true)
-            .setGroup(GROUP_KEY)
-        NotificationManagerCompat.from(context).notify(notificationIdFor(job.id) + 1, builder.build())
+        notifScope.launch {
+            val posterBmp: android.graphics.Bitmap? = try {
+                withTimeout(3000) {
+                    job.poster?.let { loadPoster(it, context, 512) }?.let { bmp ->
+                        if (bmp.config == android.graphics.Bitmap.Config.HARDWARE) {
+                            bmp.copy(android.graphics.Bitmap.Config.ARGB_8888, false)
+                        } else bmp
+                    }
+                }
+            } catch (_: Exception) { null }
+            val viewIntent = DownloadEngine.fileViewIntent(context, job)
+            val contentIntent = if (viewIntent != null) {
+                PendingIntent.getActivity(context, notificationIdFor(job.id) + 1, viewIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            } else openAppIntent(context)
+            val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+                .setSmallIcon(R.drawable.ic_download)
+                .setContentTitle("Download complete")
+                .setContentText(if (viewIntent != null) "$title — tap to watch" else "$title — tap to view in Downloads")
+                .setContentIntent(contentIntent)
+                .setAutoCancel(true)
+                .setGroup(GROUP_KEY)
+            if (posterBmp != null) {
+                builder.setStyle(NotificationCompat.BigPictureStyle().bigPicture(posterBmp).setBigContentTitle("Download complete").setSummaryText(title))
+            }
+            NotificationManagerCompat.from(context).notify(notificationIdFor(job.id) + 1, builder.build())
+        }
     }
 
     // 2.0-dev2.5 DEFECT 1: NO-OP now. The foreground-service
