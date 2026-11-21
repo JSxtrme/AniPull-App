@@ -26,6 +26,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import kotlin.math.roundToInt
 
 // 2.0-dev1.0 ENGINE — queue, jobs, persistence, DDL + HLS execution.
 //
@@ -1462,9 +1463,21 @@ object DownloadEngine {
         // subtitles…", the publish "Almost there… N%". (dev2.22
         // used one static "Wrapping up…" for the whole ~30 s
         // remux and JS still read it as stuck.)
+        // 2.0-dev2.25 — the mux % label is owned by
+        // reportRemuxProgress ("Assembling file… 45%"). This
+        // callback fires every 8192 samples with detail
+        // "muxing…" and must not overwrite the % with the plain
+        // label — unless no % has been set yet (an audio-only
+        // mux, where no fraction ever arrives), in which case
+        // the plain label is the fallback.
+        if (phase == HlsPhase.REMUXING && detail == "muxing…") {
+            val job = _jobs.value.firstOrNull { it.id == id } ?: return
+            if (job.phaseLabel?.startsWith("Assembling file…") == true) return
+            reportPhase(id, "Assembling file…")
+            return
+        }
         val label = when (phase) {
             HlsPhase.REMUXING -> when {
-                detail == "muxing…" -> "Assembling file…"
                 !detail.isNullOrBlank() -> "Combining parts… $detail"
                 else -> phase.label
             }
@@ -1479,14 +1492,25 @@ object DownloadEngine {
     // ("Wrapping up…", "Adding subtitles…", "Almost there…").
     // The old gap-mapping left the bar frozen at 99% through the
     // whole remux + inject + publish (JS: "that's a way to lose
-    // users"). `fraction` is intentionally ignored now — the bar
-    // does not move during the finish, the label does.
+    // users"). `fraction` is intentionally ignored for the BAR —
+    // the bar does not move during the finish, the label does.
+    // 2.0-dev2.25 — the fraction DOES drive the mux % in the
+    // label. It covers the whole remux: 0..0.5 is the concat,
+    // 0.5..1.0 is the mux, so the mux's own progress is
+    // (fraction - 0.5) / 0.5. The mux re-processes the whole
+    // file sample-by-sample (~90k samples, ~25–30 s) and the
+    // static "Assembling file…" read as stuck; now it reads
+    // "Assembling file… 45%".
     private fun reportRemuxProgress(id: String, fraction: Float) {
         val job = _jobs.value.firstOrNull { it.id == id } ?: return
         if (job.state == JobState.CANCELLED || job.state == JobState.FAILED || job.state == JobState.COMPLETED) return
         val total = job.totalBytes
         if (total <= 0) return
         reportProgress(id, total, total, 0.0)
+        if (fraction >= 0.5f) {
+            val muxPct = ((fraction - 0.5f) / 0.5f * 100).roundToInt().coerceIn(0, 100)
+            reportPhase(id, "Assembling file… $muxPct%")
+        }
     }
 
     // 2.0-dev2.9 STALL FAILOVER: fresh race for this episode

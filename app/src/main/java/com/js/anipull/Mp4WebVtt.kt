@@ -283,6 +283,21 @@ object Mp4WebVtt {
         val out = ByteArrayOutputStream()
         val sizes = ArrayList<Int>(cues.size)
         val durations = ArrayList<Long>(cues.size)
+        // 2.0-dev2.25 — the media timeline starts at 0 (no elst
+        // empty edit — see buildTrak), so a leading gap sample
+        // covers 0 .. first cue start. It holds a single SPACE,
+        // not an empty sample: a seek landing on it must find
+        // real content, or VLC drops the track (JS, Death Note
+        // E1 — a seek into a silence killed the subs, a seek
+        // onto a cue at 1:50 worked).
+        if (firstStartMs > 0) {
+            val lead = ByteBuffer.allocate(3).order(ByteOrder.BIG_ENDIAN)
+            lead.putShort(1)
+            lead.put(0x20)
+            sizes += 3
+            out.write(lead.array())
+            durations += max(1L, firstStartMs)
+        }
         for (i in cues.indices) {
             val cue = cues[i]
             // tx3g text sample: u16 byte length + UTF-8 text.
@@ -300,12 +315,15 @@ object Mp4WebVtt {
             // so a line hung on through the silence until the next
             // line replaced it — JS, Death Note E1, dev2.22). An
             // overlapping cue is truncated at the next cue's start
-            // so later start times stay exact. The gap to the next
-            // cue is an EMPTY sample (u16 length 0): it shows
-            // nothing, and its duration keeps every later cue's
-            // start time exact (stts deltas are the only clock
-            // here — without the gap sample the starts would
-            // collapse onto the cue ends).
+            // so later start times stay exact. 2.0-dev2.25 — the
+            // gap to the next cue is a single-SPACE sample (u16
+            // length 1 + 0x20), not an empty (u16 length 0)
+            // sample: it shows nothing visible, and its duration
+            // keeps every later cue's start time exact — but a
+            // seek landing in the silence now finds real content
+            // instead of a zero-length sample, so VLC keeps the
+            // track alive (seek into a gap killed the subs on
+            // dev2.23; seek onto a cue worked).
             val rawDurMs = (cue.endUs - cue.startUs) / 1000
             val durMs = if (i < cues.lastIndex) {
                 val untilNextMs = (cues[i + 1].startUs - cue.startUs) / 1000
@@ -317,10 +335,11 @@ object Mp4WebVtt {
             if (i < cues.lastIndex) {
                 val gapMs = (cues[i + 1].startUs - cue.endUs) / 1000
                 if (gapMs > 0) {
-                    val empty = ByteBuffer.allocate(2).order(ByteOrder.BIG_ENDIAN)
-                    empty.putShort(0)
-                    sizes += 2
-                    out.write(empty.array())
+                    val gap = ByteBuffer.allocate(3).order(ByteOrder.BIG_ENDIAN)
+                    gap.putShort(1)
+                    gap.put(0x20)
+                    sizes += 3
+                    out.write(gap.array())
                     durations += max(1L, gapMs)
                 }
             }
@@ -329,7 +348,10 @@ object Mp4WebVtt {
     }
 
     private fun buildTrak(trackId: Int, built: BuiltTrack, chunkOffset: Long, movieTimescale: Long): ByteArray {
-        val mediaDurationMs = built.lastEndMs - built.firstStartMs
+        // 2.0-dev2.25 — the media timeline starts at 0 (a leading
+        // space-gap sample covers 0 .. first cue), so the media
+        // span is the full lastEndMs, not lastEndMs - firstStartMs.
+        val mediaDurationMs = built.lastEndMs
         val movieDuration = built.lastEndMs * movieTimescale / 1000
         val mediaDuration = mediaDurationMs
 
@@ -482,35 +504,23 @@ object Mp4WebVtt {
         val minf = box("minf", nmhd + dinf + stbl)
         val mdia = box("mdia", mdhd + hdlr + minf)
 
-        // edts/elst: an empty edit covers the delay before the
-        // first cue, so media time 0 lands at the first cue's
-        // start; without it the first cue would show from 0.
+        // 2.0-dev2.25 — no elst empty edit. The media timeline
+        // is the movie timeline (a leading space-gap sample
+        // covers 0 .. first cue), so a seek to any time lands
+        // on a real sample instead of an empty-edit region —
+        // the old empty edit meant a seek before the first cue
+        // found no subtitle sample at all, and VLC dropped the
+        // track. Single entry, media_time 0.
         val elst = run {
-            val firstStartMovie = built.firstStartMs * movieTimescale / 1000
             val mediaMovie = mediaDurationMs * movieTimescale / 1000
-            if (firstStartMovie > 0) {
-                val buf = ByteBuffer.allocate(4 + 4 + 2 * 12).order(ByteOrder.BIG_ENDIAN)
-                buf.putInt(0)
-                buf.putInt(2)
-                buf.putInt(firstStartMovie.toInt())
-                buf.putInt(-1) // media_time: empty edit
-                buf.putShort(1)
-                buf.putShort(0)
-                buf.putInt(mediaMovie.toInt())
-                buf.putInt(0)
-                buf.putShort(1)
-                buf.putShort(0)
-                box("elst", buf.array())
-            } else {
-                val buf = ByteBuffer.allocate(4 + 4 + 12).order(ByteOrder.BIG_ENDIAN)
-                buf.putInt(0)
-                buf.putInt(1)
-                buf.putInt(mediaMovie.toInt())
-                buf.putInt(0)
-                buf.putShort(1)
-                buf.putShort(0)
-                box("elst", buf.array())
-            }
+            val buf = ByteBuffer.allocate(4 + 4 + 12).order(ByteOrder.BIG_ENDIAN)
+            buf.putInt(0)
+            buf.putInt(1)
+            buf.putInt(mediaMovie.toInt())
+            buf.putInt(0)
+            buf.putShort(1)
+            buf.putShort(0)
+            box("elst", buf.array())
         }
         val edts = box("edts", elst)
 
