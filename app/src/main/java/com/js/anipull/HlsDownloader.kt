@@ -1334,7 +1334,6 @@ object HlsDownloader {
             }
             muxer = MediaMuxer(outputFile.absolutePath, MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4)
             val states = mutableListOf<ExtractorState>()
-            var videoDurationUs = 0L
             var keptTracks = 0
             for ((src, ex) in opened) {
                 val trackMap = IntArray(ex.trackCount) { -1 }
@@ -1349,9 +1348,6 @@ object HlsDownloader {
                         else -> false
                     }
                     if (!keep) continue
-                    if (isVideo && format.containsKey(MediaFormat.KEY_DURATION)) {
-                        videoDurationUs = maxOf(videoDurationUs, format.getLong(MediaFormat.KEY_DURATION))
-                    }
                     trackMap[i] = muxer.addTrack(format)
                     ex.selectTrack(i)
                     keptTracks++
@@ -1368,7 +1364,10 @@ object HlsDownloader {
             started = true
             val info = android.media.MediaCodec.BufferInfo()
             var samples = 0
-            var maxSampleTimeUs = 0L
+            var bytesWritten = 0L
+            // Total input bytes (the .ts files being muxed) —
+            // the denominator for the bytes-based mux fraction.
+            val totalInputBytes = sources.sumOf { it.file.length() }
             var lastProgressSent = 0f
             for (st in states) st.readNext()
             while (true) {
@@ -1392,14 +1391,22 @@ object HlsDownloader {
                 val st = bestExtractor
                 info.set(0, st.sampleSize, st.sampleTimeUs, st.sampleFlags)
                 muxer.writeSampleData(st.trackMap[st.sampleTrack], st.buffer, info)
-                maxSampleTimeUs = maxOf(maxSampleTimeUs, st.sampleTimeUs)
+                bytesWritten += st.sampleSize
                 st.advance()
                 st.readNext()
-                // 2.0-dev2.19: mux fraction from the video
-                // timeline, so the bar keeps moving through the
-                // remux (the 87% freeze).
-                if (videoDurationUs > 0 && samples % 512 == 0) {
-                    val frac = (0.5f + 0.5f * (maxSampleTimeUs.toFloat() / videoDurationUs.toFloat())).coerceIn(0.5f, 1f)
+                // 2.0-dev2.26: mux fraction from bytes written,
+                // not the video timeline. The timeline ratio
+                // (maxSampleTimeUs / KEY_DURATION) stayed at ~0
+                // on the phone — the concatenated .ts reports a
+                // KEY_DURATION far larger than the sample
+                // timestamps span, so the % never moved (JS
+                // counted ~70s stuck at 0%). Bytes are the mux's
+                // real work: every sample written adds its
+                // payload, and the total input bytes are known,
+                // so the % climbs steadily and reaches the high
+                // 90s before the final 100%.
+                if (totalInputBytes > 0 && samples % 512 == 0) {
+                    val frac = (0.5f + 0.5f * (bytesWritten.toFloat() / totalInputBytes.toFloat())).coerceIn(0.5f, 1f)
                     if (frac - lastProgressSent >= 0.02f) {
                         lastProgressSent = frac
                         onRemuxProgress?.invoke(frac)
