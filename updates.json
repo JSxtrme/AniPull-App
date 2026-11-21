@@ -69,17 +69,14 @@
     ]
   },
   "dev": {
-    "versionCode": 85,
-    "versionName": "2.0-dev2.24",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.24/anipull-2.0-dev2.24.apk",
-    "sha256": "a15fa8c0f9cac583aeaae0809b64e2950053a63274228cab2d631b83ff100d47",
+    "versionCode": 86,
+    "versionName": "2.0-dev2.25",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.25/anipull-2.0-dev2.25.apk",
+    "sha256": "823a3746693ae1a367dfa575d749beeccc65756fa3e1923f65eec4411c591993",
     "features": [],
     "fixes": [
-      "Tapping a failed download now opens a sheet that says what went wrong, what to do about it, and that your downloaded progress is safe \u2014 with Resume and Delete right there.",
-      "Downloads that were running when the app closed now say they're resuming from the progress you already have, instead of looking like they started over.",
-      "The download status now shows the segment count and an ETA, so a long download reads as moving.",
-      "The 'Download complete' notification now shows the episode poster, and tapping it opens the finished episode.",
-      "Completed downloads are grouped by title, and each title has a 'Delete all' that asks first and shows how many episodes it will remove."
+      "Seeking no longer kills the subtitles \u2014 the silence gaps in the subtitle track now hold a single space instead of being truly empty, so VLC always lands on a real sample when you skip or tap the timeline. The first line still starts at the right time and the silences stay silent.",
+      "The finish no longer sits on one static \"Assembling file\u2026\" label for ~25\u201330 seconds \u2014 it now shows the mux percentage as it goes (\"Assembling file\u2026 45%\"), so a long finish reads as moving instead of stuck."
     ]
   }
 }
