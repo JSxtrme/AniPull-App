@@ -69,14 +69,13 @@
     ]
   },
   "dev": {
-    "versionCode": 86,
-    "versionName": "2.0-dev2.25",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.25/anipull-2.0-dev2.25.apk",
-    "sha256": "823a3746693ae1a367dfa575d749beeccc65756fa3e1923f65eec4411c591993",
+    "versionCode": 87,
+    "versionName": "2.0-dev2.26",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.26/anipull-2.0-dev2.26.apk",
+    "sha256": "81f701c56bf4f1bd71d9f90e7a5bf9415b6b16f9125deebea61f838a0ca074da",
     "features": [],
     "fixes": [
-      "Seeking no longer kills the subtitles \u2014 the silence gaps in the subtitle track now hold a single space instead of being truly empty, so VLC always lands on a real sample when you skip or tap the timeline. The first line still starts at the right time and the silences stay silent.",
-      "The finish no longer sits on one static \"Assembling file\u2026\" label for ~25\u201330 seconds \u2014 it now shows the mux percentage as it goes (\"Assembling file\u2026 45%\"), so a long finish reads as moving instead of stuck."
+      "The \"Assembling file\u2026\" percentage actually moves now \u2014 it was stuck at 0% because it was measured from the video timeline, and the concatenated file reports a duration far larger than the samples span. It's now measured from the bytes actually written, so it climbs steadily to the high 90s instead of sitting at 0% for over a minute."
     ]
   }
 }
