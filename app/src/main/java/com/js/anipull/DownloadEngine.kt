@@ -13,6 +13,7 @@ import androidx.core.content.FileProvider
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,6 +27,7 @@ import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.math.roundToInt
 
 // 2.0-dev1.0 ENGINE — queue, jobs, persistence, DDL + HLS execution.
@@ -1476,6 +1478,10 @@ object DownloadEngine {
             reportPhase(id, "Assembling file…")
             return
         }
+        // Leaving the mux (inject / publish): the mux % ticker
+        // is done — the next label ("Adding subtitles…",
+        // "Almost there…") takes over.
+        if (phase != HlsPhase.REMUXING) muxStates.remove(id)
         val label = when (phase) {
             HlsPhase.REMUXING -> when {
                 !detail.isNullOrBlank() -> "Combining parts… $detail"
@@ -1485,6 +1491,69 @@ object DownloadEngine {
             else -> if (detail.isNullOrBlank()) phase.label else "${phase.label} $detail"
         }
         reportPhase(id, label)
+    }
+
+    // 2.0-dev2.27 — the mux % never sits still (JS 2026-11-21:
+    // "they should think there's actually something happening
+    // in the background, even if it lies about the actual
+    // progress"). The real % comes from bytes written (dev2.26),
+    // but a slow phone can still leave it unmoving for seconds.
+    // So the shown % is the max of the real % and a time floor
+    // that climbs steadily (~1.5%/s, capped at 90%) from when
+    // the mux starts, driven by a 1 s ticker. It never claims
+    // 100% — only the real finish (fraction 1.0) does that. The
+    // ticker runs only while a job is muxing and stops itself
+    // when none is. Mp4WebVtt (subtitles) is untouched.
+    private data class MuxProgressState(
+        val startMs: Long,
+        var realPct: Int = 0,
+        var shownPct: Int = 0,
+    )
+    private val muxStates = ConcurrentHashMap<String, MuxProgressState>()
+    private var muxTickerJob: Job? = null
+    private val muxTickerLock = Any()
+
+    private fun muxFloorPct(startMs: Long): Int {
+        val elapsedSec = (System.currentTimeMillis() - startMs) / 1000.0
+        // ~1.5%/s, capped at 90 — the floor never fakes near-done.
+        return minOf(90, (elapsedSec * 1.5).toInt())
+    }
+
+    private fun updateMuxLabel(id: String) {
+        val st = muxStates[id] ?: return
+        val job = _jobs.value.firstOrNull { it.id == id } ?: return
+        if (job.state == JobState.CANCELLED || job.state == JobState.FAILED || job.state == JobState.COMPLETED) {
+            muxStates.remove(id)
+            return
+        }
+        if (job.phaseLabel?.startsWith("Assembling file…") != true && st.shownPct == 0) return
+        // Monotonic: never go backward. Reaches 100 only via the real %.
+        val shown = maxOf(st.realPct, muxFloorPct(st.startMs), st.shownPct)
+        if (shown == st.shownPct) return
+        st.shownPct = shown
+        reportPhase(id, "Assembling file… $shown%")
+    }
+
+    private fun ensureMuxTicker() {
+        synchronized(muxTickerLock) {
+            if (muxTickerJob?.isActive == true) return
+            muxTickerJob = scope.launch {
+                while (true) {
+                    delay(1000)
+                    if (muxStates.isEmpty()) break
+                    for (id in muxStates.keys.toList()) {
+                        val job = _jobs.value.firstOrNull { it.id == id }
+                        if (job == null || job.state == JobState.CANCELLED || job.state == JobState.FAILED || job.state == JobState.COMPLETED || job.phaseLabel?.startsWith("Assembling file…") != true) {
+                            muxStates.remove(id)
+                            continue
+                        }
+                        updateMuxLabel(id)
+                    }
+                    if (muxStates.isEmpty()) break
+                }
+                synchronized(muxTickerLock) { muxTickerJob = null }
+            }
+        }
     }
 
     // 2.0-dev2.22 — finishing stage: the download is done, so the
@@ -1503,13 +1572,26 @@ object DownloadEngine {
     // "Assembling file… 45%".
     private fun reportRemuxProgress(id: String, fraction: Float) {
         val job = _jobs.value.firstOrNull { it.id == id } ?: return
-        if (job.state == JobState.CANCELLED || job.state == JobState.FAILED || job.state == JobState.COMPLETED) return
+        if (job.state == JobState.CANCELLED || job.state == JobState.FAILED || job.state == JobState.COMPLETED) {
+            muxStates.remove(id)
+            return
+        }
         val total = job.totalBytes
         if (total <= 0) return
         reportProgress(id, total, total, 0.0)
         if (fraction >= 0.5f) {
             val muxPct = ((fraction - 0.5f) / 0.5f * 100).roundToInt().coerceIn(0, 100)
-            reportPhase(id, "Assembling file… $muxPct%")
+            val st = muxStates.getOrPut(id) { MuxProgressState(System.currentTimeMillis()) }
+            st.realPct = maxOf(st.realPct, muxPct)
+            if (muxPct >= 100) {
+                // Real finish: show 100% and clean up.
+                st.shownPct = 100
+                reportPhase(id, "Assembling file… 100%")
+                muxStates.remove(id)
+                return
+            }
+            updateMuxLabel(id)
+            ensureMuxTicker()
         }
     }
 
