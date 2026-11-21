@@ -69,13 +69,13 @@
     ]
   },
   "dev": {
-    "versionCode": 88,
-    "versionName": "2.0-dev2.27",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.27/anipull-2.0-dev2.27.apk",
-    "sha256": "1f89c873545d1494bd9daae3fb1cb366fd33d54b10add4c7df62ff12a21dc31b",
+    "versionCode": 89,
+    "versionName": "2.0-dev2.28",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.28/anipull-2.0-dev2.28.apk",
+    "sha256": "5d915299893da22823843e302389ef39cd4c44ccda8c0434dea3bb612f438e07",
     "features": [],
     "fixes": [
-      "The \"Assembling file\u2026\" percentage now never sits still \u2014 even if the real progress stalls for a few seconds, it keeps creeping up steadily (about 1\u20132% a second) so the finish always looks like it's working. It never fakes being done: it stops at 90% on its own and only shows 100% when the file is actually finished."
+      "The \"Assembling file\u2026\" percentage now adapts to any download length instead of assuming a fixed time \u2014 short downloads follow the real progress exactly, and long ones get a gentle nudge only when the real progress stalls, never racing ahead. It still never fakes being done: only the real finish shows 100%."
     ]
   }
 }
