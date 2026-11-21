@@ -69,13 +69,13 @@
     ]
   },
   "dev": {
-    "versionCode": 87,
-    "versionName": "2.0-dev2.26",
-    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.26/anipull-2.0-dev2.26.apk",
-    "sha256": "81f701c56bf4f1bd71d9f90e7a5bf9415b6b16f9125deebea61f838a0ca074da",
+    "versionCode": 88,
+    "versionName": "2.0-dev2.27",
+    "apkUrl": "https://github.com/JSxtrme/AniPull-App/releases/download/2.0-dev2.27/anipull-2.0-dev2.27.apk",
+    "sha256": "1f89c873545d1494bd9daae3fb1cb366fd33d54b10add4c7df62ff12a21dc31b",
     "features": [],
     "fixes": [
-      "The \"Assembling file\u2026\" percentage actually moves now \u2014 it was stuck at 0% because it was measured from the video timeline, and the concatenated file reports a duration far larger than the samples span. It's now measured from the bytes actually written, so it climbs steadily to the high 90s instead of sitting at 0% for over a minute."
+      "The \"Assembling file\u2026\" percentage now never sits still \u2014 even if the real progress stalls for a few seconds, it keeps creeping up steadily (about 1\u20132% a second) so the finish always looks like it's working. It never fakes being done: it stops at 90% on its own and only shows 100% when the file is actually finished."
     ]
   }
 }
