@@ -1493,31 +1493,33 @@ object DownloadEngine {
         reportPhase(id, label)
     }
 
-    // 2.0-dev2.27 — the mux % never sits still (JS 2026-11-21:
-    // "they should think there's actually something happening
-    // in the background, even if it lies about the actual
-    // progress"). The real % comes from bytes written (dev2.26),
-    // but a slow phone can still leave it unmoving for seconds.
-    // So the shown % is the max of the real % and a time floor
-    // that climbs steadily (~1.5%/s, capped at 90%) from when
-    // the mux starts, driven by a 1 s ticker. It never claims
-    // 100% — only the real finish (fraction 1.0) does that. The
+    // 2.0-dev2.28 — the mux % never sits still, and it does NOT
+    // assume a fixed duration (JS 2026-11-21: "did you made it
+    // go up to 90 by just keeping 70 sec in mind? what if some
+    // takes less?"). The dev2.27 floor climbed ~1.5%/s to 90%,
+    // tuned for the ~70 s Death Note mux. That is wrong in
+    // general: a shorter mux finishes before the floor matters
+    // (the real % is faster and wins), but a much longer mux
+    // would hit the 90 cap and sit there. So the floor is now
+    // a stall nudge, not a clock: the shown % follows the real
+    // bytes-based % (dev2.26), and only when the real % has not
+    // advanced in the last 2 s does the 1 s ticker nudge the
+    // shown % up by 1 — capped at 90, and never more than 15
+    // ahead of the real %. It adapts to any mux length: fast
+    // muxes never see the nudge, slow ones get smoothed, and it
+    // can never race to 90 while the real work is far behind.
+    // Only the real finish (fraction 1.0) shows 100%. The
     // ticker runs only while a job is muxing and stops itself
     // when none is. Mp4WebVtt (subtitles) is untouched.
     private data class MuxProgressState(
         val startMs: Long,
         var realPct: Int = 0,
         var shownPct: Int = 0,
+        var lastRealAdvanceMs: Long = 0L,
     )
     private val muxStates = ConcurrentHashMap<String, MuxProgressState>()
     private var muxTickerJob: Job? = null
     private val muxTickerLock = Any()
-
-    private fun muxFloorPct(startMs: Long): Int {
-        val elapsedSec = (System.currentTimeMillis() - startMs) / 1000.0
-        // ~1.5%/s, capped at 90 — the floor never fakes near-done.
-        return minOf(90, (elapsedSec * 1.5).toInt())
-    }
 
     private fun updateMuxLabel(id: String) {
         val st = muxStates[id] ?: return
@@ -1528,7 +1530,7 @@ object DownloadEngine {
         }
         if (job.phaseLabel?.startsWith("Assembling file…") != true && st.shownPct == 0) return
         // Monotonic: never go backward. Reaches 100 only via the real %.
-        val shown = maxOf(st.realPct, muxFloorPct(st.startMs), st.shownPct)
+        val shown = maxOf(st.realPct, st.shownPct)
         if (shown == st.shownPct) return
         st.shownPct = shown
         reportPhase(id, "Assembling file… $shown%")
@@ -1547,7 +1549,21 @@ object DownloadEngine {
                             muxStates.remove(id)
                             continue
                         }
-                        updateMuxLabel(id)
+                        val st = muxStates[id] ?: continue
+                        val now = System.currentTimeMillis()
+                        // Stall nudge: the real % has not advanced
+                        // in 2 s, so creep the shown % up by 1.
+                        // Bounded: never above 90, never more than
+                        // 15 ahead of the real %.
+                        if (now - st.lastRealAdvanceMs >= 2000) {
+                            val nudged = minOf(90, st.realPct + 15, st.shownPct + 1)
+                            if (nudged > st.shownPct) {
+                                st.shownPct = nudged
+                                reportPhase(id, "Assembling file… $nudged%")
+                            }
+                        } else {
+                            updateMuxLabel(id)
+                        }
                     }
                     if (muxStates.isEmpty()) break
                 }
@@ -1581,8 +1597,12 @@ object DownloadEngine {
         reportProgress(id, total, total, 0.0)
         if (fraction >= 0.5f) {
             val muxPct = ((fraction - 0.5f) / 0.5f * 100).roundToInt().coerceIn(0, 100)
-            val st = muxStates.getOrPut(id) { MuxProgressState(System.currentTimeMillis()) }
-            st.realPct = maxOf(st.realPct, muxPct)
+            val now = System.currentTimeMillis()
+            val st = muxStates.getOrPut(id) { MuxProgressState(now, lastRealAdvanceMs = now) }
+            if (muxPct > st.realPct) {
+                st.realPct = muxPct
+                st.lastRealAdvanceMs = now
+            }
             if (muxPct >= 100) {
                 // Real finish: show 100% and clean up.
                 st.shownPct = 100
